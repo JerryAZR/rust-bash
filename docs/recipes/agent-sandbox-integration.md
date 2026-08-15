@@ -245,6 +245,45 @@ On Windows, `w.mode` comes from an optimistic mapping (`0o755` normally,
 `0o555` when the read-only attribute is set) — treat it as advisory; there
 are no Unix permission bits to apply.
 
+## Standalone overlay use and per-call shells
+
+`OverlayFs` is a plain `VirtualFs` implementation, not tied to a bash
+session — the shell is just one client of it. Two patterns fall out of that:
+
+**Harness-owned read/write tools.** Hold the `Arc<OverlayFs>` and use the
+`VirtualFs` trait directly (`read_file`, `write_file`, `readdir`, `stat`,
+`remove_file`, ...) for the agent's file tools — no shell involved. Writes
+made this way land in the upper layer exactly like sandbox writes: they are
+visible to subsequent `exec()` calls, appear in `diff()`, and are dropped by
+`sync()` once applied to disk. `RustBash` also exposes the same operations
+as convenience methods (`shell.read_file(path)`, `shell.write_file(...)`)
+for when the harness prefers going through the shell instance.
+
+**Fresh shell per tool call, shared filesystem.** Shell state (environment,
+exported variables, functions, cwd) persists across `exec()` calls by
+design. For a "clean environment every call" policy, rebuild the shell per
+call over the *same* overlay — the filesystem state survives the swap
+because the harness owns it:
+
+```rust
+fn exec_clean(overlay: &Arc<OverlayFs>, cwd: &str, script: &str)
+    -> rust_bash::Result<rust_bash::ExecResult>
+{
+    let mut shell = RustBashBuilder::new()
+        .fs(overlay.clone())
+        .cwd(cwd)
+        .build()?;          // fresh env, fresh functions, reset counters
+    shell.exec(script)
+}
+```
+
+Recreating the shell is cheap (construction is lazy; nothing is scanned),
+and the overlay keeps pending writes, deletions, and `diff()`/`sync()`
+state across the swap. The trade-off is losing intentional cross-call state
+(env vars the agent exports, defined functions, `cd` persistence) — if some
+calls need a persistent session, keep a long-lived shell alongside the
+per-call ones; both share the same overlay.
+
 ## Complete harness loop
 
 ```rust

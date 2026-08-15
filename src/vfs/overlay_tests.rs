@@ -1100,3 +1100,61 @@ fn reset_clears_pending_writes_and_deletions() {
             .any(|w| w.path == Path::new("/again.txt"))
     );
 }
+
+// -----------------------------------------------------------------------
+// Standalone use: shared overlay across shells and direct VFS access
+// -----------------------------------------------------------------------
+
+#[test]
+fn overlay_usable_without_a_shell_and_across_shell_recreations() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use crate::RustBashBuilder;
+
+    let tmp = setup_lower();
+    let overlay = Arc::new(make_overlay(tmp.path()));
+
+    // 1. Direct use with no shell at all — the harness's write tool writes
+    //    through the VirtualFs trait into the upper layer.
+    VirtualFs::write_file(&*overlay, Path::new("/notes.md"), b"from harness tool").unwrap();
+    assert!(
+        overlay
+            .diff()
+            .writes
+            .iter()
+            .any(|w| w.path == Path::new("/notes.md"))
+    );
+
+    // 2. A shell built over the same overlay sees the harness's write.
+    let mut shell1 = RustBashBuilder::new()
+        .fs(overlay.clone())
+        .cwd("/")
+        .env(HashMap::from([("SESSION".to_string(), "one".to_string())]))
+        .build()
+        .unwrap();
+    let r = shell1
+        .exec("cat /notes.md; cd /src; export LEAKED=1")
+        .unwrap();
+    assert_eq!(r.stdout, "from harness tool");
+
+    // 3. Drop the shell and build a fresh one: clean env, reset cwd —
+    //    but the overlay (harness write + sandbox change) persists.
+    drop(shell1);
+    let mut shell2 = RustBashBuilder::new()
+        .fs(overlay.clone())
+        .cwd("/")
+        .build()
+        .unwrap();
+    let r = shell2
+        .exec("echo $LEAKED; pwd; echo sandbox >> /notes.md; cat /notes.md")
+        .unwrap();
+    assert_eq!(r.stdout, "\n/\nfrom harness toolsandbox\n");
+    let d = overlay.diff();
+    let notes = d
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/notes.md"))
+        .unwrap();
+    assert_eq!(notes.content, b"from harness toolsandbox\n");
+}
