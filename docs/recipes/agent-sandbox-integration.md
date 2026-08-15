@@ -167,6 +167,32 @@ for p in &d.deletions {
   session; recreate the shell/overlay per session (or per agent turn) if you
   want per-turn diffs.
 
+### Persistence across tool calls
+
+The shell's state — including the overlay's upper layer — persists across
+`exec()` calls on the same `RustBash` instance. A file written by tool call
+#1 (unsynced, still only in memory) is readable by tool call #2, and remains
+in `diff()` as a pending write until you apply or discard it:
+
+```rust
+shell.exec("sort data.txt > /tmp/sorted.txt")?;   // tool call 1
+let r = shell.exec("head -3 /tmp/sorted.txt")?;   // tool call 2: works
+```
+
+The boundary is the **process**, not the `exec()` call:
+
+- A long-lived harness process (one `RustBash` for the session, the way the
+  MCP server mode works) gets this for free.
+- A harness that spawns a fresh process per tool call gets a fresh, empty
+  overlay each time — unsynced writes from the previous call are gone.
+  Either keep the harness process alive, apply diffs between calls, or
+  recreate state from disk.
+
+Note that `diff()` accumulates for the lifetime of the overlay: if you want
+per-turn change sets, snapshot the writes you already handled (or recreate
+the shell per turn); if you want per-session "everything pending", call
+`diff()` once at the end.
+
 ### Applying or prompting
 
 Map VFS paths back to host paths by stripping the leading `/` and joining

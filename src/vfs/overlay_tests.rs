@@ -902,3 +902,36 @@ fn stat_resolves_dotdot_segments() {
     let content = ov.read_file(Path::new("/./data/../README.md")).unwrap();
     assert_eq!(content, b"# Hello");
 }
+
+#[test]
+fn upper_layer_writes_persist_across_exec_calls() {
+    use crate::RustBashBuilder;
+    use std::sync::Arc;
+
+    let tmp = setup_lower();
+    let overlay = Arc::new(make_overlay(tmp.path()));
+    let mut shell = RustBashBuilder::new()
+        .fs(overlay.clone())
+        .cwd("/")
+        .build()
+        .unwrap();
+
+    // First exec writes a scratch file; it is NOT applied to disk.
+    let r1 = shell
+        .exec("echo 'intermediate data' > /tmp/result.txt")
+        .unwrap();
+    assert_eq!(r1.exit_code, 0);
+    assert!(!tmp.path().join("tmp/result.txt").exists());
+
+    // Second exec (a later "tool call") reads it back through the overlay.
+    let r2 = shell.exec("cat /tmp/result.txt | tr a-z A-Z").unwrap();
+    assert_eq!(r2.stdout, "INTERMEDIATE DATA\n");
+
+    // And it is still reported by diff() as a pending write.
+    let d = overlay.diff();
+    assert!(
+        d.writes
+            .iter()
+            .any(|w| w.path == Path::new("/tmp/result.txt"))
+    );
+}
