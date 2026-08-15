@@ -3,6 +3,24 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    #[cfg(windows)]
+    fn symlink_available() -> bool {
+        use std::sync::OnceLock;
+        static AVAIL: OnceLock<bool> = OnceLock::new();
+        *AVAIL.get_or_init(|| {
+            let tmp = std::env::temp_dir().join("rust_bash_symlink_probe");
+            let _ = std::fs::remove_file(&tmp);
+            let ok = std::os::windows::fs::symlink_file("target", &tmp).is_ok();
+            let _ = std::fs::remove_file(&tmp);
+            ok
+        })
+    }
+
+    #[cfg(unix)]
+    fn symlink_available() -> bool {
+        true
+    }
+
     use crate::platform::SystemTime;
 
     use tempfile::TempDir;
@@ -136,6 +154,11 @@ mod tests {
 
     #[test]
     fn symlink_and_readlink() {
+        if !symlink_available() {
+            eprintln!("SKIP: symlinks unavailable on this Windows setup");
+            return;
+        }
+
         let (_tmp, fs) = rooted_fs();
         fs.write_file(Path::new("/target.txt"), b"content").unwrap();
         fs.symlink(Path::new("/target.txt"), Path::new("/link.txt"))
@@ -171,6 +194,11 @@ mod tests {
 
     #[test]
     fn lstat_on_symlink_returns_symlink_type() {
+        if !symlink_available() {
+            eprintln!("SKIP: symlinks unavailable on this Windows setup");
+            return;
+        }
+
         let (_tmp, fs) = rooted_fs();
         fs.write_file(Path::new("/real.txt"), b"data").unwrap();
         fs.symlink(Path::new("/real.txt"), Path::new("/sym.txt"))
@@ -218,6 +246,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_escape_rejected() {
         let (tmp, fs) = rooted_fs();
@@ -304,6 +333,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn glob_does_not_escape_root_via_symlink() {
         let (tmp, fs) = rooted_fs();
@@ -448,6 +478,11 @@ mod tests {
 
     #[test]
     fn readdir_reports_node_types() {
+        if !symlink_available() {
+            eprintln!("SKIP: symlinks unavailable on this Windows setup");
+            return;
+        }
+
         let (_tmp, fs) = rooted_fs();
         fs.write_file(Path::new("/file.txt"), b"").unwrap();
         fs.mkdir(Path::new("/dir")).unwrap();
@@ -465,6 +500,7 @@ mod tests {
     // Symlink escape via read_file / stat (not just canonicalize)
     // ======================================================================
 
+    #[cfg(unix)]
     #[test]
     fn read_file_through_symlink_escape_rejected() {
         let (tmp, fs) = rooted_fs();
@@ -478,6 +514,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn stat_through_symlink_escape_rejected() {
         let (tmp, fs) = rooted_fs();
@@ -491,6 +528,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn relative_symlink_escape_rejected() {
         let (tmp, fs) = rooted_fs();

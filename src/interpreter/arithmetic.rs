@@ -1515,6 +1515,7 @@ mod tests {
     use super::*;
     use crate::interpreter::{
         ExecutionCounters, ExecutionLimits, InterpreterState, ShellOpts, ShoptOpts,
+        new_unresolved_record,
     };
     use crate::network::NetworkPolicy;
     use crate::vfs::InMemoryFs;
@@ -1582,6 +1583,8 @@ mod tests {
             pending_cmdsub_stderr: String::new(),
             pending_test_stderr: String::new(),
             script_source: None,
+            unresolved_record: new_unresolved_record(),
+            abort_on_unresolved: false,
             fatal_expansion_error: false,
             last_command_had_error: false,
             last_status_immune_to_errexit: false,

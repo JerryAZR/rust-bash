@@ -26,9 +26,15 @@ describe('native binary resolution', () => {
     ).toEqual(['../native/rust-bash-native.darwin-arm64.node']);
   });
 
-  it('returns no candidates for unsupported runtimes', () => {
+  it('resolves the windows x64 packaged addon', () => {
     expect(
       getNativeBinaryCandidates({ platform: 'win32', arch: 'x64' }),
+    ).toEqual(['../native/rust-bash-native.win32-x64-msvc.node']);
+  });
+
+  it('returns no candidates for unsupported runtimes', () => {
+    expect(
+      getNativeBinaryCandidates({ platform: 'win32', arch: 'arm64' }),
     ).toEqual([]);
   });
 });

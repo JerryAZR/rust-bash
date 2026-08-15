@@ -1,0 +1,17 @@
+# Normalize text files to LF in the repository and on checkout so behavior is
+# identical on every platform (test fixtures and expected outputs are recorded
+# with LF; CRLF checkouts corrupt them).
+* text=auto eol=lf
+
+# Windows-specific files keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets — never normalize
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.wasm binary
+*.gz binary

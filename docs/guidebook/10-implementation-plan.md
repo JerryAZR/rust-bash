@@ -412,6 +412,8 @@ Add lazy file materialization to `InMemoryFs`. Files can be registered with a ca
 
 Expose brush-parser AST via a public `parse()` API. Build a `TransformPipeline` that chains visitor plugins over the AST and serializes back to bash script text. Built-in plugins: `CommandCollectorPlugin` (extract unique command names from a script — useful for pre-flight permission checks), `TeePlugin` (inject `tee` to capture per-command stdout). Custom plugin trait for host-defined transforms. Enables script instrumentation without execution.
 
+**Delivered (partial):** `RustBash::analyze_commands(script)` provides the command-collector half — a static AST walk (`src/interpreter/analysis.rs`) that returns `CommandAnalysis { commands, unresolved }`, flagging names that would fail command resolution without executing anything. Execution-time counterpart: `ExecResult::unresolved_commands` records command-not-found misses (with opt-in `abort_on_unresolved_commands` builder mode to stop the script at the first miss). The generic transform/serialize pipeline remains future work.
+
 ### M9.4 — High-Level Convenience API
 
 Add high-level convenience features to the `Bash` class (TypeScript) and `RustBashBuilder` (Rust): command filtering, per-exec env/cwd isolation, logger interface, virtual process info, safe argument passing, script normalization. These enrich the existing API rather than introducing a separate `Sandbox` class.
@@ -485,6 +487,11 @@ Add VFS trait methods for better compatibility with real-world shell scripts:
 
 - **`utimes(path, atime, mtime)`** — set file access and modification times. Required for `touch -t` and scripts that rely on file timestamps for logic (e.g., Makefiles, caching). just-bash's `IFileSystem` includes this.
 - **`/dev/stdin`, `/dev/stdout`, `/dev/stderr`** — special-case these paths in I/O handling. Currently only `/dev/null` is handled (M6.10 mentions these but they should also be part of the VFS layer).
+
+**Delivered ahead of schedule:**
+
+- ✅ **Windows platform support** — default features (including `native-fs` backends) compile and the full test suite passes on Windows. VFS paths are Unix-style by construction (`vfs_join`/`vfs_normalize` helpers replace `PathBuf::push`/`join` and `Path::components()`, which emit/split on `\` on Windows); `Path::is_absolute()` on VFS paths replaced with `vfs_path_is_absolute()`; Windows file modes map optimistically (`0o755`, read-only attribute → `0o555`); `ReadWriteFs` containment preserves drive/UNC prefixes; CLI `--files` handles drive-letter paths; fixtures normalize CRLF checkouts (`.gitattributes` forces LF).
+- ✅ **`OverlayFs::diff()`** — exports the upper-layer write set (`OverlayWrite`: path, node type, content, mode) and lower-layer deletions (top-most whiteouts) so hosts can apply sandboxed writes to a real project directory (or prompt) after execution. See Chapter 5.
 
 ### M9.11 — Agent Workflow Integration Tests
 

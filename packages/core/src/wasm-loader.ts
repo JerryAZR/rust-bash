@@ -20,11 +20,21 @@ interface WasmBashModule {
 }
 
 interface WasmBashInstance {
-  exec(command: string): { stdout: string; stderr: string; exitCode: number };
+  exec(command: string): {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    unresolvedCommands?: string[];
+  };
   exec_with_options(
     command: string,
     options: Record<string, unknown>,
-  ): { stdout: string; stderr: string; exitCode: number };
+  ): {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    unresolvedCommands?: string[];
+  };
   write_file(path: string, content: string): void;
   read_file(path: string): string;
   mkdir(path: string, recursive: boolean): void;
@@ -141,6 +151,7 @@ class WasmBackend implements BashBackend {
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode,
+      unresolvedCommands: result.unresolvedCommands ?? [],
     };
   }
 
@@ -156,6 +167,7 @@ class WasmBackend implements BashBackend {
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode,
+      unresolvedCommands: result.unresolvedCommands ?? [],
     };
   }
 

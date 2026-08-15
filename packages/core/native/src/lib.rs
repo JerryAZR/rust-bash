@@ -75,6 +75,7 @@ struct ExecResultJson {
     stdout: String,
     stderr: String,
     exit_code: i32,
+    unresolved_commands: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -202,6 +203,7 @@ impl NativeBash {
             stdout: result.stdout,
             stderr: result.stderr,
             exit_code: result.exit_code,
+            unresolved_commands: result.unresolved_commands,
         };
 
         serde_json::to_string(&json).map_err(|e| Error::from_reason(e.to_string()))
@@ -227,6 +229,7 @@ impl NativeBash {
             stdout: result.stdout,
             stderr: result.stderr,
             exit_code: result.exit_code,
+            unresolved_commands: result.unresolved_commands,
         };
 
         serde_json::to_string(&json).map_err(|e| Error::from_reason(e.to_string()))

@@ -41,6 +41,8 @@ RustBashBuilder::new()
     .network_policy(policy)              // Configure network access
     .fs(Arc<dyn VirtualFs>)              // Use a custom filesystem backend
     .command(Box::new(custom_cmd))       // Register a custom command
+    .abort_on_unresolved_commands(bool)  // Stop the script at the first unknown command
+                                         // (default false: bash-fidelity continue, exit 127)
     .build()                             // Returns Result<RustBash, RustBashError>
 ```
 
@@ -51,8 +53,34 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub unresolved_commands: Vec<String>,
 }
 ```
+
+`unresolved_commands` lists command names that failed resolution ("command not
+found"), deduplicated in first-encountered order. This lets agent harnesses
+detect that the sandbox cannot run a script and rerun it natively on the host.
+By default execution continues after a miss (bash fidelity); with
+`abort_on_unresolved_commands(true)` the first miss stops the script and the
+result carries the output accumulated so far. The field is surfaced in the CLI
+`--json` output (`unresolved_commands`), the WASM binding
+(`unresolvedCommands`), and the MCP `bash` tool result text.
+
+### Pre-Flight Command Analysis
+
+```rust
+let analysis = shell.analyze_commands("git status && kubectl get pods").unwrap();
+assert_eq!(analysis.unresolved, vec!["git", "kubectl"]);
+```
+
+`RustBash::analyze_commands(&self, script) -> Result<CommandAnalysis, RustBashError>`
+parses the script and statically walks the AST collecting every literal
+simple-command name (including names inside function bodies, subshells, and
+compound-command bodies) without executing anything. `CommandAnalysis::commands`
+holds all collected names; `CommandAnalysis::unresolved` filters out names that
+resolve: builtins, commands registered on the instance, and functions defined on
+the instance or within the script itself. Dynamic names (`eval "..."`,
+`$cmd status`) are not statically analyzable and are not reported.
 
 ## CLI Binary
 
@@ -76,7 +104,7 @@ rust-bash --env USER=agent --env HOME=/home/agent -c 'echo $USER'
 
 # JSON output for machine consumption
 rust-bash --json -c 'echo hello'
-# {"stdout":"hello\n","stderr":"","exit_code":0}
+# {"stdout":"hello\n","stderr":"","exit_code":0,"unresolved_commands":[]}
 
 # Interactive REPL (starts when no command/script/stdin is given)
 rust-bash
@@ -337,7 +365,7 @@ npm install rust-bash
 The package ships three layers:
 
 1. **TypeScript API** (`Bash` class, `defineCommand`, tool primitives) — the public interface
-2. **Native addons** (napi-rs) — bundled Linux/macOS x64 and arm64 binaries for Node.js
+2. **Native addons** (napi-rs) — bundled Linux/macOS x64/arm64 and Windows x64 binaries for Node.js
 3. **WASM backend** — browser and edge runtime support
 
 Backend detection is automatic on Node.js (matching bundled native binary first,

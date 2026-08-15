@@ -487,6 +487,14 @@ fn exec_result_to_js(result: &crate::interpreter::ExecResult) -> Result<JsValue,
         &JsValue::from_f64(f64::from(result.exit_code)),
     )
     .map_err(|e| JsError::new(&format!("{e:?}")))?;
+    let unresolved = Array::from_iter(
+        result
+            .unresolved_commands
+            .iter()
+            .map(|name| JsValue::from_str(name)),
+    );
+    Reflect::set(&obj, &"unresolvedCommands".into(), &unresolved.into())
+        .map_err(|e| JsError::new(&format!("{e:?}")))?;
     Ok(obj.into())
 }
 

@@ -104,9 +104,41 @@ When the interpreter encounters a command name, it resolves in this order:
 2. **Shell builtins** — `cd`, `export`, `exit`, `set`, `local`, `return`, etc. Handled directly by the interpreter.
 3. **User-defined functions** — stored in `InterpreterState.functions`.
 4. **Registered commands** — looked up in `InterpreterState.commands` HashMap.
-5. **"Command not found"** — stderr error, exit code 127.
+5. **"Command not found"** — stderr error, exit code 127. The miss is recorded (see below).
 
 External process execution is impossible by design — there is no fallback to `std::process::Command`.
+
+## Unknown-Command Reporting
+
+When a command name fails resolution, the interpreter keeps bash behavior exactly —
+`name: command not found` on stderr, exit code 127, and execution continues — but
+additionally records the miss so embedding hosts can detect "the sandbox can't run
+this" as structured data and rerun the script natively on the host.
+
+**Execution-time** (`ExecResult::unresolved_commands`): every miss is appended to a
+shared recorder (`Arc<Mutex<UnresolvedCommandRecord>>` on `InterpreterState`), so
+misses inside subshells, pipelines, function bodies, and exec callbacks (`xargs`,
+`find -exec`, `sh -c`) all funnel into the top-level `ExecResult`. Names are
+deduplicated in first-encountered order; the recorder is reset at the start of each
+`exec()` call. The list is exposed in the CLI `--json` output
+(`unresolved_commands`), the WASM binding (`unresolvedCommands`), and appended to
+the MCP `bash` tool result.
+
+**Abort mode** (opt-in): `RustBashBuilder::abort_on_unresolved_commands(true)` makes
+the first miss abort the whole script immediately. The abort signal lives on the
+shared record, so the interpreter unwinds from any nesting depth (loop guards in
+`walker.rs` check it alongside `should_exit`). The returned `ExecResult` carries
+the output accumulated so far plus the unresolved list. Default remains
+bash-fidelity continuation.
+
+**Parse-time** (`RustBash::analyze_commands`): a static AST walk
+(`src/interpreter/analysis.rs`) collects every literal simple-command name —
+including names inside function bodies, subshells, and compound-command bodies —
+without executing anything. `CommandAnalysis::unresolved` filters out names that
+resolve (builtins, registered commands, functions defined on the instance or in
+the script itself). Dynamically determined names (`eval "..."`, `$cmd status`,
+quoted or globbed names) cannot be analyzed statically and are simply not
+reported.
 
 ## `which` Command — PATH-Based Resolution
 

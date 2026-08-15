@@ -9,7 +9,7 @@ fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
     if path_str.starts_with('/') {
         PathBuf::from(path_str)
     } else {
-        PathBuf::from(cwd).join(path_str)
+        crate::vfs::vfs_resolve(cwd, path_str)
     }
 }
 
@@ -635,7 +635,7 @@ fn walk_find(
         entries.sort_by(|a, b| a.name.cmp(&b.name));
 
         for entry in entries {
-            let child_abs = abs_path.join(&entry.name);
+            let child_abs = crate::vfs::vfs_join(abs_path, &entry.name);
             let child_display = if display_path == "/" {
                 format!("/{}", entry.name)
             } else {

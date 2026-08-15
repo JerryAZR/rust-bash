@@ -392,7 +392,7 @@ pub fn execute_program_with_stdin(
     let mut result = ExecResult::default();
 
     for complete_command in &program.complete_commands {
-        if state.should_exit {
+        if state.should_exit || state.unresolved_abort_triggered() {
             break;
         }
         let r = execute_compound_list(complete_command, state, stdin)?;
@@ -426,7 +426,11 @@ fn execute_compound_list(
 
     let mut i = 0usize;
     while i < list.0.len() {
-        if state.should_exit || state.control_flow.is_some() || state.abort_command_list {
+        if state.should_exit
+            || state.control_flow.is_some()
+            || state.abort_command_list
+            || state.unresolved_abort_triggered()
+        {
             break;
         }
         let item = &list.0[i];
@@ -448,6 +452,7 @@ fn execute_compound_list(
                 stderr: background_result.stderr,
                 exit_code: 0,
                 stdout_bytes: None,
+                unresolved_commands: Vec::new(),
             })
         } else {
             execute_and_or_list(and_or_list, state, stdin)
@@ -585,13 +590,13 @@ fn execute_and_or_list(
     // Check errexit after the first pipeline if it's standalone (no chain)
     if !has_chain {
         check_errexit(state);
-        if state.should_exit {
+        if state.should_exit || state.unresolved_abort_triggered() {
             return Ok(result);
         }
     }
 
     for (idx, and_or) in aol.additional.iter().enumerate() {
-        if state.should_exit || state.control_flow.is_some() {
+        if state.should_exit || state.control_flow.is_some() || state.unresolved_abort_triggered() {
             break;
         }
         let (should_run, pipeline) = match and_or {
@@ -653,7 +658,7 @@ fn execute_pipeline(
     }
 
     for (idx, command) in pipeline.seq.iter().enumerate() {
-        if state.should_exit || state.control_flow.is_some() {
+        if state.should_exit || state.control_flow.is_some() || state.unresolved_abort_triggered() {
             break;
         }
         let is_last_stage = idx + 1 == pipeline.seq.len();
@@ -774,6 +779,7 @@ fn execute_pipeline(
         stderr: combined_stderr,
         exit_code,
         stdout_bytes: None,
+        unresolved_commands: Vec::new(),
     })
 }
 
@@ -2161,6 +2167,7 @@ fn execute_simple_command(
                     stderr: String::new(),
                     exit_code: 0,
                     stdout_bytes: None,
+                    unresolved_commands: Vec::new(),
                 })
             } else {
                 execute_exec_builtin(&args, &redirects, state, &effective_stdin)
@@ -2377,14 +2384,12 @@ fn pre_truncate_output_files(
                     write_or_append(state, &path, "", false)?;
                 }
             }
-            ast::IoRedirect::OutputAndError(word, append) => {
-                if !*append {
-                    let filename = expand_word_to_string_mut(word, state)?;
-                    if !filename.is_empty() {
-                        let path = resolve_path(&state.cwd, &filename);
-                        if !is_dev_null(&path) && !is_special_dev_path(&path) {
-                            write_or_append(state, &path, "", false)?;
-                        }
+            ast::IoRedirect::OutputAndError(word, append) if !*append => {
+                let filename = expand_word_to_string_mut(word, state)?;
+                if !filename.is_empty() {
+                    let path = resolve_path(&state.cwd, &filename);
+                    if !is_dev_null(&path) && !is_special_dev_path(&path) {
+                        write_or_append(state, &path, "", false)?;
                     }
                 }
             }
@@ -2605,7 +2610,7 @@ fn execute_for(
     state.loop_depth += 1;
     let mut iterations: usize = 0;
     for val in &values {
-        if state.should_exit {
+        if state.should_exit || state.unresolved_abort_triggered() {
             break;
         }
         iterations += 1;
@@ -2821,10 +2826,8 @@ fn raw_arithmetic_command_contains_invalid_hash(raw_command: &str) -> bool {
                 i += 2;
                 continue;
             }
-            '#' => {
-                if !is_base_literal_hash(&chars, i) {
-                    return true;
-                }
+            '#' if !is_base_literal_hash(&chars, i) => {
+                return true;
             }
             _ => {}
         }
@@ -2974,7 +2977,7 @@ fn execute_arithmetic_for(
 
     state.loop_depth += 1;
     loop {
-        if state.should_exit {
+        if state.should_exit || state.unresolved_abort_triggered() {
             break;
         }
         iterations += 1;
@@ -3052,7 +3055,7 @@ fn execute_while_until(
 
     state.loop_depth += 1;
     loop {
-        if state.should_exit {
+        if state.should_exit || state.unresolved_abort_triggered() {
             break;
         }
         iterations += 1;
@@ -3196,6 +3199,8 @@ fn execute_subshell(
         last_command_had_error: false,
         last_status_immune_to_errexit: false,
         script_source: None,
+        unresolved_record: Arc::clone(&state.unresolved_record),
+        abort_on_unresolved: state.abort_on_unresolved,
     };
 
     let result = execute_compound_list(list, &mut sub_state, stdin);
@@ -3283,6 +3288,8 @@ fn make_pipeline_stage_state(state: &mut InterpreterState) -> InterpreterState {
         last_command_had_error: false,
         last_status_immune_to_errexit: false,
         script_source: None,
+        unresolved_record: Arc::clone(&state.unresolved_record),
+        abort_on_unresolved: state.abort_on_unresolved,
     }
 }
 
@@ -3399,6 +3406,8 @@ pub(crate) fn make_exec_callback(
     let bash_pid = state.bash_pid;
     let parent_pid = state.parent_pid;
     let next_process_id = state.next_process_id;
+    let unresolved_record = Arc::clone(&state.unresolved_record);
+    let abort_on_unresolved = state.abort_on_unresolved;
 
     move |cmd_str: &str, env_override: Option<&HashMap<String, String>>| {
         let program = parse(cmd_str)?;
@@ -3491,6 +3500,8 @@ pub(crate) fn make_exec_callback(
             last_command_had_error: false,
             last_status_immune_to_errexit: false,
             script_source: None,
+            unresolved_record: Arc::clone(&unresolved_record),
+            abort_on_unresolved,
         };
         ensure_shell_internal_vars(&mut sub_state);
 
@@ -3619,6 +3630,7 @@ fn dispatch_command(
                 stderr: String::new(),
                 exit_code: 0,
                 stdout_bytes: None,
+                unresolved_commands: Vec::new(),
             });
         }
         // Check registered commands only when a shell function doesn't shadow them.
@@ -3632,6 +3644,7 @@ fn dispatch_command(
                 stderr: String::new(),
                 exit_code: 0,
                 stdout_bytes: None,
+                unresolved_commands: Vec::new(),
             });
         }
         // No meta or supports_help_flag == false → fall through to normal dispatch
@@ -3682,12 +3695,15 @@ fn dispatch_command(
         );
     }
 
-    // 7. Command not found
+    // 7. Command not found — record the miss so callers can detect it as
+    // structured data (and abort, when abort-on-unresolved mode is enabled).
+    state.record_unresolved_command(name);
     Ok(ExecResult {
         stdout: String::new(),
         stderr: format!("{name}: command not found\n"),
         exit_code: 127,
         stdout_bytes: None,
+        unresolved_commands: Vec::new(),
     })
 }
 
@@ -5098,6 +5114,8 @@ fn make_proc_sub_state(state: &mut InterpreterState) -> InterpreterState {
         last_command_had_error: false,
         last_status_immune_to_errexit: false,
         script_source: None,
+        unresolved_record: Arc::clone(&state.unresolved_record),
+        abort_on_unresolved: state.abort_on_unresolved,
     }
 }
 

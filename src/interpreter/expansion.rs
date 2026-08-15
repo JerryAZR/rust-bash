@@ -16,6 +16,7 @@ use brush_parser::word::{
     Parameter, ParameterExpr, ParameterTestType, SpecialParameter, SubstringMatchKind, WordPiece,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // ── Word expansion intermediate types ───────────────────────────────
 
@@ -594,6 +595,8 @@ fn execute_command_substitution(
         last_command_had_error: false,
         last_status_immune_to_errexit: false,
         script_source: None,
+        unresolved_record: Arc::clone(&state.unresolved_record),
+        abort_on_unresolved: state.abort_on_unresolved,
     };
 
     let result = execute_program(&program, &mut sub_state);
@@ -5131,7 +5134,7 @@ mod tests {
     use super::*;
     use crate::interpreter::{
         ExecutionCounters, ExecutionLimits, InterpreterState, ShellOpts, ShoptOpts, Variable,
-        VariableAttrs, VariableValue,
+        VariableAttrs, VariableValue, new_unresolved_record,
     };
     use crate::network::NetworkPolicy;
     use crate::vfs::InMemoryFs;
@@ -5209,6 +5212,8 @@ mod tests {
             last_command_had_error: false,
             last_status_immune_to_errexit: false,
             script_source: None,
+            unresolved_record: new_unresolved_record(),
+            abort_on_unresolved: false,
         }
     }
 

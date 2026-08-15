@@ -234,10 +234,16 @@ fn handle_tools_call(shell: &mut RustBash, params: Option<&Value>) -> Result<Val
                 Ok(result) => {
                     let stdout = truncate_output(&result.stdout);
                     let stderr = truncate_output(&result.stderr);
-                    let text = format!(
+                    let mut text = format!(
                         "stdout:\n{stdout}\nstderr:\n{stderr}\nexit_code: {}",
                         result.exit_code
                     );
+                    if !result.unresolved_commands.is_empty() {
+                        text.push_str(&format!(
+                            "\nunresolved_commands: {}",
+                            result.unresolved_commands.join(", ")
+                        ));
+                    }
                     let is_error = result.exit_code != 0;
                     Ok(json!({
                         "content": [{ "type": "text", "text": text }],

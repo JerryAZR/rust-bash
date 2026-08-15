@@ -138,6 +138,33 @@ let result = shell.exec("cat /src/main.rs").unwrap();
 shell.exec("echo modified > /src/main.rs").unwrap();
 ```
 
+#### Exporting the write set: `OverlayFs::diff()`
+
+The overlay already tracks exactly what a session changed — the upper layer
+holds every write, the whiteout set holds every deletion — so hosts never need
+to diff against disk. `diff()` exports that state:
+
+```rust
+let d = overlay.diff();
+// d.writes:     Vec<OverlayWrite> — path, node_type, content (bytes;
+//               symlink target for symlinks), mode — sorted by path
+// d.deletions:  Vec<PathBuf> — lower-layer paths removed, top-most
+//               whiteouts only, sorted by path
+```
+
+Semantics designed for the "apply inside the project, prompt outside" harness
+pattern:
+
+- A deleted-then-recreated path is reported as a write, not a deletion.
+- Removing an upper-only path (never on disk) appears in neither list.
+- `rm -rf dir` yields the single top-most path, not every child.
+- Subshell deep-clones get their own upper layer; mutations in the original
+  handle's layer (normal `exec()` calls) are what `diff()` reports.
+
+Keep a second `Arc<OverlayFs>` handle when mounting through `MountableFs` —
+`diff()` is called on the host's handle, while the interpreter operates on the
+same underlying instance.
+
 ### ReadWriteFs (Passthrough)
 
 Thin wrapper over `std::fs` implementing the `VirtualFs` trait. For trusted execution where you want real filesystem access.
@@ -263,6 +290,34 @@ When `RustBashBuilder::build()` creates a shell instance, it populates the VFS w
 **Command stubs**: Every registered command and shell builtin gets a stub file in `/bin/` containing `#!/bin/bash\n# built-in: <name>`. This makes `ls /bin` list available commands, `test -f /bin/grep` return true, and PATH-based resolution work for the `which` command.
 
 **Non-clobbering**: `setup_default_filesystem()` only creates directories and files that don't already exist. User-seeded files from `.files()` and caller-provided VFS content are never overwritten.
+
+## Path Handling and Windows Support
+
+VFS paths are Unix-style by construction, on every platform:
+
+- **Only `/` separates components.** `\` is an ordinary filename character
+  everywhere, exactly as on Linux — `'a\b'` is a file named `a\b`. All
+  VFS-internal path construction goes through the crate-internal
+  `vfs_join`/`vfs_append`/`vfs_resolve`/`vfs_normalize` helpers
+  (`src/vfs/mod.rs`) instead of `PathBuf::push`/`join`, which insert the host
+  separator (`\` on Windows). Never use `Path::components()` on a VFS path —
+  it splits on `\` on Windows. Likewise `Path::is_absolute()` returns `false`
+  for `/`-rooted paths on Windows; use `vfs_path_is_absolute()`.
+- **Host paths are host-style.** `OverlayFs`/`ReadWriteFs` convert at the
+  boundary (`lower_path()` strips the leading `/` and joins onto the host
+  root; `ReadWriteFs::logical_normalize` preserves Windows drive/UNC
+  prefixes).
+- **Windows file modes are optimistic.** Windows has no Unix mode bits, so
+  metadata maps to `0o755` for everything, `0o555` when the read-only
+  attribute is set (`unix_mode_from_metadata`). This mirrors MSYS/Git Bash
+  `noacl` semantics; falsely-permissive modes are safe because VFS operations
+  are never gated on mode bits. `chmod` on `ReadWriteFs` approximates with the
+  read-only attribute; `symlink` uses `symlink_file`/`symlink_dir` (may
+  require Developer Mode or admin on Windows).
+- **Default features build and test on Windows.** The full suite (including
+  `native-fs` backends) is expected green on Windows; a few Unix-only tests
+  (symlink escapes to `/etc`, exact mode-bit preservation) are `#[cfg(unix)]`,
+  and symlink-creating tests skip when the OS denies symlink creation.
 
 ## Design Decisions
 

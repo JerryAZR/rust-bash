@@ -1,8 +1,9 @@
 /**
  * Resolve the packaged native addon filename for the current Node runtime.
  *
- * The main npm package bundles native binaries for the supported Linux/macOS
- * targets and the loader selects the matching file at runtime.
+ * The main npm package bundles native binaries for the supported
+ * Linux/macOS/Windows targets and the loader selects the matching file at
+ * runtime.
  */
 
 export interface NativeRuntimeInfo {
@@ -15,6 +16,7 @@ const SUPPORTED_NATIVE_BINARIES: Record<string, string> = {
   'darwin:x64': '../native/rust-bash-native.darwin-x64.node',
   'linux:arm64': '../native/rust-bash-native.linux-arm64-gnu.node',
   'linux:x64': '../native/rust-bash-native.linux-x64-gnu.node',
+  'win32:x64': '../native/rust-bash-native.win32-x64-msvc.node',
 };
 
 export function getNativeBinaryCandidates(runtime: NativeRuntimeInfo): string[] {

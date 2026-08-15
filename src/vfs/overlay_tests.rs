@@ -324,13 +324,18 @@ fn chmod_lower_file_copies_up() {
     // Content preserved
     assert_eq!(ov.read_file(Path::new("/README.md")).unwrap(), b"# Hello");
 
-    // Lower untouched
+    // Lower untouched (mode-bit check is Unix-only; Windows synthesizes modes)
     let disk_meta = std::fs::metadata(tmp.path().join("README.md")).unwrap();
-    assert_ne!(
-        disk_meta.permissions().mode() & 0o777,
-        0o755,
-        "lower should not be modified"
-    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(
+            disk_meta.permissions().mode() & 0o777,
+            0o755,
+            "lower should not be modified"
+        );
+    }
+    let _ = disk_meta;
 }
 
 #[test]
@@ -453,8 +458,7 @@ fn deep_clone_whiteout_isolation() {
     assert!(!clone.exists(Path::new("/README.md")));
 }
 
-use std::os::unix::fs::PermissionsExt;
-
+#[cfg(unix)]
 #[test]
 fn chmod_lower_preserves_original_permissions() {
     let tmp = setup_lower();
@@ -730,4 +734,160 @@ fn utimes_through_symlink() {
     ov.utimes(Path::new("/link_readme"), new_time).unwrap();
 
     assert_eq!(ov.stat(Path::new("/README.md")).unwrap().mtime, new_time);
+}
+
+// -----------------------------------------------------------------------
+// diff() export for harnesses applying sandboxed writes to disk
+// -----------------------------------------------------------------------
+
+#[test]
+fn diff_empty_when_nothing_written() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    // Reads alone produce no diff
+    let _ = ov.read_file(Path::new("/README.md")).unwrap();
+    let d = ov.diff();
+    assert!(d.writes.is_empty());
+    assert!(d.deletions.is_empty());
+}
+
+#[test]
+fn diff_reports_modified_and_created_files() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.write_file(Path::new("/README.md"), b"changed").unwrap();
+    ov.write_file(Path::new("/src/new.rs"), b"new").unwrap();
+    ov.mkdir(Path::new("/build")).unwrap();
+
+    let d = ov.diff();
+    assert_eq!(d.deletions, Vec::<PathBuf>::new());
+    let paths: Vec<&PathBuf> = d.writes.iter().map(|w| &w.path).collect();
+    assert!(paths.contains(&&PathBuf::from("/README.md")));
+    assert!(paths.contains(&&PathBuf::from("/src/new.rs")));
+    assert!(paths.contains(&&PathBuf::from("/build")));
+    let readme = d
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/README.md"))
+        .unwrap();
+    assert_eq!(readme.content, b"changed");
+    assert_eq!(readme.node_type, NodeType::File);
+    let build = d
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/build"))
+        .unwrap();
+    assert_eq!(build.node_type, NodeType::Directory);
+    assert!(build.content.is_empty());
+}
+
+#[test]
+fn diff_reports_deletion_of_lower_file() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_file(Path::new("/README.md")).unwrap();
+    let d = ov.diff();
+    assert!(d.writes.is_empty());
+    assert_eq!(d.deletions, vec![PathBuf::from("/README.md")]);
+}
+
+#[test]
+fn diff_remove_dir_all_yields_top_most_deletion_only() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    let d = ov.diff();
+    // The whole subtree is gone but only the top-most path is reported.
+    assert_eq!(d.deletions, vec![PathBuf::from("/data")]);
+}
+
+#[test]
+fn diff_recreated_path_is_write_not_deletion() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_file(Path::new("/README.md")).unwrap();
+    ov.write_file(Path::new("/README.md"), b"reborn").unwrap();
+
+    let d = ov.diff();
+    assert!(d.deletions.is_empty());
+    assert_eq!(
+        d.writes,
+        vec![crate::OverlayWrite {
+            path: PathBuf::from("/README.md"),
+            node_type: NodeType::File,
+            content: b"reborn".to_vec(),
+            mode: 0o644,
+        }]
+    );
+}
+
+#[test]
+fn diff_upper_only_delete_is_not_a_deletion() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.write_file(Path::new("/scratch.txt"), b"temp").unwrap();
+    ov.remove_file(Path::new("/scratch.txt")).unwrap();
+
+    let d = ov.diff();
+    assert!(d.writes.is_empty());
+    assert!(d.deletions.is_empty());
+}
+
+#[test]
+fn diff_reports_symlink_target() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.symlink(Path::new("/README.md"), Path::new("/link.md"))
+        .unwrap();
+    let d = ov.diff();
+    let link = d
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/link.md"))
+        .unwrap();
+    assert_eq!(link.node_type, NodeType::Symlink);
+    assert_eq!(link.content, b"/README.md");
+}
+
+#[test]
+fn diff_reflects_writes_through_shell_exec() {
+    use crate::RustBashBuilder;
+    use std::sync::Arc;
+
+    let tmp = setup_lower();
+    let overlay = Arc::new(make_overlay(tmp.path()));
+    let mut shell = RustBashBuilder::new()
+        .fs(overlay.clone())
+        .cwd("/")
+        .build()
+        .unwrap();
+
+    shell
+        .exec("echo patched > /README.md; rm /data/config.toml; mkdir -p /out")
+        .unwrap();
+
+    let d = overlay.diff();
+    assert_eq!(d.deletions, vec![PathBuf::from("/data/config.toml")]);
+    let paths: Vec<&PathBuf> = d.writes.iter().map(|w| &w.path).collect();
+    assert!(paths.contains(&&PathBuf::from("/README.md")));
+    assert!(paths.contains(&&PathBuf::from("/out")));
+    let readme = d
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/README.md"))
+        .unwrap();
+    assert_eq!(readme.content, b"patched\n");
+    // Disk is never modified
+    assert_eq!(
+        std::fs::read(tmp.path().join("README.md")).unwrap(),
+        b"# Hello"
+    );
+    assert!(tmp.path().join("data/config.toml").exists());
 }

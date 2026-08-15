@@ -1,5 +1,6 @@
 //! Interpreter engine: parsing, AST walking, and execution state.
 
+pub(crate) mod analysis;
 pub(crate) mod arithmetic;
 pub(crate) mod brace;
 pub(crate) mod builtins;
@@ -15,7 +16,7 @@ use crate::vfs::VirtualFs;
 use bitflags::bitflags;
 use brush_parser::ast;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use builtins::builtin_names;
@@ -40,6 +41,85 @@ pub struct ExecResult {
     pub exit_code: i32,
     /// Binary output for commands that produce non-text data.
     pub stdout_bytes: Option<Vec<u8>>,
+    /// Command names that failed resolution ("command not found") during this
+    /// `exec()` call, deduplicated in first-encountered order. Empty unless a
+    /// command name resolved to no builtin, function, or registered command.
+    pub unresolved_commands: Vec<String>,
+}
+
+/// Shared record of command-resolution misses for one `exec()` call.
+///
+/// Held via `Arc` so that misses recorded inside subshells, pipeline stages,
+/// and exec callbacks (`xargs`, `find -exec`) all funnel into the same list.
+#[derive(Debug, Default)]
+pub(crate) struct UnresolvedCommandRecord {
+    /// Deduplicated missing command names, in first-encountered order.
+    names: Vec<String>,
+    /// Set when abort-on-unresolved mode is active and a miss occurred.
+    abort: bool,
+}
+
+/// Create a fresh unresolved-command record for a new top-level interpreter state.
+pub(crate) fn new_unresolved_record() -> Arc<Mutex<UnresolvedCommandRecord>> {
+    Arc::new(Mutex::new(UnresolvedCommandRecord::default()))
+}
+
+impl InterpreterState {
+    /// True when `name` would resolve at dispatch time without a PATH lookup:
+    /// a shell builtin, a registered command, or a defined function.
+    pub(crate) fn resolves_command(&self, name: &str) -> bool {
+        builtins::is_builtin(name)
+            || self.commands.contains_key(name)
+            || self.functions.contains_key(name)
+    }
+
+    /// Record a command-resolution miss, deduplicating in first-encountered order.
+    ///
+    /// In abort-on-unresolved mode, also signals the whole script to stop.
+    pub(crate) fn record_unresolved_command(&mut self, name: &str) {
+        let abort = self.abort_on_unresolved;
+        let mut record = self
+            .unresolved_record
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !record.names.iter().any(|n| n == name) {
+            record.names.push(name.to_string());
+        }
+        if abort {
+            record.abort = true;
+            self.should_exit = true;
+            self.abort_command_list = true;
+        }
+    }
+
+    /// True when abort-on-unresolved mode has triggered and execution must stop.
+    pub(crate) fn unresolved_abort_triggered(&self) -> bool {
+        self.unresolved_record
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .abort
+    }
+
+    /// Clear the shared record at the start of an `exec()` call.
+    pub(crate) fn reset_unresolved_record(&mut self) {
+        let mut record = self
+            .unresolved_record
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        record.names.clear();
+        record.abort = false;
+    }
+
+    /// Take the recorded unresolved command names.
+    pub(crate) fn take_unresolved_commands(&mut self) -> Vec<String> {
+        std::mem::take(
+            &mut self
+                .unresolved_record
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .names,
+        )
+    }
 }
 
 // ── Variable types ──────────────────────────────────────────────────
@@ -457,6 +537,13 @@ pub struct InterpreterState {
     /// When set, the current execution context was invoked as a script file
     /// (not `-c` or sourced). Used to synthesize a "main" FUNCNAME entry.
     pub(crate) script_source: Option<String>,
+    /// Shared record of command-resolution misses for the current `exec()` call.
+    /// Cloned into subshells, pipeline stages, and exec callbacks so misses
+    /// anywhere are visible to the top-level caller.
+    pub(crate) unresolved_record: Arc<Mutex<UnresolvedCommandRecord>>,
+    /// Abort the entire script as soon as a command name fails to resolve.
+    /// Default is bash-fidelity: print "command not found" (exit 127) and continue.
+    pub(crate) abort_on_unresolved: bool,
 }
 
 pub(crate) const DEFAULT_PATH: &str = "/usr/bin:/bin";
@@ -1638,6 +1725,8 @@ mod tests {
             last_command_had_error: false,
             last_status_immune_to_errexit: false,
             script_source: None,
+            unresolved_record: new_unresolved_record(),
+            abort_on_unresolved: false,
         }
     }
 }

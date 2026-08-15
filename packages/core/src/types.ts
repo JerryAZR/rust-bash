@@ -65,6 +65,8 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  /** Command names that failed resolution ("command not found"), deduplicated. */
+  unresolvedCommands?: string[];
   env?: Record<string, string>;
 }
 

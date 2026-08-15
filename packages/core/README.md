@@ -8,7 +8,7 @@ A sandboxed bash interpreter for AI Agents, powered by Rust — TypeScript API w
 npm install rust-bash
 ```
 
-On Node.js, the package bundles native addons for Linux/macOS on x64 and arm64.
+On Node.js, the package bundles native addons for Linux/macOS on x64/arm64 and Windows on x64.
 Other runtimes use the same API through the bundled WASM fallback.
 
 ## Quick Start
@@ -279,7 +279,7 @@ if (await tryLoadNative()) {
 }
 ```
 
-`tryLoadNative()` succeeds on the bundled Linux/macOS x64 and arm64 targets. On
+`tryLoadNative()` succeeds on the bundled Linux/macOS x64/arm64 and Windows x64 targets. On
 other Node.js runtimes, it returns `false` and you should fall back to WASM.
 
 ### Browser

@@ -6964,3 +6964,204 @@ fn nounset_in_bash_c_exits_127() {
         r.stderr
     );
 }
+
+// ── Unresolved command reporting (execution-time) ──────────────────
+
+#[test]
+fn unresolved_command_single_miss_reported() {
+    let mut sh = shell();
+    let r = sh.exec("definitely_not_a_command").unwrap();
+    assert_eq!(r.exit_code, 127);
+    assert!(r.stderr.contains("command not found"));
+    assert_eq!(r.unresolved_commands, vec!["definitely_not_a_command"]);
+}
+
+#[test]
+fn unresolved_commands_multiple_misses_deduplicated_in_order() {
+    let mut sh = shell();
+    let r = sh
+        .exec("missing_one; echo ok; missing_two; missing_one")
+        .unwrap();
+    assert_eq!(r.unresolved_commands, vec!["missing_one", "missing_two"]);
+    assert_eq!(r.stdout, "ok\n");
+    assert_eq!(r.exit_code, 127);
+}
+
+#[test]
+fn unresolved_commands_empty_when_everything_resolves() {
+    let mut sh = shell();
+    let r = sh.exec("echo hi | cat; cd /tmp").unwrap();
+    assert_eq!(r.exit_code, 0);
+    assert!(r.unresolved_commands.is_empty());
+}
+
+#[test]
+fn unresolved_command_continues_execution_by_default() {
+    let mut sh = shell();
+    let r = sh.exec("nope_missing; echo after").unwrap();
+    assert_eq!(r.stdout, "after\n");
+    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.unresolved_commands, vec!["nope_missing"]);
+}
+
+#[test]
+fn unresolved_commands_inside_functions_and_subshells_recorded() {
+    let mut sh = shell();
+    let r = sh
+        .exec("f() { inner_missing; }\nf\n(missing_in_subshell)")
+        .unwrap();
+    assert_eq!(
+        r.unresolved_commands,
+        vec!["inner_missing", "missing_in_subshell"]
+    );
+}
+
+#[test]
+fn unresolved_commands_reset_between_exec_calls() {
+    let mut sh = shell();
+    sh.exec("missing_a").unwrap();
+    let r = sh.exec("echo ok").unwrap();
+    assert!(r.unresolved_commands.is_empty());
+}
+
+#[test]
+fn xargs_subcommand_miss_recorded() {
+    let mut sh = shell();
+    let r = sh.exec("echo hi | xargs totally_missing").unwrap();
+    assert_eq!(r.unresolved_commands, vec!["totally_missing"]);
+    assert!(r.stderr.contains("command not found"));
+}
+
+#[test]
+fn find_exec_subcommand_miss_recorded() {
+    let mut sh = shell();
+    sh.exec("touch /f.txt").unwrap();
+    let r = sh.exec(r"find /f.txt -exec missing_tool {} \;").unwrap();
+    assert_eq!(r.unresolved_commands, vec!["missing_tool"]);
+}
+
+// ── Abort-on-unresolved mode ────────────────────────────────────────
+
+fn aborting_shell() -> RustBash {
+    RustBashBuilder::new()
+        .abort_on_unresolved_commands(true)
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn abort_on_unresolved_commands_stops_script_early() {
+    let mut sh = aborting_shell();
+    let r = sh.exec("echo before; missing_stop; echo after").unwrap();
+    assert_eq!(r.stdout, "before\n");
+    assert_eq!(r.exit_code, 127);
+    assert_eq!(r.unresolved_commands, vec!["missing_stop"]);
+}
+
+#[test]
+fn abort_on_unresolved_commands_stops_after_subshell_miss() {
+    let mut sh = aborting_shell();
+    let r = sh.exec("(missing_nested)\necho after").unwrap();
+    assert!(!r.stdout.contains("after"));
+    assert_eq!(r.unresolved_commands, vec!["missing_nested"]);
+}
+
+#[test]
+fn abort_on_unresolved_commands_runs_clean_scripts_untouched() {
+    let mut sh = aborting_shell();
+    let r = sh.exec("echo one; echo two").unwrap();
+    assert_eq!(r.stdout, "one\ntwo\n");
+    assert_eq!(r.exit_code, 0);
+    assert!(r.unresolved_commands.is_empty());
+}
+
+// ── Pre-flight command analysis ─────────────────────────────────────
+
+#[test]
+fn analyze_commands_reports_builtins_and_registered_commands_resolved() {
+    let sh = shell();
+    let a = sh
+        .analyze_commands("echo hi | cat /etc/hosts; cd /tmp")
+        .unwrap();
+    assert_eq!(a.commands, vec!["echo", "cat", "cd"]);
+    assert!(a.unresolved.is_empty());
+}
+
+#[test]
+fn analyze_commands_flags_unknown_names() {
+    let sh = shell();
+    let a = sh.analyze_commands("echo hi; mystery_tool --flag").unwrap();
+    assert_eq!(a.commands, vec!["echo", "mystery_tool"]);
+    assert_eq!(a.unresolved, vec!["mystery_tool"]);
+}
+
+#[test]
+fn analyze_commands_resolves_function_defined_in_script() {
+    let sh = shell();
+    let a = sh
+        .analyze_commands("deploy() {\n  mystery_inner\n}\ndeploy")
+        .unwrap();
+    assert_eq!(a.commands, vec!["mystery_inner", "deploy"]);
+    assert_eq!(a.unresolved, vec!["mystery_inner"]);
+}
+
+#[test]
+fn analyze_commands_collects_names_inside_compound_bodies_and_dedups() {
+    let sh = shell();
+    let a = sh
+        .analyze_commands(
+            "for f in a b; do sort $f; done\nif true; then sort; grep x; fi\nunknown_tool",
+        )
+        .unwrap();
+    assert_eq!(a.commands, vec!["sort", "true", "grep", "unknown_tool"]);
+    assert_eq!(a.unresolved, vec!["unknown_tool"]);
+}
+
+#[test]
+fn analyze_commands_resolves_custom_registered_commands() {
+    use rust_bash::{CommandContext, CommandResult, VirtualCommand};
+
+    struct CustomTool;
+    impl VirtualCommand for CustomTool {
+        fn name(&self) -> &str {
+            "custom_tool"
+        }
+        fn execute(&self, _args: &[String], _ctx: &CommandContext) -> CommandResult {
+            CommandResult::default()
+        }
+    }
+
+    let sh = RustBashBuilder::new()
+        .command(Arc::new(CustomTool))
+        .build()
+        .unwrap();
+    let a = sh.analyze_commands("custom_tool run").unwrap();
+    assert_eq!(a.commands, vec!["custom_tool"]);
+    assert!(a.unresolved.is_empty());
+}
+
+#[test]
+fn analyze_commands_skips_dynamic_names() {
+    let sh = shell();
+    let a = sh
+        .analyze_commands("eval \"$script\"; $cmd status")
+        .unwrap();
+    // `eval` resolves as a builtin; the dynamic payloads are not statically
+    // analyzable and must not be reported as unresolved.
+    assert_eq!(a.commands, vec!["eval"]);
+    assert!(a.unresolved.is_empty());
+}
+
+#[test]
+fn analyze_commands_has_no_side_effects_on_interpreter_state() {
+    let mut sh = shell();
+    let a = sh
+        .analyze_commands("touch /side_effect.txt\ncd /tmp\nFOO=bar\nmissing_thing")
+        .unwrap();
+    assert_eq!(a.unresolved, vec!["missing_thing"]);
+
+    assert!(!sh.exists("/side_effect.txt"));
+    assert_eq!(sh.cwd(), "/");
+    let r = sh.exec("echo \"FOO=${FOO:-unset}\"").unwrap();
+    assert_eq!(r.stdout, "FOO=unset\n");
+}

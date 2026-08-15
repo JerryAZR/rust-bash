@@ -35,7 +35,7 @@ pub struct InterpreterState {
     // Internal fields (pub(crate)):
     // should_exit, loop_depth, control_flow, random_seed,
     // local_scopes, in_function_depth, traps, in_trap,
-    // errexit_suppressed
+    // errexit_suppressed, unresolved_record, abort_on_unresolved
 }
 ```
 

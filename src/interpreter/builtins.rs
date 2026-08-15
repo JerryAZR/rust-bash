@@ -10,6 +10,7 @@ use crate::interpreter::{
 };
 use crate::vfs::NodeType;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Dispatch a shell builtin by name.
 /// Returns `Ok(Some(result))` if the name is a recognised builtin,
@@ -1384,7 +1385,7 @@ fn format_set_line(name: &str, var: &Variable) -> String {
         }
         VariableValue::AssociativeArray(map) => {
             let mut entries: Vec<(&String, &String)> = map.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            entries.sort_by_key(|(k, _)| *k);
             let elems: Vec<String> = entries
                 .iter()
                 .map(|(k, v)| {
@@ -2107,6 +2108,7 @@ fn declare_print(
         stderr,
         exit_code,
         stdout_bytes: None,
+        unresolved_commands: Vec::new(),
     })
 }
 
@@ -2138,7 +2140,7 @@ fn format_simple_line(name: &str, var: &Variable) -> String {
         }
         VariableValue::AssociativeArray(map) => {
             let mut entries: Vec<(&String, &String)> = map.iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            entries.sort_by_key(|(k, _)| *k);
             let elems: Vec<String> = entries
                 .iter()
                 .map(|(k, v)| {
@@ -2232,7 +2234,7 @@ fn format_declare_line(name: &str, var: &Variable) -> String {
                         }
                     });
                 } else {
-                    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                    entries.sort_by_key(|(k, _)| *k);
                 }
                 let elems: Vec<String> = entries
                     .iter()
@@ -2345,11 +2347,9 @@ fn declare_append_value(
             }
 
             let words = shell_split_array_body(inner);
-            let mut idx = start_idx;
-            for word in &words {
+            for (offset, word) in words.iter().enumerate() {
                 let val = unquote_simple(word);
-                crate::interpreter::set_array_element(state, name, idx, val)?;
-                idx += 1;
+                crate::interpreter::set_array_element(state, name, start_idx + offset, val)?;
             }
 
             if let Some(var) = state.env.get_mut(name) {
@@ -4385,11 +4385,9 @@ fn builtin_local(
                     );
                 }
                 let words = shell_split_array_body(inner);
-                let mut idx = start_idx;
-                for word in &words {
+                for (offset, word) in words.iter().enumerate() {
                     let val = unquote_simple(word);
-                    crate::interpreter::set_array_element(state, name, idx, val)?;
-                    idx += 1;
+                    crate::interpreter::set_array_element(state, name, start_idx + offset, val)?;
                 }
             } else {
                 let current = state
@@ -4729,6 +4727,7 @@ pub(crate) fn execute_registered_command_by_name(
             stderr: cmd_result.stderr,
             exit_code: cmd_result.exit_code,
             stdout_bytes: cmd_result.stdout_bytes,
+            unresolved_commands: Vec::new(),
         });
     }
 
@@ -5014,6 +5013,7 @@ fn builtin_type(
         stderr,
         exit_code,
         stdout_bytes: None,
+        unresolved_commands: Vec::new(),
     })
 }
 
@@ -6253,6 +6253,7 @@ fn builtin_alias(
         stderr,
         exit_code,
         stdout_bytes: None,
+        unresolved_commands: Vec::new(),
     })
 }
 
@@ -6373,6 +6374,7 @@ fn builtin_printf(
             stderr: result.stderr,
             exit_code,
             stdout_bytes,
+            unresolved_commands: Vec::new(),
         })
     }
 }
@@ -6775,6 +6777,8 @@ fn run_in_subshell(
         last_command_had_error: false,
         last_status_immune_to_errexit: false,
         script_source,
+        unresolved_record: Arc::clone(&state.unresolved_record),
+        abort_on_unresolved: state.abort_on_unresolved,
     };
     ensure_nested_shell_startup_vars(&mut sub_state);
 
@@ -6892,7 +6896,9 @@ fn builtin_history(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interpreter::{ExecutionCounters, ExecutionLimits, ShellOpts, ShoptOpts};
+    use crate::interpreter::{
+        ExecutionCounters, ExecutionLimits, ShellOpts, ShoptOpts, new_unresolved_record,
+    };
     use crate::network::NetworkPolicy;
     use crate::platform::Instant;
     use crate::vfs::{InMemoryFs, VirtualFs};
@@ -6966,6 +6972,8 @@ mod tests {
             last_command_had_error: false,
             last_status_immune_to_errexit: false,
             script_source: None,
+            unresolved_record: new_unresolved_record(),
+            abort_on_unresolved: false,
         }
     }
 

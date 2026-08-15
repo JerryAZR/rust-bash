@@ -84,7 +84,7 @@ pub mod network {
     }
 }
 
-pub use api::{RustBash, RustBashBuilder};
+pub use api::{CommandAnalysis, RustBash, RustBashBuilder};
 pub use commands::{CommandContext, CommandMeta, CommandResult, ExecCallback, VirtualCommand};
 pub use error::{RustBashError, VfsError};
 pub use interpreter::{
@@ -95,7 +95,7 @@ pub use network::NetworkPolicy;
 pub use vfs::{DirEntry, InMemoryFs, Metadata, MountableFs, NodeType, VirtualFs};
 
 #[cfg(feature = "native-fs")]
-pub use vfs::{OverlayFs, ReadWriteFs};
+pub use vfs::{OverlayDiff, OverlayFs, OverlayWrite, ReadWriteFs};
 
 #[cfg(feature = "ffi")]
 pub mod ffi;

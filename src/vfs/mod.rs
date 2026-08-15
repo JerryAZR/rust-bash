@@ -22,7 +22,7 @@ pub use memory::InMemoryFs;
 pub use mountable::MountableFs;
 
 #[cfg(feature = "native-fs")]
-pub use overlay::OverlayFs;
+pub use overlay::{OverlayDiff, OverlayFs, OverlayWrite};
 #[cfg(feature = "native-fs")]
 pub use readwrite::ReadWriteFs;
 
@@ -36,6 +36,110 @@ use std::sync::Arc;
 /// `/home/user`, so we roll our own check.
 pub(crate) fn vfs_path_is_absolute(path: &Path) -> bool {
     path.to_str().is_some_and(|s| s.starts_with('/'))
+}
+
+/// Append one path component to a VFS path using Unix-style `/` separators.
+///
+/// `PathBuf::join`/`push` insert the host separator (`\` on Windows), which
+/// would leak into VFS paths and user-visible output. All VFS-internal path
+/// construction must go through this helper instead. `name` must be a single
+/// component (never empty, never containing `/`).
+pub(crate) fn vfs_join(base: &Path, name: &str) -> PathBuf {
+    debug_assert!(!name.is_empty() && !name.contains('/'));
+    let mut s = base.to_string_lossy().into_owned();
+    if !s.ends_with('/') {
+        s.push('/');
+    }
+    s.push_str(name);
+    PathBuf::from(s)
+}
+
+/// Append a multi-component relative path to a VFS path using `/` separators.
+///
+/// Like [`vfs_join`] but for joining two paths instead of a single component.
+/// `rel` must not be absolute.
+pub(crate) fn vfs_append(base: &Path, rel: &Path) -> PathBuf {
+    debug_assert!(!vfs_path_is_absolute(rel));
+    let mut s = base.to_string_lossy().into_owned();
+    let rel = rel.to_string_lossy();
+    let rel = rel.trim_start_matches('/');
+    if rel.is_empty() {
+        return PathBuf::from(s);
+    }
+    if !s.ends_with('/') {
+        s.push('/');
+    }
+    s.push_str(rel);
+    PathBuf::from(s)
+}
+
+/// Resolve a possibly-relative VFS path string against a cwd string, using `/`
+/// separators only (never the host separator).
+pub(crate) fn vfs_resolve(cwd: &str, path: &str) -> PathBuf {
+    if path.starts_with('/') {
+        PathBuf::from(path)
+    } else {
+        let mut s = cwd.to_string();
+        if !s.ends_with('/') {
+            s.push('/');
+        }
+        s.push_str(path);
+        PathBuf::from(s)
+    }
+}
+
+/// Resolve `.` and `..` in a VFS path without filesystem access. Splits on `/`
+/// only — `\` is an ordinary filename character. Preserves a relative result
+/// for relative input.
+pub(crate) fn vfs_normalize(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    let absolute = s.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if !parts.is_empty() {
+                    parts.pop();
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    PathBuf::from(if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    })
+}
+
+/// Derive a Unix-style permission mode from host file metadata.
+///
+/// On Windows there is no execute bit and only a read-only attribute, so we
+/// report an optimistic MSYS-like mapping: everything is readable and
+/// executable, and only the read-only attribute clears the write bits.
+/// Falsely-permissive modes are safe — VFS operations are never gated on mode
+/// bits — while falsely-restrictive ones would mislead `test -x`/`test -w`.
+#[cfg(feature = "native-fs")]
+pub(crate) fn unix_mode_from_metadata(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode()
+    }
+    #[cfg(windows)]
+    {
+        if meta.permissions().readonly() {
+            0o555
+        } else {
+            0o755
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        0o755
+    }
 }
 
 /// Metadata for a filesystem node.

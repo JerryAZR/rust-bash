@@ -97,6 +97,28 @@ assert_eq!(result.stdout, "hello world\n");
 assert_eq!(result.exit_code, 0);
 ```
 
+### Detecting commands the sandbox can't run
+
+When a command name resolves to nothing, `ExecResult::unresolved_commands` lists the
+missing names (execution continues, matching bash's exit-127 behavior). Hosts that
+need to rerun such scripts natively can stop at the first miss instead, or check a
+script statically before running it:
+
+```rust
+// Execution-time: record misses, stop the script at the first one.
+let mut shell = RustBashBuilder::new()
+    .abort_on_unresolved_commands(true)
+    .build()
+    .unwrap();
+let result = shell.exec("docker build .").unwrap();
+assert_eq!(result.unresolved_commands, vec!["docker"]);
+
+// Parse-time: analyze a script without executing anything.
+let shell = RustBashBuilder::new().build().unwrap();
+let analysis = shell.analyze_commands("git status && kubectl get pods").unwrap();
+assert_eq!(analysis.unresolved, vec!["git", "kubectl"]);
+```
+
 ## Custom Commands
 
 ### TypeScript
@@ -443,26 +465,40 @@ let mut shell = RustBashBuilder::new()
 | Backend | Description |
 |---------|-------------|
 | `InMemoryFs` | Default. All data in memory. Zero host access. |
-| `OverlayFs` | Copy-on-write over a real directory. Reads from disk, writes stay in memory. |
+| `OverlayFs` | Copy-on-write over a real directory. Reads from disk, writes stay in memory. `diff()` exports the write set. |
 | `ReadWriteFs` | Passthrough to real filesystem. For trusted execution. |
 | `MountableFs` | Compose backends at different mount points. |
+
+> **Windows:** all features (including the host-filesystem backends) build and test on Windows. VFS paths are Unix-style (`/`-separated) on every platform.
 
 ### OverlayFs — Read real files, sandbox writes
 
 ```rust
-use rust_bash::{RustBashBuilder, OverlayFs};
+use rust_bash::{OverlayFs, RustBashBuilder};
 use std::sync::Arc;
 
-// Reads from ./my_project on disk; writes stay in memory
-let overlay = OverlayFs::new("./my_project").unwrap();
+// Reads from ./my_project on disk; writes stay in memory.
+// Keep a handle to the overlay so you can export the write set later.
+let overlay = Arc::new(OverlayFs::new("./my_project").unwrap());
 let mut shell = RustBashBuilder::new()
-    .fs(Arc::new(overlay))
+    .fs(overlay.clone())
     .cwd("/")
     .build()
     .unwrap();
 
 let result = shell.exec("cat /src/main.rs").unwrap();    // reads from disk
 shell.exec("echo patched > /src/main.rs").unwrap();       // writes to memory only
+
+// Export exactly what the session changed; apply it to disk yourself
+// (or prompt before applying):
+let d = overlay.diff();
+for w in &d.writes {
+    // w.path (VFS path), w.node_type, w.content (bytes), w.mode
+    // apply inside your project directory, or prompt for paths outside it
+}
+for p in &d.deletions {
+    // lower-layer paths removed during the session (top-most whiteouts)
+}
 ```
 
 ### ReadWriteFs — Direct filesystem access
@@ -538,8 +574,9 @@ For complete Python and Go examples, see [`examples/ffi/`](examples/ffi/). For t
 | Type | Description |
 |------|-------------|
 | `RustBashBuilder` | Builder for configuring and constructing a shell instance |
-| `RustBash` | The shell instance — call `.exec(script)` to run commands |
-| `ExecResult` | Returned by `exec()`: `stdout`, `stderr`, `exit_code` |
+| `RustBash` | The shell instance — call `.exec(script)` to run commands, or `.analyze_commands(script)` for parse-time analysis |
+| `ExecResult` | Returned by `exec()`: `stdout`, `stderr`, `exit_code`, `unresolved_commands` (names that failed command resolution, deduplicated) |
+| `CommandAnalysis` | Returned by `analyze_commands()`: `commands` (all literal command names) and `unresolved` (names that would not resolve) |
 | `ExecutionLimits` | Configurable resource bounds |
 | `NetworkPolicy` | URL allow-list and HTTP method restrictions for `curl` |
 | `VirtualCommand` | Trait for registering custom commands |
@@ -554,6 +591,7 @@ For complete Python and Go examples, see [`examples/ffi/`](examples/ffi/). For t
 | `ExecCallback` | Callback type for sub-command execution (`xargs`, `find -exec`) |
 | `InMemoryFs` | In-memory filesystem backend |
 | `OverlayFs` | Copy-on-write overlay backend |
+| `OverlayDiff` / `OverlayWrite` | Write-set export from `OverlayFs::diff()` |
 | `ReadWriteFs` | Real filesystem passthrough backend |
 | `MountableFs` | Composite backend with path-based mount delegation |
 | `VirtualFs` | Trait for filesystem backends |

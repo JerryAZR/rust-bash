@@ -2,6 +2,7 @@
 
 use crate::commands::{self, VirtualCommand};
 use crate::error::RustBashError;
+use crate::interpreter::analysis::{self, CollectedCommands};
 use crate::interpreter::{
     self, ExecResult, ExecutionCounters, ExecutionLimits, InterpreterState, ShellOpts, ShoptOpts,
     Variable, VariableAttrs, VariableValue,
@@ -13,6 +14,21 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Result of statically analyzing a script's command usage without executing it.
+///
+/// Produced by [`RustBash::analyze_commands`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommandAnalysis {
+    /// Every literal simple-command name in the script, deduplicated in
+    /// first-encountered order (including names inside function bodies,
+    /// subshells, and compound-command bodies).
+    pub commands: Vec<String>,
+    /// The subset of `commands` that would fail command resolution at dispatch
+    /// time: not a builtin, not registered on this instance, and not a function
+    /// defined on this instance or within the analyzed script itself.
+    pub unresolved: Vec<String>,
+}
+
 /// A sandboxed bash shell interpreter.
 pub struct RustBash {
     pub(crate) state: InterpreterState,
@@ -20,9 +36,16 @@ pub struct RustBash {
 
 impl RustBash {
     /// Execute a shell command string and return the result.
+    ///
+    /// Command names that fail resolution are reported in
+    /// [`ExecResult::unresolved_commands`]. By default execution continues
+    /// after a miss (bash fidelity: stderr message, exit code 127); enable
+    /// [`RustBashBuilder::abort_on_unresolved_commands`] to stop the script
+    /// at the first miss instead.
     pub fn exec(&mut self, input: &str) -> Result<ExecResult, RustBashError> {
         self.state.counters.reset();
         self.state.should_exit = false;
+        self.state.reset_unresolved_record();
         self.state.current_source_text = input.to_string();
         self.state.last_verbose_line = 0;
 
@@ -49,7 +72,49 @@ impl RustBash {
             result.stderr.push_str(&trap_result.stderr);
         }
 
+        result.unresolved_commands = self.state.take_unresolved_commands();
+
         Ok(result)
+    }
+
+    /// Statically analyze a script's command usage without executing anything.
+    ///
+    /// Parses `script` with the same pipeline used by [`RustBash::exec`] and
+    /// walks the AST collecting every literal simple-command name — including
+    /// names inside function bodies, subshells, and compound-command bodies
+    /// (if/for/while/until/case/brace groups). Nothing is executed and no
+    /// interpreter state is modified, so this is safe to call as a pre-flight
+    /// check before deciding whether to run a script in the sandbox or on
+    /// the host.
+    ///
+    /// [`CommandAnalysis::unresolved`] filters out names that resolve:
+    /// shell builtins, commands registered on this instance (including custom
+    /// commands), functions already defined on this instance, and functions
+    /// defined within the analyzed script itself.
+    ///
+    /// # Limitations
+    ///
+    /// Dynamically determined command names cannot be analyzed statically.
+    /// `eval "..."`, names built from variables (`$cmd status`), command
+    /// substitution results, aliases, and quoted or globbed names are simply
+    /// not reported — neither in `commands` nor in `unresolved`.
+    pub fn analyze_commands(&self, script: &str) -> Result<CommandAnalysis, RustBashError> {
+        let program = interpreter::parse(script)?;
+        let CollectedCommands {
+            commands,
+            defined_functions,
+        } = analysis::collect_commands(&program);
+
+        let unresolved = commands
+            .iter()
+            .filter(|name| !self.state.resolves_command(name) && !defined_functions.contains(name))
+            .cloned()
+            .collect();
+
+        Ok(CommandAnalysis {
+            commands,
+            unresolved,
+        })
     }
 
     /// Returns the current working directory.
@@ -250,6 +315,7 @@ pub struct RustBashBuilder {
     limits: Option<ExecutionLimits>,
     network_policy: Option<NetworkPolicy>,
     fs: Option<Arc<dyn VirtualFs>>,
+    abort_on_unresolved_commands: bool,
 }
 
 impl Default for RustBashBuilder {
@@ -270,6 +336,7 @@ impl RustBashBuilder {
             limits: None,
             network_policy: None,
             fs: None,
+            abort_on_unresolved_commands: false,
         }
     }
 
@@ -325,6 +392,18 @@ impl RustBashBuilder {
     /// methods.
     pub fn fs(mut self, fs: Arc<dyn VirtualFs>) -> Self {
         self.fs = Some(fs);
+        self
+    }
+
+    /// Abort the whole script as soon as a command name fails to resolve.
+    ///
+    /// Default (`false`) keeps bash fidelity: an unresolved command prints
+    /// `name: command not found` to stderr with exit code 127 and execution
+    /// continues. With this enabled, the first miss stops the script; the
+    /// returned [`ExecResult`] carries the output accumulated so far plus the
+    /// missing names in [`ExecResult::unresolved_commands`].
+    pub fn abort_on_unresolved_commands(mut self, abort: bool) -> Self {
+        self.abort_on_unresolved_commands = abort;
         self
     }
 
@@ -462,6 +541,8 @@ impl RustBashBuilder {
             last_command_had_error: false,
             last_status_immune_to_errexit: false,
             script_source: None,
+            unresolved_record: interpreter::new_unresolved_record(),
+            abort_on_unresolved: self.abort_on_unresolved_commands,
         };
         interpreter::ensure_shell_internal_vars(&mut state);
 

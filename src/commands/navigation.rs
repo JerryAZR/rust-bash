@@ -9,7 +9,7 @@ fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
     if path_str.starts_with('/') {
         PathBuf::from(path_str)
     } else {
-        PathBuf::from(cwd).join(path_str)
+        crate::vfs::vfs_resolve(cwd, path_str)
     }
 }
 
@@ -327,7 +327,7 @@ fn tree_recursive(
             *dir_count += 1;
             tree_recursive(
                 ctx,
-                &path.join(&entry.name),
+                &crate::vfs::vfs_join(path, &entry.name),
                 &format!("{prefix}{child_prefix}"),
                 out,
                 dir_count,

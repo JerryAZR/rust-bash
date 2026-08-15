@@ -84,6 +84,9 @@ pub fn base_env() -> HashMap<String, String> {
 
 pub fn load_fixture(path: &Path) -> datatest_stable::Result<FixtureFile> {
     let content = std::fs::read_to_string(path)?;
+    // Fixtures are authored with LF endings; strip CR from CRLF checkouts
+    // (e.g. git autocrlf on Windows) so scripts and expected output stay clean.
+    let content = content.replace("\r\n", "\n");
     let fixture: FixtureFile =
         toml::from_str(&content).map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
     Ok(fixture)

@@ -11,20 +11,29 @@ NATIVE_DIR="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../packages/core/native" &
 
 case "$TARGET" in
   x86_64-unknown-linux-gnu)
+    LIB_PREFIX="lib"
     LIB_EXT="so"
     OUTPUT_NAME="rust-bash-native.linux-x64-gnu.node"
     ;;
   aarch64-unknown-linux-gnu)
+    LIB_PREFIX="lib"
     LIB_EXT="so"
     OUTPUT_NAME="rust-bash-native.linux-arm64-gnu.node"
     ;;
   x86_64-apple-darwin)
+    LIB_PREFIX="lib"
     LIB_EXT="dylib"
     OUTPUT_NAME="rust-bash-native.darwin-x64.node"
     ;;
   aarch64-apple-darwin)
+    LIB_PREFIX="lib"
     LIB_EXT="dylib"
     OUTPUT_NAME="rust-bash-native.darwin-arm64.node"
+    ;;
+  x86_64-pc-windows-msvc)
+    LIB_PREFIX=""
+    LIB_EXT="dll"
+    OUTPUT_NAME="rust-bash-native.win32-x64-msvc.node"
     ;;
   *)
     echo "Error: unsupported native packaging target: $TARGET" >&2
@@ -32,8 +41,8 @@ case "$TARGET" in
     ;;
 esac
 
-TARGET_LIB="$NATIVE_DIR/target/$TARGET/release/librust_bash_native.$LIB_EXT"
-HOST_LIB="$NATIVE_DIR/target/release/librust_bash_native.$LIB_EXT"
+TARGET_LIB="$NATIVE_DIR/target/$TARGET/release/${LIB_PREFIX}rust_bash_native.$LIB_EXT"
+HOST_LIB="$NATIVE_DIR/target/release/${LIB_PREFIX}rust_bash_native.$LIB_EXT"
 SOURCE_LIB="$TARGET_LIB"
 
 if [[ ! -f "$SOURCE_LIB" ]]; then

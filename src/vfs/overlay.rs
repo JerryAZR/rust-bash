@@ -7,8 +7,7 @@
 //! it still exists on disk.
 
 use std::collections::HashSet;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::platform::SystemTime;
@@ -57,6 +56,35 @@ enum LayerResult {
     NotFound,
 }
 
+/// A single write captured in the overlay's in-memory upper layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayWrite {
+    /// VFS path of the written entry.
+    pub path: PathBuf,
+    /// Kind of entry written.
+    pub node_type: NodeType,
+    /// File content; the symlink target (as UTF-8 bytes) for symlinks; empty
+    /// for directories.
+    pub content: Vec<u8>,
+    /// Unix-style permission mode to apply when materializing on the host.
+    pub mode: u32,
+}
+
+/// All changes recorded in an overlay relative to its lower directory:
+/// the upper-layer write set plus the deletions (whiteouts) of lower paths.
+///
+/// Hosts embedding rust-bash use this to apply sandboxed writes to the real
+/// project directory after execution (or prompt about them) — the overlay
+/// itself never modifies disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayDiff {
+    /// Every entry created or modified in the upper layer, sorted by path.
+    pub writes: Vec<OverlayWrite>,
+    /// Lower-layer paths deleted during execution (top-most whiteouts only),
+    /// sorted by path.
+    pub deletions: Vec<PathBuf>,
+}
+
 impl OverlayFs {
     /// Create an overlay filesystem with `lower` as the read-only base.
     ///
@@ -76,6 +104,76 @@ impl OverlayFs {
             upper: InMemoryFs::new(),
             whiteouts: Arc::new(RwLock::new(HashSet::new())),
         })
+    }
+
+    /// Return all changes recorded in this overlay since construction: every
+    /// write captured in the upper layer and every deletion of a lower-layer
+    /// path.
+    ///
+    /// Deletions list only the top-most whiteout of a removed subtree (e.g.
+    /// `rm -rf src` yields `src`, not each child) and exclude paths that were
+    /// subsequently recreated. Writes to paths that only ever existed in the
+    /// upper layer are reported as writes; their removal does not appear in
+    /// `deletions` since there is nothing on disk to delete.
+    pub fn diff(&self) -> OverlayDiff {
+        let mut writes = Vec::new();
+        for (path, node_type) in self.upper.snapshot_entries() {
+            match node_type {
+                NodeType::File => {
+                    let content = self.upper.read_file(&path).unwrap_or_default();
+                    let mode = self.upper.lstat(&path).map_or(0o644, |m| m.mode);
+                    writes.push(OverlayWrite {
+                        path,
+                        node_type,
+                        content,
+                        mode,
+                    });
+                }
+                NodeType::Directory => {
+                    let mode = self.upper.lstat(&path).map_or(0o755, |m| m.mode);
+                    writes.push(OverlayWrite {
+                        path,
+                        node_type,
+                        content: Vec::new(),
+                        mode,
+                    });
+                }
+                NodeType::Symlink => {
+                    let content = self
+                        .upper
+                        .readlink(&path)
+                        .map(|t| t.to_string_lossy().into_owned().into_bytes())
+                        .unwrap_or_default();
+                    writes.push(OverlayWrite {
+                        path,
+                        node_type,
+                        content,
+                        mode: 0o777,
+                    });
+                }
+            }
+        }
+
+        let whiteouts = self.whiteouts.read().clone();
+        let mut deletions: Vec<PathBuf> = whiteouts
+            .iter()
+            // Only lower-layer paths are real deletions; upper-only paths
+            // have nothing to delete on disk.
+            .filter(|p| self.lower_exists(p))
+            // A whiteout shadowed by a recreated upper entry is not a deletion.
+            .filter(|p| !self.upper_has_entry(p))
+            // Keep only top-most whiteouts; children of a removed directory
+            // are redundant.
+            .filter(|p| {
+                !whiteouts
+                    .iter()
+                    .any(|other| other != *p && p.starts_with(other))
+            })
+            .cloned()
+            .collect();
+        deletions.sort();
+
+        OverlayDiff { writes, deletions }
     }
 
     // ------------------------------------------------------------------
@@ -238,7 +336,7 @@ impl OverlayFs {
         let parts = path_components(&norm);
         let mut built = PathBuf::from("/");
         for name in parts {
-            built.push(name);
+            built = super::vfs_join(&built, name);
             self.remove_whiteout(&built);
             if self.upper_has_entry(&built) {
                 continue;
@@ -264,7 +362,7 @@ impl OverlayFs {
         // Gather all visible children (merged from upper + lower, minus whiteouts)
         let entries = self.readdir_merged(dir)?;
         for entry in &entries {
-            let child = dir.join(&entry.name);
+            let child = super::vfs_join(dir, &entry.name);
             if entry.node_type == NodeType::Directory {
                 self.whiteout_recursive(&child)?;
             }
@@ -287,7 +385,7 @@ impl OverlayFs {
             && let Ok(lower_entries) = self.readdir_lower(path)
         {
             for e in lower_entries {
-                let child_path = path.join(&e.name);
+                let child_path = super::vfs_join(path, &e.name);
                 if !self.is_whiteout(&child_path) {
                     entries.insert(e.name.clone(), e);
                 }
@@ -331,7 +429,7 @@ impl OverlayFs {
 
         for (i, name) in parts.iter().enumerate() {
             let is_last = i == parts.len() - 1;
-            let candidate = resolved.join(name);
+            let candidate = super::vfs_join(&resolved, name);
 
             if self.is_whiteout(&candidate) {
                 return Err(VfsError::NotFound(path.to_path_buf()));
@@ -358,10 +456,10 @@ impl OverlayFs {
                         self.readlink_lower(&candidate)?
                     };
                     // Resolve target (absolute or relative to parent)
-                    let abs_target = if target.is_absolute() {
+                    let abs_target = if super::vfs_path_is_absolute(&target) {
                         target
                     } else {
-                        resolved.join(&target)
+                        super::vfs_append(&resolved, &target)
                     };
                     resolved = self.resolve_path_depth(&abs_target, true, depth - 1)?;
                 }
@@ -408,8 +506,8 @@ impl OverlayFs {
                     if entry.name.starts_with('.') {
                         continue;
                     }
-                    let child_path = current_path.join(&entry.name);
-                    let child_dir = dir.join(&entry.name);
+                    let child_path = super::vfs_join(&current_path, &entry.name);
+                    let child_dir = super::vfs_join(dir, &entry.name);
                     if entry.node_type == NodeType::Directory
                         || entry.node_type == NodeType::Symlink
                     {
@@ -426,8 +524,8 @@ impl OverlayFs {
                     continue;
                 }
                 if glob_match(pattern, &entry.name) {
-                    let child_path = current_path.join(&entry.name);
-                    let child_dir = dir.join(&entry.name);
+                    let child_path = super::vfs_join(&current_path, &entry.name);
+                    let child_dir = super::vfs_join(dir, &entry.name);
                     if rest.is_empty() {
                         results.push(child_path);
                     } else if entry.node_type == NodeType::Directory
@@ -548,7 +646,7 @@ impl VirtualFs for OverlayFs {
 
         let mut built = PathBuf::from("/");
         for name in parts {
-            built.push(name);
+            built = super::vfs_join(&built, name);
 
             // Skip if the whiteout was for this exact path but we want to recreate
             if self.is_whiteout(&built) {
@@ -871,8 +969,8 @@ impl VirtualFs for OverlayFs {
                 self.upper.mkdir_p(&norm_dst)?;
                 let entries = self.readdir_merged(&norm_src)?;
                 for entry in entries {
-                    let child_src = norm_src.join(&entry.name);
-                    let child_dst = norm_dst.join(&entry.name);
+                    let child_src = super::vfs_join(&norm_src, &entry.name);
+                    let child_dst = super::vfs_join(&norm_dst, &entry.name);
                     self.rename(&child_src, &child_dst)?;
                 }
             }
@@ -990,6 +1088,10 @@ impl OverlayFs {
 // ---------------------------------------------------------------------------
 
 /// Normalize an absolute path: resolve `.` and `..`.
+///
+/// Only `/` separates components — `\` is an ordinary filename character on
+/// every platform, so `Path::components()` must not be used here (it treats
+/// `\` as a separator on Windows).
 fn normalize(path: &Path) -> Result<PathBuf, VfsError> {
     let s = path.to_str().unwrap_or("");
     if s.is_empty() {
@@ -1001,40 +1103,25 @@ fn normalize(path: &Path) -> Result<PathBuf, VfsError> {
             path.display()
         )));
     }
-    let mut parts: Vec<String> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::RootDir | Component::Prefix(_) => {}
-            Component::CurDir => {}
-            Component::ParentDir => {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
                 parts.pop();
             }
-            Component::Normal(seg) => {
-                if let Some(s) = seg.to_str() {
-                    parts.push(s.to_owned());
-                } else {
-                    return Err(VfsError::InvalidPath(format!(
-                        "non-UTF-8 component in: {}",
-                        path.display()
-                    )));
-                }
-            }
+            other => parts.push(other),
         }
     }
-    let mut result = PathBuf::from("/");
-    for p in &parts {
-        result.push(p);
-    }
-    Ok(result)
+    Ok(PathBuf::from(format!("/{}", parts.join("/"))))
 }
 
 /// Split a normalized absolute path into component names.
 fn path_components(path: &Path) -> Vec<&str> {
-    path.components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => s.to_str(),
-            _ => None,
-        })
+    let s = path.to_str().unwrap_or("");
+    s.trim_start_matches('/')
+        .split('/')
+        .filter(|c| !c.is_empty())
         .collect()
 }
 
@@ -1064,7 +1151,7 @@ fn map_std_metadata(meta: &std::fs::Metadata) -> Metadata {
     Metadata {
         node_type,
         size: meta.len(),
-        mode: meta.permissions().mode(),
+        mode: super::unix_mode_from_metadata(meta),
         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         file_id: 0,
     }

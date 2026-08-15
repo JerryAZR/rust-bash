@@ -9,7 +9,7 @@ fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
     if path_str.starts_with('/') {
         PathBuf::from(path_str)
     } else {
-        PathBuf::from(cwd).join(path_str)
+        crate::vfs::vfs_resolve(cwd, path_str)
     }
 }
 
@@ -92,7 +92,7 @@ impl super::VirtualCommand for CpCommand {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| src_str.to_string());
-                dest_path.join(name)
+                crate::vfs::vfs_join(&dest_path, &name)
             } else {
                 dest_path.clone()
             };
@@ -139,8 +139,8 @@ fn copy_dir_recursive(ctx: &CommandContext, src: &Path, dest: &Path) -> Result<(
 
     let entries = ctx.fs.readdir(src).map_err(|e| e.to_string())?;
     for entry in entries {
-        let src_child = src.join(&entry.name);
-        let dest_child = dest.join(&entry.name);
+        let src_child = crate::vfs::vfs_join(src, &entry.name);
+        let dest_child = crate::vfs::vfs_join(dest, &entry.name);
         match entry.node_type {
             NodeType::Directory => {
                 copy_dir_recursive(ctx, &src_child, &dest_child)?;
@@ -228,7 +228,7 @@ impl super::VirtualCommand for MvCommand {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| src_str.to_string());
-                dest_path.join(name)
+                crate::vfs::vfs_join(&dest_path, &name)
             } else {
                 dest_path.clone()
             };
@@ -936,40 +936,7 @@ impl super::VirtualCommand for ReadlinkCommand {
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
-    let mut components = Vec::new();
-    for comp in path.components() {
-        match comp {
-            std::path::Component::RootDir => {
-                components.clear();
-                components.push("/".to_string());
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if components.len() > 1 {
-                    components.pop();
-                }
-            }
-            std::path::Component::Normal(s) => {
-                components.push(s.to_string_lossy().to_string());
-            }
-            _ => {}
-        }
-    }
-    if components.len() == 1 && components[0] == "/" {
-        return PathBuf::from("/");
-    }
-    let mut result = String::new();
-    for (i, c) in components.iter().enumerate() {
-        if i == 0 && c == "/" {
-            result.push('/');
-        } else if i == 1 && components[0] == "/" {
-            result.push_str(c);
-        } else {
-            result.push('/');
-            result.push_str(c);
-        }
-    }
-    PathBuf::from(result)
+    crate::vfs::vfs_normalize(path)
 }
 
 // ── rmdir ───────────────────────────────────────────────────────────
@@ -1211,7 +1178,7 @@ fn du_walk(
     let mut output = String::new();
 
     for entry in &entries {
-        let child_path = path.join(&entry.name);
+        let child_path = crate::vfs::vfs_join(path, &entry.name);
         let child_display = if display == "." {
             format!("./{}", entry.name)
         } else {

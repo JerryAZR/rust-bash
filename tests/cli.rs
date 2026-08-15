@@ -468,3 +468,21 @@ fn files_nested_subdirectories() {
 // Note: `--json` without `-c` on a real TTY → exit 2 is not tested here
 // because assert_cmd runs without a TTY, so stdin is never detected as
 // a terminal. This path is covered by manual testing.
+
+#[test]
+fn json_unresolved_commands_field() {
+    let output = rust_bash()
+        .args(["--json", "-c", "missing_tool; echo done"])
+        .output()
+        .unwrap();
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+    assert_eq!(json["exit_code"], 0);
+    assert_eq!(json["stdout"], "done\n");
+    assert_eq!(json["unresolved_commands"][0], "missing_tool");
+    assert_eq!(
+        json["unresolved_commands"].as_array().map(Vec::len),
+        Some(1)
+    );
+}

@@ -198,8 +198,8 @@ impl MountableFs {
                 if entry.name.starts_with('.') {
                     continue;
                 }
-                let child_path = current_path.join(&entry.name);
-                let child_dir = dir.join(&entry.name);
+                let child_path = super::vfs_join(&current_path, &entry.name);
+                let child_dir = super::vfs_join(dir, &entry.name);
                 if entry.node_type == NodeType::Directory || entry.node_type == NodeType::Symlink {
                     self.glob_walk(&child_dir, components, child_path, results, max);
                 }
@@ -213,8 +213,8 @@ impl MountableFs {
                     continue;
                 }
                 if glob_match(pattern, &entry.name) {
-                    let child_path = current_path.join(&entry.name);
-                    let child_dir = dir.join(&entry.name);
+                    let child_path = super::vfs_join(&current_path, &entry.name);
+                    let child_dir = super::vfs_join(dir, &entry.name);
                     if rest.is_empty() {
                         results.push(child_path);
                     } else if entry.node_type == NodeType::Directory
@@ -405,7 +405,7 @@ impl VirtualFs for MountableFs {
         let (link_fs, link_rel) = self.resolve_mount(link)?;
         // If the target is absolute and resolves to the same mount as the link,
         // remap it into the mount's namespace so the underlying FS can follow it.
-        let remapped_target = if target.is_absolute() {
+        let remapped_target = if super::vfs_path_is_absolute(target) {
             if let Ok((_, target_rel)) = self.resolve_mount(target) {
                 // Find mount point for the link to compare
                 let link_mount = self.mount_point_for(link);
@@ -439,14 +439,14 @@ impl VirtualFs for MountableFs {
         let target = fs.readlink(&rel)?;
         // If the target is absolute and the link lives at a non-root mount,
         // remap the target back to the global namespace.
-        if target.is_absolute() {
+        if super::vfs_path_is_absolute(&target) {
             let mount_point = self.mount_point_for(path);
             if mount_point != Path::new("/") {
                 let inner_rel = target.strip_prefix("/").unwrap_or(&target);
                 if inner_rel.as_os_str().is_empty() {
                     return Ok(mount_point);
                 }
-                return Ok(mount_point.join(inner_rel));
+                return Ok(super::vfs_append(&mount_point, inner_rel));
             }
         }
         Ok(target)
@@ -469,7 +469,7 @@ impl VirtualFs for MountableFs {
                 if inner_rel.as_os_str().is_empty() {
                     return Ok(mount_point.clone());
                 }
-                return Ok(mount_point.join(inner_rel));
+                return Ok(super::vfs_append(mount_point, inner_rel));
             }
         }
         Ok(canonical_in_mount)

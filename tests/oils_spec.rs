@@ -230,47 +230,47 @@ fn execute_oils_case(file_stem: &str, case: &OilsTestCase, legacy_tmp_dir: bool)
         ),
         (
             "/repo/spec/testdata/return-helper.sh".into(),
-            include_bytes!("fixtures/oils/testdata/return-helper.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/return-helper.sh")),
         ),
         (
             "/repo/spec/testdata/top-level-control-flow.sh".into(),
-            include_bytes!("fixtures/oils/testdata/top-level-control-flow.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/top-level-control-flow.sh")),
         ),
         (
             "/repo/spec/testdata/getopts-1523.sh".into(),
-            include_bytes!("fixtures/oils/testdata/getopts-1523.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/getopts-1523.sh")),
         ),
         (
             "/repo/spec/testdata/continue.sh".into(),
-            include_bytes!("fixtures/oils/testdata/continue.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/continue.sh")),
         ),
         (
             "/repo/spec/testdata/break.sh".into(),
-            include_bytes!("fixtures/oils/testdata/break.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/break.sh")),
         ),
         (
             "/repo/spec/testdata/return.sh".into(),
-            include_bytes!("fixtures/oils/testdata/return.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/return.sh")),
         ),
         (
             "/repo/spec/testdata/echo-funcname.sh".into(),
-            include_bytes!("fixtures/oils/testdata/echo-funcname.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/echo-funcname.sh")),
         ),
         (
             "/repo/spec/testdata/bash-source-string.sh".into(),
-            include_bytes!("fixtures/oils/testdata/bash-source-string.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/bash-source-string.sh")),
         ),
         (
             "/repo/spec/testdata/bash-source-string2.sh".into(),
-            include_bytes!("fixtures/oils/testdata/bash-source-string2.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/bash-source-string2.sh")),
         ),
         (
             "/repo/spec/testdata/bash-source-pushtemp.sh".into(),
-            include_bytes!("fixtures/oils/testdata/bash-source-pushtemp.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/bash-source-pushtemp.sh")),
         ),
         (
             "/repo/spec/testdata/bash-source-source.sh".into(),
-            include_bytes!("fixtures/oils/testdata/bash-source-source.sh").to_vec(),
+            lf(include_bytes!("fixtures/oils/testdata/bash-source-source.sh")),
         ),
     ]));
 
@@ -448,11 +448,22 @@ fn disambiguated_keys(cases: &[OilsTestCase]) -> Vec<String> {
 // Main test function for each .test.sh file
 // ---------------------------------------------------------------------------
 
+/// Normalize CRLF to LF for embedded test scripts so Windows checkouts
+/// (git autocrlf) don't inject `\r` into sourced shell code.
+fn lf(bytes: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(bytes)
+        .replace("\r\n", "\n")
+        .into_bytes()
+}
+
 fn run_oils_spec_file(path: &Path) -> datatest_stable::Result<()> {
     // Run parser unit tests and pass-list validation once across all file invocations.
     INIT_CHECKS.call_once(run_init_checks);
 
     let content = std::fs::read_to_string(path)?;
+    // Oils .test.sh files are authored with LF endings; strip CR from CRLF
+    // checkouts (e.g. git autocrlf on Windows) so scripts stay clean.
+    let content = content.replace("\r\n", "\n");
     let test_file = parse_oils_file(&content);
 
     let file_stem = path

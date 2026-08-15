@@ -11,7 +11,7 @@ fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
     if path_str.starts_with('/') {
         PathBuf::from(path_str)
     } else {
-        PathBuf::from(cwd).join(path_str)
+        crate::vfs::vfs_resolve(cwd, path_str)
     }
 }
 
@@ -766,7 +766,7 @@ impl super::VirtualCommand for WhichCommand {
                 let full = if std::path::Path::new(arg).is_absolute() {
                     std::path::PathBuf::from(arg)
                 } else {
-                    std::path::PathBuf::from(ctx.cwd).join(arg)
+                    crate::vfs::vfs_resolve(ctx.cwd, arg)
                 };
                 if ctx.fs.exists(&full)
                     && ctx

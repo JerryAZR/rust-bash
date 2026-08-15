@@ -12,7 +12,7 @@ fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
     if path_str.starts_with('/') {
         PathBuf::from(path_str)
     } else {
-        PathBuf::from(cwd).join(path_str)
+        crate::vfs::vfs_resolve(cwd, path_str)
     }
 }
 
@@ -450,7 +450,7 @@ fn collect_dir_recursive(
     sorted_entries.sort_by(|a, b| a.name.cmp(&b.name));
 
     for entry in &sorted_entries {
-        let child = dir.join(&entry.name);
+        let child = crate::vfs::vfs_join(dir, &entry.name);
         match entry.node_type {
             crate::vfs::NodeType::Directory => {
                 collect_dir_recursive(&child, include_globs, exclude_globs, ctx, result)?;
@@ -5307,7 +5307,7 @@ fn rg_collect_dir(
             continue;
         }
 
-        let child = dir.join(&entry.name);
+        let child = crate::vfs::vfs_join(dir, &entry.name);
 
         match entry.node_type {
             crate::vfs::NodeType::Directory => {

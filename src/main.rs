@@ -34,7 +34,7 @@ struct Cli {
     #[arg(long, value_name = "KEY=VALUE")]
     env: Vec<String>,
 
-    /// Output results as JSON: {"stdout":"...","stderr":"...","exit_code":N}
+    /// Output results as JSON: {"stdout":"...","stderr":"...","exit_code":N,"unresolved_commands":[...]}
     #[arg(long)]
     json: bool,
 
@@ -145,6 +145,7 @@ fn output_result(result: &ExecResult, json_mode: bool) -> ExitCode {
             "stdout": result.stdout,
             "stderr": result.stderr,
             "exit_code": result.exit_code,
+            "unresolved_commands": result.unresolved_commands,
         });
         println!("{obj}");
     } else {
@@ -178,10 +179,15 @@ fn load_host_dir(dir: &Path, prefix: &str) -> HashMap<String, Vec<u8>> {
 }
 
 /// Parse `--files` mappings into a VFS file map.
+///
+/// Each mapping is `HOST:VFS` (VFS is absolute, so the split is at the first
+/// colon followed by `/`) or a bare host directory (mounted at the VFS root).
+/// Splitting at the first colon outright would break Windows drive-letter
+/// paths like `C:\dir:/project`.
 fn parse_file_mappings(mappings: &[String]) -> Result<HashMap<String, Vec<u8>>, (String, u8)> {
     let mut files = HashMap::new();
     for mapping in mappings {
-        if let Some((host_path, vfs_path)) = mapping.split_once(':') {
+        if let Some((host_path, vfs_path)) = split_host_vfs_mapping(mapping) {
             let vfs_path = vfs_path.trim_end_matches('/');
             let vfs_path = if vfs_path.is_empty() { "/" } else { vfs_path };
             let path = Path::new(host_path);
@@ -212,6 +218,20 @@ fn parse_file_mappings(mappings: &[String]) -> Result<HashMap<String, Vec<u8>>, 
         }
     }
     Ok(files)
+}
+
+/// Split a `--files` mapping into `(host, vfs)` at the first colon whose
+/// remainder starts with `/` (the VFS side is absolute). Skipping
+/// non-matching colons keeps Windows drive-letter paths like
+/// `C:\dir:/project` and bare `C:\dir` mappings intact. Returns `None` when
+/// the mapping is a bare host path.
+fn split_host_vfs_mapping(mapping: &str) -> Option<(&str, &str)> {
+    for (idx, _) in mapping.match_indices(':') {
+        if mapping.as_bytes().get(idx + 1) == Some(&b'/') {
+            return Some((&mapping[..idx], &mapping[idx + 1..]));
+        }
+    }
+    None
 }
 
 /// Parse `--env` values and merge with defaults.

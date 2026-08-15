@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::platform::SystemTime;
@@ -49,6 +49,31 @@ impl InMemoryFs {
         }
     }
 
+    /// List every non-root entry in the filesystem as `(path, node_type)`,
+    /// in sorted tree order. Used by `OverlayFs::diff()` to export the
+    /// upper-layer write set.
+    #[cfg(feature = "native-fs")]
+    pub(crate) fn snapshot_entries(&self) -> Vec<(PathBuf, NodeType)> {
+        fn walk(node: &FsNode, path: &Path, out: &mut Vec<(PathBuf, NodeType)>) {
+            if let FsNode::Directory { children, .. } = node {
+                for (name, child) in children {
+                    let child_path = super::vfs_join(path, name);
+                    let node_type = match child {
+                        FsNode::File { .. } => NodeType::File,
+                        FsNode::Directory { .. } => NodeType::Directory,
+                        FsNode::Symlink { .. } => NodeType::Symlink,
+                    };
+                    out.push((child_path.clone(), node_type));
+                    walk(child, &child_path, out);
+                }
+            }
+        }
+        let tree = self.root.read();
+        let mut out = Vec::new();
+        walk(&tree, Path::new("/"), &mut out);
+        out
+    }
+
     fn next_file_id(&self) -> u64 {
         fn visit(node: &FsNode, max_id: &mut u64) {
             match node {
@@ -77,6 +102,10 @@ impl InMemoryFs {
 
 /// Normalize an absolute path: resolve `.` and `..`, strip trailing slashes,
 /// reject empty paths.
+///
+/// Only `/` separates components — `\` is an ordinary filename character on
+/// every platform, so `Path::components()` must not be used here (it treats
+/// `\` as a separator on Windows).
 fn normalize(path: &Path) -> Result<PathBuf, VfsError> {
     let s = path.to_str().unwrap_or("");
     if s.is_empty() {
@@ -89,41 +118,26 @@ fn normalize(path: &Path) -> Result<PathBuf, VfsError> {
         )));
     }
 
-    let mut parts: Vec<String> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::RootDir | Component::Prefix(_) => {}
-            Component::CurDir => {}
-            Component::ParentDir => {
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
                 parts.pop();
             }
-            Component::Normal(seg) => {
-                if let Some(s) = seg.to_str() {
-                    parts.push(s.to_owned());
-                } else {
-                    return Err(VfsError::InvalidPath(format!(
-                        "non-UTF-8 component in: {}",
-                        path.display()
-                    )));
-                }
-            }
+            other => parts.push(other),
         }
     }
 
-    let mut result = PathBuf::from("/");
-    for p in &parts {
-        result.push(p);
-    }
-    Ok(result)
+    Ok(PathBuf::from(format!("/{}", parts.join("/"))))
 }
 
 /// Split a normalized absolute path into its component names (excluding root).
 fn components(path: &Path) -> Vec<&str> {
-    path.components()
-        .filter_map(|c| match c {
-            Component::Normal(s) => s.to_str(),
-            _ => None,
-        })
+    let s = path.to_str().unwrap_or("");
+    s.trim_start_matches('/')
+        .split('/')
+        .filter(|c| !c.is_empty())
         .collect()
 }
 
@@ -173,7 +187,7 @@ impl InMemoryFs {
         } else {
             let mut p = PathBuf::from("/");
             for seg in &parts[..parts.len() - 1] {
-                p.push(seg);
+                p = super::vfs_join(&p, seg);
             }
             p
         };
@@ -337,7 +351,7 @@ fn resolve_canonical(
                         current = navigate(tree_root, &resolved, true, depth - 1, tree_root)?;
                     }
                     _ => {
-                        resolved.push(name);
+                        resolved = super::vfs_join(&resolved, name);
                         current = child;
                     }
                 }
@@ -374,7 +388,7 @@ fn resolve_canonical_from_root(
                     .get(*name)
                     .ok_or_else(|| VfsError::NotFound(path.to_path_buf()))?;
                 if is_last && !follow_final {
-                    resolved.push(name);
+                    resolved = super::vfs_join(&resolved, name);
                     break;
                 }
                 match child {
@@ -385,7 +399,7 @@ fn resolve_canonical_from_root(
                         current = navigate_readonly(root, &resolved, true, depth - 1, root)?;
                     }
                     _ => {
-                        resolved.push(name);
+                        resolved = super::vfs_join(&resolved, name);
                         current = child;
                     }
                 }
@@ -952,7 +966,7 @@ fn glob_collect(
                 if name.starts_with('.') && !opts.dotglob {
                     continue;
                 }
-                let child_path = current_path.join(name);
+                let child_path = super::vfs_join(&current_path, name);
                 glob_collect(child, components, child_path, results, tree_root, max, opts);
             }
         }
@@ -979,7 +993,7 @@ fn glob_collect(
                         && match_fn(dot_name)
                         && results.len() < max
                     {
-                        results.push(current_path.join(dot_name));
+                        results.push(super::vfs_join(&current_path, dot_name));
                     }
                 }
             }
@@ -1002,7 +1016,7 @@ fn glob_collect(
                     glob_match(effective_pattern, name)
                 };
                 if matched {
-                    let child_path = current_path.join(name);
+                    let child_path = super::vfs_join(&current_path, name);
                     if rest.is_empty() {
                         results.push(child_path);
                     } else {

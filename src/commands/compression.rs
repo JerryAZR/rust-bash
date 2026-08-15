@@ -11,46 +11,13 @@ fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
     if path_str.starts_with('/') {
         PathBuf::from(path_str)
     } else {
-        PathBuf::from(cwd).join(path_str)
+        crate::vfs::vfs_resolve(cwd, path_str)
     }
 }
 
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
 fn normalize_path(path: &Path) -> PathBuf {
-    let mut components = Vec::new();
-    for comp in path.components() {
-        match comp {
-            std::path::Component::RootDir => {
-                components.clear();
-                components.push("/".to_string());
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if components.len() > 1 {
-                    components.pop();
-                }
-            }
-            std::path::Component::Normal(s) => {
-                components.push(s.to_string_lossy().to_string());
-            }
-            _ => {}
-        }
-    }
-    if components.len() == 1 && components[0] == "/" {
-        return PathBuf::from("/");
-    }
-    let mut result = String::new();
-    for (i, c) in components.iter().enumerate() {
-        if i == 0 && c == "/" {
-            result.push('/');
-        } else if i == 1 && components[0] == "/" {
-            result.push_str(c);
-        } else {
-            result.push('/');
-            result.push_str(c);
-        }
-    }
-    PathBuf::from(result)
+    crate::vfs::vfs_normalize(path)
 }
 
 /// Convert SystemTime to seconds since UNIX epoch for tar headers.
@@ -694,8 +661,8 @@ fn collect_files_recursive(
         .map_err(|e| format!("tar: {}: {}\n", base.display(), e))?;
 
     for entry in entries {
-        let full_path = base.join(&entry.name);
-        let archive_path = prefix.join(&entry.name);
+        let full_path = crate::vfs::vfs_join(base, &entry.name);
+        let archive_path = crate::vfs::vfs_join(prefix, &entry.name);
 
         match entry.node_type {
             crate::vfs::NodeType::File => {

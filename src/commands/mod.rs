@@ -427,7 +427,7 @@ impl VirtualCommand for CatCommand {
                 let path = if file.starts_with('/') {
                     std::path::PathBuf::from(file)
                 } else {
-                    std::path::PathBuf::from(ctx.cwd).join(file)
+                    crate::vfs::vfs_resolve(ctx.cwd, file)
                 };
                 match ctx.fs.read_file(&path) {
                     Ok(bytes) => (crate::shell_bytes::decode_shell_bytes(&bytes), bytes),
@@ -557,7 +557,7 @@ impl VirtualCommand for TouchCommand {
             let path = if file.starts_with('/') {
                 std::path::PathBuf::from(file)
             } else {
-                std::path::PathBuf::from(ctx.cwd).join(file)
+                crate::vfs::vfs_resolve(ctx.cwd, file)
             };
 
             if ctx.fs.exists(&path) {
@@ -634,7 +634,7 @@ impl VirtualCommand for MkdirCommand {
             let path = if dir.starts_with('/') {
                 std::path::PathBuf::from(dir)
             } else {
-                std::path::PathBuf::from(ctx.cwd).join(dir)
+                crate::vfs::vfs_resolve(ctx.cwd, dir)
             };
 
             let result = if parents {
@@ -771,7 +771,7 @@ impl VirtualCommand for LsCommand {
             } else if target.starts_with('/') {
                 std::path::PathBuf::from(target)
             } else {
-                std::path::PathBuf::from(ctx.cwd).join(target)
+                crate::vfs::vfs_resolve(ctx.cwd, target)
             };
 
             if idx > 0 {
@@ -851,11 +851,11 @@ fn ls_dir(
         .filter(|e| opts.show_all || !e.name.starts_with('.'))
         .map(|e| (e.name.clone(), e.node_type))
         .collect();
-    names.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    names.sort_by_key(|(name, _)| name.to_lowercase());
 
     if opts.long_format {
         for (name, node_type) in &names {
-            let child_path = path.join(name);
+            let child_path = crate::vfs::vfs_join(path, name);
             let meta = ctx.fs.stat(&child_path);
             let mode = match meta {
                 Ok(m) => m.mode,
@@ -887,7 +887,7 @@ fn ls_dir(
         let subdirs: Vec<(String, std::path::PathBuf)> = names
             .iter()
             .filter(|(_, t)| matches!(t, crate::vfs::NodeType::Directory))
-            .map(|(n, _)| (n.clone(), path.join(n)))
+            .map(|(n, _)| (n.clone(), crate::vfs::vfs_join(path, n)))
             .collect();
 
         for (name, subpath) in subdirs {

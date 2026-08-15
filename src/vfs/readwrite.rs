@@ -10,8 +10,7 @@
 //! and matches the behavior of other chroot-like implementations.
 
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::platform::SystemTime;
@@ -331,8 +330,27 @@ impl VirtualFs for ReadWriteFs {
 
     fn chmod(&self, path: &Path, mode: u32) -> Result<(), VfsError> {
         let resolved = self.resolve_follow(path)?;
-        let perms = std::fs::Permissions::from_mode(mode);
-        std::fs::set_permissions(&resolved, perms).map_err(|e| map_io_error(e, path))
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&resolved, perms).map_err(|e| map_io_error(e, path))
+        }
+        #[cfg(windows)]
+        {
+            // Windows has no mode bits; approximate with the read-only
+            // attribute (set when no write bit remains, mirroring unix_mode_from_metadata).
+            let mut perms = std::fs::metadata(&resolved)
+                .map_err(|e| map_io_error(e, path))?
+                .permissions();
+            perms.set_readonly(mode & 0o222 == 0);
+            std::fs::set_permissions(&resolved, perms).map_err(|e| map_io_error(e, path))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (resolved, mode);
+            Ok(())
+        }
     }
 
     fn utimes(&self, path: &Path, mtime: SystemTime) -> Result<(), VfsError> {
@@ -349,13 +367,35 @@ impl VirtualFs for ReadWriteFs {
         let resolved_link = self.resolve(link)?;
         // If rooted and target is absolute, resolve it too so the on-disk
         // symlink points to the correct real location.
-        let actual_target = if target.is_absolute() && self.root.is_some() {
+        let actual_target = if super::vfs_path_is_absolute(target) && self.root.is_some() {
             self.resolve(target)?
         } else {
             target.to_path_buf()
         };
-        std::os::unix::fs::symlink(&actual_target, &resolved_link)
-            .map_err(|e| map_io_error(e, link))
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&actual_target, &resolved_link)
+                .map_err(|e| map_io_error(e, link))
+        }
+        #[cfg(windows)]
+        {
+            // Windows symlinks need a target kind; picking based on the
+            // target's actual type (falling back to file) matches common use.
+            let is_dir = std::fs::metadata(&actual_target).is_ok_and(|m| m.is_dir());
+            let result = if is_dir {
+                std::os::windows::fs::symlink_dir(&actual_target, &resolved_link)
+            } else {
+                std::os::windows::fs::symlink_file(&actual_target, &resolved_link)
+            };
+            result.map_err(|e| map_io_error(e, link))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (actual_target, resolved_link);
+            Err(VfsError::IoError(
+                "symlink: not supported on this platform".into(),
+            ))
+        }
     }
 
     fn hardlink(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
@@ -472,22 +512,43 @@ impl VirtualFs for ReadWriteFs {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Logically normalize a path by resolving `.` and `..` without filesystem access.
+/// Logically normalize a *host* path by resolving `.` and `..` without
+/// filesystem access.
+///
+/// Unlike VFS paths, host paths on Windows carry a drive/UNC prefix
+/// (e.g. `\\?\C:\`); the prefix must be preserved or containment checks
+/// against a canonicalized root would spuriously fail.
 fn logical_normalize(path: &Path) -> PathBuf {
-    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::RootDir | Component::Prefix(_) => {
-                parts.clear();
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
+    let s = path.to_string_lossy();
+    // Split off the prefix: everything up to and including the drive colon
+    // plus its following separator run, or a leading separator run for
+    // Unix-style and UNC-rooted paths.
+    let (prefix, rest) = match s.find(':') {
+        Some(colon) => {
+            let after = &s[colon + 1..];
+            let sep_len = after
+                .chars()
+                .take_while(|c| *c == '\\' || *c == '/')
+                .count();
+            let idx = colon + 1 + sep_len;
+            (&s[..idx], &s[idx..])
+        }
+        None => {
+            let sep_len = s.chars().take_while(|c| *c == '\\' || *c == '/').count();
+            (&s[..sep_len], &s[sep_len..])
+        }
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in rest.split(['\\', '/']) {
+        match seg {
+            "" | "." => {}
+            ".." => {
                 parts.pop();
             }
-            Component::Normal(c) => parts.push(c),
+            other => parts.push(other),
         }
     }
-    let mut result = PathBuf::from("/");
+    let mut result = PathBuf::from(prefix);
     for part in parts {
         result.push(part);
     }
@@ -553,7 +614,7 @@ fn map_metadata(meta: &std::fs::Metadata) -> Metadata {
     Metadata {
         node_type,
         size: meta.len(),
-        mode: meta.permissions().mode(),
+        mode: super::unix_mode_from_metadata(meta),
         mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
         file_id: 0,
     }
