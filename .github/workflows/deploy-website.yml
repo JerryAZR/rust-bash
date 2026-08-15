@@ -1,9 +1,6 @@
 name: Deploy Website
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -24,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.commit_sha || github.sha }}
+          ref: ${{ github.event.inputs.commit_sha || github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:

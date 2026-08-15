@@ -1,9 +1,6 @@
 name: Publish npm Package
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       publish:
@@ -107,7 +104,7 @@ jobs:
   publish:
     name: Publish to npm
     needs: [build-wasm, build-native]
-    if: github.event_name == 'push' || github.event.inputs.publish == 'true'
+    if: github.event.inputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
