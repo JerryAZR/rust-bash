@@ -935,3 +935,168 @@ fn upper_layer_writes_persist_across_exec_calls() {
             .any(|w| w.path == Path::new("/tmp/result.txt"))
     );
 }
+
+// -----------------------------------------------------------------------
+// sync()/reset() — reconciling the overlay with disk state
+// -----------------------------------------------------------------------
+
+#[test]
+fn sync_drops_applied_writes_and_keeps_unapplied() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.write_file(Path::new("/README.md"), b"applied").unwrap();
+    ov.write_file(Path::new("/src/main.rs"), b"still pending")
+        .unwrap();
+    // Harness applies only the first write to disk.
+    std::fs::write(tmp.path().join("README.md"), b"applied").unwrap();
+
+    ov.sync();
+    let d = ov.diff();
+    let paths: Vec<&PathBuf> = d.writes.iter().map(|w| &w.path).collect();
+    assert!(!paths.contains(&&PathBuf::from("/README.md")));
+    assert!(paths.contains(&&PathBuf::from("/src/main.rs")));
+    // Reads fall through to disk for the dropped entry.
+    assert_eq!(ov.read_file(Path::new("/README.md")).unwrap(), b"applied");
+}
+
+#[test]
+fn sync_keeps_write_when_disk_differs() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.write_file(Path::new("/README.md"), b"sandbox version")
+        .unwrap();
+    // A native run rewrote the disk file differently.
+    std::fs::write(tmp.path().join("README.md"), b"native version").unwrap();
+
+    ov.sync();
+    let d = ov.diff();
+    let w = d
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/README.md"))
+        .unwrap();
+    assert_eq!(w.content, b"sandbox version");
+}
+
+#[test]
+fn sync_drops_byte_identical_disk_rewrite() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.write_file(Path::new("/README.md"), b"same content")
+        .unwrap();
+    // A native tool rewrote the file with identical bytes (new mtime).
+    std::fs::write(tmp.path().join("README.md"), b"same content").unwrap();
+
+    ov.sync();
+    assert!(ov.diff().writes.is_empty());
+}
+
+#[test]
+fn sync_clears_applied_deletion_and_keeps_pending_one() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_file(Path::new("/README.md")).unwrap(); // deletion applied below
+    ov.remove_file(Path::new("/src/main.rs")).unwrap(); // deletion not applied
+    std::fs::remove_file(tmp.path().join("README.md")).unwrap();
+
+    ov.sync();
+    assert_eq!(ov.diff().deletions, vec![PathBuf::from("/src/main.rs")]);
+}
+
+#[test]
+fn sync_drops_fully_applied_directory_tree() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.mkdir(Path::new("/out")).unwrap();
+    ov.write_file(Path::new("/out/a.txt"), b"a").unwrap();
+    ov.write_file(Path::new("/out/b.txt"), b"b").unwrap();
+    // Harness applies the whole tree.
+    std::fs::create_dir_all(tmp.path().join("out")).unwrap();
+    std::fs::write(tmp.path().join("out/a.txt"), b"a").unwrap();
+    std::fs::write(tmp.path().join("out/b.txt"), b"b").unwrap();
+
+    ov.sync();
+    let d = ov.diff();
+    assert!(
+        d.writes.iter().all(|w| w.path != Path::new("/out")),
+        "got {:?}",
+        d.writes
+    );
+    assert!(d.writes.iter().all(|w| w.path != Path::new("/out/a.txt")));
+}
+
+#[test]
+fn sync_keeps_directory_when_a_child_is_still_pending() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.mkdir(Path::new("/out")).unwrap();
+    ov.write_file(Path::new("/out/a.txt"), b"applied").unwrap();
+    ov.write_file(Path::new("/out/b.txt"), b"pending").unwrap();
+    std::fs::create_dir_all(tmp.path().join("out")).unwrap();
+    std::fs::write(tmp.path().join("out/a.txt"), b"applied").unwrap();
+
+    ov.sync();
+    let d = ov.diff();
+    let paths: Vec<&PathBuf> = d.writes.iter().map(|w| &w.path).collect();
+    assert!(!paths.contains(&&PathBuf::from("/out/a.txt")));
+    assert!(paths.contains(&&PathBuf::from("/out/b.txt")));
+    // The directory stays as the container of the pending child.
+    assert!(paths.contains(&&PathBuf::from("/out")));
+}
+
+#[test]
+fn sync_clears_whiteout_tree_when_disk_directory_removed() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_dir_all(Path::new("/data")).unwrap(); // recursive whiteouts
+    std::fs::remove_dir_all(tmp.path().join("data")).unwrap(); // deletion applied
+
+    ov.sync();
+    assert!(ov.diff().deletions.is_empty());
+}
+
+#[test]
+fn sync_keeps_unapplied_symlink() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.symlink(Path::new("/README.md"), Path::new("/link.md"))
+        .unwrap();
+    // Nothing applied; disk has no symlink.
+    ov.sync();
+    let d = ov.diff();
+    assert!(d.writes.iter().any(|w| w.path == Path::new("/link.md")));
+}
+
+#[test]
+fn reset_clears_pending_writes_and_deletions() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.write_file(Path::new("/README.md"), b"changed").unwrap();
+    ov.write_file(Path::new("/scratch.txt"), b"new").unwrap();
+    ov.remove_file(Path::new("/data/config.toml")).unwrap();
+
+    ov.reset();
+    let d = ov.diff();
+    assert!(d.writes.is_empty());
+    assert!(d.deletions.is_empty());
+    // Reads fall through to current disk state.
+    assert_eq!(ov.read_file(Path::new("/README.md")).unwrap(), b"# Hello");
+    assert!(ov.exists(Path::new("/data/config.toml")));
+    // New pending writes can be tracked again afterwards.
+    ov.write_file(Path::new("/again.txt"), b"x").unwrap();
+    assert!(
+        ov.diff()
+            .writes
+            .iter()
+            .any(|w| w.path == Path::new("/again.txt"))
+    );
+}

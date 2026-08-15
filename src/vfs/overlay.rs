@@ -182,6 +182,117 @@ impl OverlayFs {
         OverlayDiff { writes, deletions }
     }
 
+    /// Reconcile the overlay with current disk state: drop every upper-layer
+    /// shadow that now matches the lower directory byte-for-byte, and clear
+    /// whiteouts whose disk paths no longer exist. Entries that still differ
+    /// remain pending and keep appearing in [`OverlayFs::diff`].
+    ///
+    /// After the host applies writes (or a native run rewrites files),
+    /// `sync()` leaves the overlay holding "exactly the differences from
+    /// disk right now": applied writes and deletions disappear, failed or
+    /// conflicting ones stay visible — no per-path bookkeeping needed. Mode
+    /// bits are not compared (they are advisory on Windows).
+    pub fn sync(&self) {
+        // Pass 1: decide which upper entries match disk.
+        let entries = self.upper.snapshot_entries();
+        let matches: Vec<bool> = entries
+            .iter()
+            .map(|(path, node_type)| match node_type {
+                NodeType::File => self.file_matches_disk(path),
+                NodeType::Directory => self.dir_exists_on_disk(path),
+                NodeType::Symlink => self.symlink_matches_disk(path),
+            })
+            .collect();
+
+        // Pass 2: remove matched entries bottom-up (snapshot order is
+        // parents-first). A matched directory is dropped only when every
+        // entry beneath it is also dropped — otherwise it stays as the
+        // container of still-pending children.
+        let mut dropped: HashSet<PathBuf> = HashSet::new();
+        for (entry, matches) in entries.iter().zip(matches.iter()).rev() {
+            if !matches {
+                continue;
+            }
+            let (path, node_type) = entry;
+            if *node_type == NodeType::Directory
+                && entries.iter().any(|(other, _)| {
+                    other != path && other.starts_with(path) && !dropped.contains(other)
+                })
+            {
+                continue;
+            }
+            let removed = if *node_type == NodeType::Directory {
+                self.upper.remove_dir(path).is_ok()
+            } else {
+                self.upper.remove_file(path).is_ok()
+            };
+            if removed {
+                dropped.insert(path.clone());
+            }
+        }
+
+        // Whiteouts whose disk paths are gone (deletion applied, or removed
+        // by a native run) no longer hide anything — clear them, along with
+        // any whiteouts beneath them.
+        let stale: Vec<PathBuf> = {
+            let whiteouts = self.whiteouts.read();
+            whiteouts
+                .iter()
+                .filter(|p| !self.lower_exists(p))
+                .cloned()
+                .collect()
+        };
+        if !stale.is_empty() {
+            let mut whiteouts = self.whiteouts.write();
+            for path in &stale {
+                whiteouts.retain(|w| w != path && !w.starts_with(path));
+            }
+        }
+    }
+
+    /// Discard all pending state: clear the upper layer and the whiteout set
+    /// so the overlay re-baselines on current disk state.
+    ///
+    /// Unlike [`sync`], which keeps entries that genuinely differ from disk,
+    /// `reset` deliberately forgets them — e.g. after a native run whose disk
+    /// changes should win over the sandbox's pending opinions.
+    pub fn reset(&self) {
+        self.upper.clear();
+        self.whiteouts.write().clear();
+    }
+
+    /// True when the disk file at `path` has byte-identical content to the
+    /// upper-layer copy.
+    fn file_matches_disk(&self, path: &Path) -> bool {
+        match self.lstat_lower(path) {
+            Ok(meta) if meta.node_type == NodeType::File => {}
+            _ => return false,
+        }
+        match (self.read_lower_file(path), self.upper.read_file(path)) {
+            (Ok(disk), Ok(upper)) => disk == upper,
+            _ => false,
+        }
+    }
+
+    /// True when a directory exists at `path` on disk.
+    fn dir_exists_on_disk(&self, path: &Path) -> bool {
+        self.lstat_lower(path)
+            .is_ok_and(|m| m.node_type == NodeType::Directory)
+    }
+
+    /// True when the disk symlink at `path` has the same target as the
+    /// upper-layer copy.
+    fn symlink_matches_disk(&self, path: &Path) -> bool {
+        match self.lstat_lower(path) {
+            Ok(meta) if meta.node_type == NodeType::Symlink => {}
+            _ => return false,
+        }
+        match (self.readlink_lower(path), self.upper.readlink(path)) {
+            (Ok(disk), Ok(upper)) => disk == upper,
+            _ => false,
+        }
+    }
+
     // ------------------------------------------------------------------
     // Whiteout helpers
     // ------------------------------------------------------------------

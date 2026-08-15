@@ -81,7 +81,10 @@ impl Harness {
             return Ok(false);
         }
 
-        // 3. Inspect and (optionally) apply the write set.
+        // 3. Inspect and (optionally) apply the write set. Individual
+        // failures need no bookkeeping: sync() below drops only the entries
+        // that now match disk, so anything that failed to apply (or was
+        // skipped for a prompt) stays visible as a pending change.
         let diff = self.overlay.diff();
         for w in &diff.writes {
             match self.classify(&w.path) {
@@ -102,6 +105,27 @@ impl Harness {
                 Apply::Prompt => println!("PROMPT delete: {}", self.host_path(p).display()),
                 Apply::Discard => {}
             }
+        }
+
+        // 4. Reconcile: applied writes/deletions drop out of the overlay;
+        // whatever still differs from disk is the actionable remainder.
+        self.overlay.sync();
+        let remaining = self.overlay.diff();
+        // Sandbox-internal entries (classify == Discard) are intentionally
+        // never applied and stay in the overlay inertly — only count what
+        // the harness still owes a decision or a retry on.
+        let owed: usize = remaining
+            .writes
+            .iter()
+            .filter(|w| !matches!(self.classify(&w.path), Apply::Discard))
+            .count()
+            + remaining
+                .deletions
+                .iter()
+                .filter(|p| !matches!(self.classify(p), Apply::Discard))
+                .count();
+        if owed > 0 {
+            println!("pending after sync: {owed} entries need a retry or decision");
         }
         Ok(true)
     }

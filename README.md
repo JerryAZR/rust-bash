@@ -499,6 +499,10 @@ for w in &d.writes {
 for p in &d.deletions {
     // lower-layer paths removed during the session (top-most whiteouts)
 }
+
+// After applying (or when disk changed underneath), reconcile:
+// shadows that now match disk are dropped, genuine differences stay.
+overlay.sync();
 ```
 
 ### ReadWriteFs — Direct filesystem access

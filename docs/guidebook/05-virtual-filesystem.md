@@ -161,6 +161,13 @@ pattern:
 - Subshell deep-clones get their own upper layer; mutations in the original
   handle's layer (normal `exec()` calls) are what `diff()` reports.
 
+**Reconciliation.** Shadows persist even after the host applies them to disk —
+the overlay never re-reads a path it has an upper copy of. `sync()` drops
+every shadow that now matches disk byte-for-byte (and whiteouts whose disk
+paths are gone), leaving `diff()` reporting exactly the still-pending
+changes; `reset()` clears all pending state to re-baseline on disk. Both are
+host-facing maintenance operations; scripts never trigger them.
+
 Keep a second `Arc<OverlayFs>` handle when mounting through `MountableFs` —
 `diff()` is called on the host's handle, while the interpreter operates on the
 same underlying instance.

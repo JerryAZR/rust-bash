@@ -492,6 +492,7 @@ Add VFS trait methods for better compatibility with real-world shell scripts:
 
 - ✅ **Windows platform support** — default features (including `native-fs` backends) compile and the full test suite passes on Windows. VFS paths are Unix-style by construction (`vfs_join`/`vfs_normalize` helpers replace `PathBuf::push`/`join` and `Path::components()`, which emit/split on `\` on Windows); `Path::is_absolute()` on VFS paths replaced with `vfs_path_is_absolute()`; Windows file modes map optimistically (`0o755`, read-only attribute → `0o555`); `ReadWriteFs` containment preserves drive/UNC prefixes; CLI `--files` handles drive-letter paths; fixtures normalize CRLF checkouts (`.gitattributes` forces LF).
 - ✅ **`OverlayFs::diff()`** — exports the upper-layer write set (`OverlayWrite`: path, node type, content, mode) and lower-layer deletions (top-most whiteouts) so hosts can apply sandboxed writes to a real project directory (or prompt) after execution. See Chapter 5.
+- ✅ **`OverlayFs::sync()` / `reset()`** — content-based reconciliation with disk: `sync()` drops shadows that now match byte-for-byte (applied writes, byte-identical native rewrites, applied deletions) leaving `diff()` reporting exactly the still-pending changes; `reset()` clears all pending state to re-baseline on disk.
 
 ### M9.11 — Agent Workflow Integration Tests
 

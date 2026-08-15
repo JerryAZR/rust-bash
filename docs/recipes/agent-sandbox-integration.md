@@ -210,6 +210,37 @@ via `MountableFs` if you prefer structural separation. The worked example
 additionally routes writes into the project's `.git` directory to the prompt
 path — a conservative default worth copying.
 
+### Reconciling with disk: `sync()` and `reset()`
+
+The overlay never re-reads a file it has an upper-layer copy of — once a
+path is touched in-sandbox, the shadow persists even after you apply it to
+disk, and external changes to that path (e.g. from a native rerun) are
+invisible until the shadow is dropped. Two methods manage that:
+
+**`sync()`** reconciles by content: every upper-layer entry that now matches
+disk byte-for-byte is dropped, and whiteouts whose disk paths no longer exist
+are cleared. Everything that still differs stays pending and remains in
+`diff()`. This makes the apply loop self-verifying — apply everything,
+ignore per-file failures, then sync and read `diff()` to get exactly the
+writes that failed or were skipped:
+
+```rust
+for w in &overlay.diff().writes {
+    let host = map_to_host(&w.path);
+    let _ = apply_to_disk(&host, w);   // failures need no bookkeeping
+}
+overlay.sync();
+let failed = overlay.diff();           // exactly the unapplied writes
+```
+
+A byte-identical rewrite by a native tool is also dropped (content
+equivalence); a conflicting native rewrite keeps the sandbox version as a
+pending change for the harness to resolve. Mode bits are never compared.
+
+**`reset()`** discards all pending state (upper layer + whiteouts) so the
+overlay re-baselines on current disk — the "trust disk, forget everything"
+switch, e.g. after a native run whose changes should win.
+
 On Windows, `w.mode` comes from an optimistic mapping (`0o755` normally,
 `0o555` when the read-only attribute is set) — treat it as advisory; there
 are no Unix permission bits to apply.

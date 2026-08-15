@@ -49,6 +49,18 @@ impl InMemoryFs {
         }
     }
 
+    /// Drop every entry, leaving an empty filesystem with the default root
+    /// directory. Used by `OverlayFs::reset()` to re-baseline on disk state.
+    #[cfg(feature = "native-fs")]
+    pub(crate) fn clear(&self) {
+        let mut root = self.root.write();
+        *root = FsNode::Directory {
+            children: BTreeMap::new(),
+            mode: 0o755,
+            mtime: SystemTime::now(),
+        };
+    }
+
     /// List every non-root entry in the filesystem as `(path, node_type)`,
     /// in sorted tree order. Used by `OverlayFs::diff()` to export the
     /// upper-layer write set.
