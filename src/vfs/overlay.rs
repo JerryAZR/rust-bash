@@ -116,6 +116,12 @@ impl OverlayFs {
     /// upper layer are reported as writes; their removal does not appear in
     /// `deletions` since there is nothing on disk to delete.
     pub fn diff(&self) -> OverlayDiff {
+        // snapshot and the per-entry reads/writes below cannot observe each
+        // other's effects mid-walk: hosts call diff() outside exec(), and the
+        // interpreter is single-threaded per exec(). The unwrap_or_default /
+        // map_or fallbacks therefore only fire on an internal invariant
+        // violation, where an empty entry is preferable to panicking in a
+        // host-facing API.
         let mut writes = Vec::new();
         for (path, node_type) in self.upper.snapshot_entries() {
             match node_type {
