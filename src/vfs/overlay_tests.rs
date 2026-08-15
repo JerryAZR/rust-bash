@@ -891,3 +891,14 @@ fn diff_reflects_writes_through_shell_exec() {
     );
     assert!(tmp.path().join("data/config.toml").exists());
 }
+
+#[test]
+fn stat_resolves_dotdot_segments() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    let meta = ov.stat(Path::new("/data/../README.md")).unwrap();
+    assert_eq!(meta.node_type, NodeType::File);
+    let content = ov.read_file(Path::new("/./data/../README.md")).unwrap();
+    assert_eq!(content, b"# Hello");
+}

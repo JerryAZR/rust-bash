@@ -544,3 +544,20 @@ mod tests {
         );
     }
 }
+
+// ======================================================================
+// Path normalization through the public API
+// ======================================================================
+
+#[test]
+fn stat_resolves_dotdot_segments() {
+    use crate::vfs::{NodeType, ReadWriteFs, VirtualFs};
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fs = ReadWriteFs::with_root(tmp.path()).unwrap();
+    std::fs::write(tmp.path().join("a.txt"), b"data").unwrap();
+
+    // `..` segments collapse logically before hitting the real FS
+    let meta = fs.stat(std::path::Path::new("/x/../a.txt")).unwrap();
+    assert_eq!(meta.node_type, NodeType::File);
+    assert_eq!(meta.size, 4);
+}

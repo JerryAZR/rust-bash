@@ -100,36 +100,9 @@ impl InMemoryFs {
 // Path utilities
 // ---------------------------------------------------------------------------
 
-/// Normalize an absolute path: resolve `.` and `..`, strip trailing slashes,
-/// reject empty paths.
-///
-/// Only `/` separates components — `\` is an ordinary filename character on
-/// every platform, so `Path::components()` must not be used here (it treats
-/// `\` as a separator on Windows).
+/// Normalize an absolute path: resolve `.` and `..`.
 fn normalize(path: &Path) -> Result<PathBuf, VfsError> {
-    let s = path.to_str().unwrap_or("");
-    if s.is_empty() {
-        return Err(VfsError::InvalidPath("empty path".into()));
-    }
-    if !super::vfs_path_is_absolute(path) {
-        return Err(VfsError::InvalidPath(format!(
-            "path must be absolute: {}",
-            path.display()
-        )));
-    }
-
-    let mut parts: Vec<&str> = Vec::new();
-    for seg in s.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            other => parts.push(other),
-        }
-    }
-
-    Ok(PathBuf::from(format!("/{}", parts.join("/"))))
+    super::vfs_normalize_checked(path)
 }
 
 /// Split a normalized absolute path into its component names (excluding root).

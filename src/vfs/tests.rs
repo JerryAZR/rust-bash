@@ -727,3 +727,39 @@ fn trait_deep_clone_produces_independent_copy() {
     assert_eq!(fs.read_file(Path::new("/a.txt")).unwrap(), b"original");
     assert!(!fs.exists(Path::new("/new.txt")));
 }
+
+// ==========================================================================
+// Unix-style path helpers
+// ==========================================================================
+
+#[test]
+fn vfs_normalize_resolves_dotdot_segments() {
+    use super::vfs_normalize;
+    let p = PathBuf::from("/a/b/../c");
+    assert_eq!(vfs_normalize(&p), PathBuf::from("/a/c"));
+    // Leading `..` at root collapses to root
+    assert_eq!(vfs_normalize(&PathBuf::from("/../a")), PathBuf::from("/a"));
+    // Relative input stays relative and collapses
+    assert_eq!(vfs_normalize(&PathBuf::from("a/../b")), PathBuf::from("b"));
+}
+
+#[test]
+fn vfs_resolve_joins_with_forward_slash_only() {
+    use super::vfs_resolve;
+    assert_eq!(
+        vfs_resolve("/home/user", "src/main.rs"),
+        PathBuf::from("/home/user/src/main.rs")
+    );
+    assert_eq!(vfs_resolve("/", "file.txt"), PathBuf::from("/file.txt"));
+    assert_eq!(vfs_resolve("/any", "/abs/path"), PathBuf::from("/abs/path"));
+}
+
+#[test]
+fn vfs_join_appends_single_component_with_forward_slash() {
+    use super::vfs_join;
+    assert_eq!(vfs_join(&PathBuf::from("/a"), "b"), PathBuf::from("/a/b"));
+    assert_eq!(vfs_join(&PathBuf::from("/"), "a"), PathBuf::from("/a"));
+    // A component containing a backslash is a literal filename
+    let joined = vfs_join(&PathBuf::from("/a"), "b\\c");
+    assert_eq!(joined.to_string_lossy(), "/a/b\\c");
+}

@@ -73,6 +73,34 @@ pub(crate) fn vfs_append(base: &Path, rel: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// Normalize an absolute VFS path: resolve `.` and `..`, strip trailing
+/// slashes, reject empty and non-absolute paths. Splits on `/` only — `\` is
+/// an ordinary filename character (see [`vfs_normalize`] for why
+/// `Path::components()` must not be used on VFS paths).
+pub(crate) fn vfs_normalize_checked(path: &Path) -> Result<PathBuf, VfsError> {
+    let s = path.to_str().unwrap_or("");
+    if s.is_empty() {
+        return Err(VfsError::InvalidPath("empty path".into()));
+    }
+    if !vfs_path_is_absolute(path) {
+        return Err(VfsError::InvalidPath(format!(
+            "path must be absolute: {}",
+            path.display()
+        )));
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in s.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    Ok(PathBuf::from(format!("/{}", parts.join("/"))))
+}
+
 /// Resolve a possibly-relative VFS path string against a cwd string, using `/`
 /// separators only (never the host separator).
 pub(crate) fn vfs_resolve(cwd: &str, path: &str) -> PathBuf {

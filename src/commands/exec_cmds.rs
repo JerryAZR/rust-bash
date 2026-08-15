@@ -6,11 +6,7 @@ use crate::vfs::NodeType;
 use std::path::{Path, PathBuf};
 
 fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
-    if path_str.starts_with('/') {
-        PathBuf::from(path_str)
-    } else {
-        crate::vfs::vfs_resolve(cwd, path_str)
-    }
+    crate::vfs::vfs_resolve(cwd, path_str)
 }
 
 // ── xargs ────────────────────────────────────────────────────────────

@@ -52,11 +52,7 @@ struct DiffInput<'a> {
 }
 
 fn resolve_path(path_str: &str, cwd: &str) -> PathBuf {
-    if path_str.starts_with('/') {
-        PathBuf::from(path_str)
-    } else {
-        crate::vfs::vfs_resolve(cwd, path_str)
-    }
+    crate::vfs::vfs_resolve(cwd, path_str)
 }
 
 fn preprocess_line(line: &str, opts: &DiffOpts) -> String {

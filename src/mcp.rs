@@ -391,6 +391,18 @@ mod tests {
     }
 
     #[test]
+    fn test_bash_tool_call_reports_unresolved_commands() {
+        let mut shell = create_test_shell();
+        let params = json!({
+            "name": "bash",
+            "arguments": { "command": "echo hi; git status" }
+        });
+        let result = handle_tools_call(&mut shell, Some(&params)).unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unresolved_commands: git"), "got: {text}");
+    }
+
+    #[test]
     fn test_write_and_read_file_tool() {
         let mut shell = create_test_shell();
 
