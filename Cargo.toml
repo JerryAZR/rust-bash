@@ -36,6 +36,10 @@ native-fs = []
 name = "rust-bash"
 required-features = ["cli"]
 
+[[example]]
+name = "agent_harness"
+required-features = ["native-fs"]
+
 [dependencies]
 base64 = "0.22"
 bitflags = "2.11.0"

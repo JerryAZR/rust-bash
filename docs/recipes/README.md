@@ -15,6 +15,7 @@ Task-oriented guides for common use cases. Each recipe is a self-contained docum
 | [Multi-Step Sessions](multi-step-sessions.md) | Maintain state across multiple `exec()` calls for agents and REPLs |
 | [Text Processing Pipelines](text-processing.md) | Build data pipelines with grep, sed, awk, jq, sort, and more |
 | [Embedding in an AI Agent](ai-agent-tool.md) | Set up rust-bash as a sandboxed tool for LLM function calling (OpenAI, Anthropic, Vercel AI SDK, LangChain) |
+| [Agent Sandbox Integration](agent-sandbox-integration.md) | Best-effort sandbox loop: unknown-command native fallback + OverlayFs write tracking/apply |
 | [MCP Server](mcp-server.md) | Built-in MCP server for Claude Desktop, Cursor, VS Code, Windsurf, Cline |
 | [Error Handling](error-handling.md) | Handle errors, use `set -e`/`set -u`/`set -o pipefail`, and recover gracefully |
 | [Shell Scripting Features](shell-scripting.md) | Variables, control flow, functions, arithmetic, subshells, and more |

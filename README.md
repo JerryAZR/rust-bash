@@ -263,7 +263,7 @@ const bashTool = tool(
 );
 ```
 
-See [AI Agent Tool Recipe](docs/recipes/ai-agent-tool.md) for complete agent loop examples.
+See [AI Agent Tool Recipe](docs/recipes/ai-agent-tool.md) for complete agent loop examples, and [Agent Sandbox Integration](docs/recipes/agent-sandbox-integration.md) for the best-effort sandbox pattern (unknown-command native fallback + write tracking via `OverlayFs::diff()`).
 
 ## MCP Server
 
