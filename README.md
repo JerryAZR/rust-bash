@@ -1,6 +1,6 @@
 # rust-bash
 
-A sandboxed bash interpreter for AI Agents, built in Rust. Execute bash scripts safely with a virtual filesystem — no containers, no VMs, no host access.
+A bash interpreter for AI agent harnesses, built in Rust. Run agent-generated scripts in-process over your real project directory — reads come from disk, **writes stay in memory until you commit them**, and commands the sandbox can't run are **reported back so you can fall back to a real shell**. No containers, no VMs, no subprocesses.
 
 ### 🌐 [Try it in the browser →](https://rustbash.dev)
 
@@ -8,7 +8,9 @@ Interactive showcase with 80+ commands running via WASM. Includes an AI agent yo
 
 ## Highlights
 
-- **Virtual filesystem** — all file operations happen in memory by default. No host files are touched.
+- **Selective, caller-side commits** — `OverlayFs` runs scripts over a real directory: reads from disk, writes to an in-memory layer, disk never touched. `diff()` exports the exact write set so *you* decide per path what to apply, prompt about, or discard; `sync()` reconciles after applying.
+- **Unknown-command signaling** — `analyze_commands()` (pre-flight) and `ExecResult::unresolved_commands` (runtime backstop) tell the caller exactly which commands the sandbox can't run, so the harness can rerun the whole script natively (e.g. Git Bash on Windows).
+- **Cross-platform** — runs on Linux, macOS, and Windows (CI-tested on Linux and Windows). VFS paths are Unix-style (`/`-separated) everywhere.
 - **80 commands** — echo, cat, grep, awk, sed, jq, find, sort, diff, curl, and many more.
 - **Full bash syntax** — pipelines, redirections, variables, control flow, functions, command substitution, globs, brace expansion, arithmetic, here-documents, case statements.
 - **Execution limits** — 10 configurable bounds (time, commands, loops, output size, call depth, string length, glob results, substitution depth, heredoc size, brace expansion).
@@ -19,6 +21,67 @@ Interactive showcase with 80+ commands running via WASM. Includes an AI agent yo
 - **MCP server** — built-in Model Context Protocol server for Claude Desktop, Cursor, VS Code.
 - **Embeddable** — use as a Rust crate with a builder API. Custom commands via the `VirtualCommand` trait.
 - **CLI binary** — standalone `rust-bash` command with `-c`, `--files`, `--env`, `--cwd`, `--json` flags, MCP server mode, and an interactive REPL.
+
+## The agent sandbox pattern
+
+The primary use case: a coding-agent harness that runs scripts as a
+*best-effort* sandbox over the real project directory. The harness — not the
+sandbox — owns the two policy decisions:
+
+1. **Unknown commands** → rerun the whole script natively (never partially).
+2. **File writes** → inspect the exact change set, then apply / prompt / discard per path.
+
+```rust
+use rust_bash::{OverlayFs, RustBashBuilder};
+use std::sync::Arc;
+
+// Reads from the project on disk; writes stay in memory. Disk is never modified.
+let overlay = Arc::new(OverlayFs::new("./my_project").unwrap());
+let mut shell = RustBashBuilder::new()
+    .fs(overlay.clone())
+    .cwd("/")
+    .abort_on_unresolved_commands(true)  // stop at the first unknown command
+    .build()
+    .unwrap();
+let script = "echo patched > README.md";
+
+// 1. Pre-flight: statically detect commands the sandbox doesn't implement.
+let analysis = shell.analyze_commands(script).unwrap();
+if !analysis.unresolved.is_empty() {
+    // e.g. ["git", "kubectl"] — rerun the whole script natively instead.
+}
+
+// 2. Execute in the sandbox. Runtime misses (dynamic names like "$cmd")
+//    that pre-flight can't see are reported as the backstop.
+let result = shell.exec(script).unwrap();
+if !result.unresolved_commands.is_empty() {
+    // Skip steps 3–4 (optionally overlay.reset()): discard the partial
+    // output AND pending overlay writes, then rerun natively.
+}
+
+// 3. Selectively commit the write set. diff() reports exactly what changed:
+//    every created/modified path (with content bytes) and every deletion.
+let d = overlay.diff();
+for w in &d.writes {
+    // w.path (VFS path), w.node_type, w.content, w.mode
+    // apply inside the project, prompt for paths outside it — your policy.
+}
+for p in &d.deletions {
+    // on-disk paths removed during the session — delete, prompt, or skip.
+}
+
+// 4. Reconcile: drop applied shadows; diff() now reports only what's still pending.
+overlay.sync();
+```
+
+This pattern is currently a Rust-crate capability — the npm package surfaces
+`unresolvedCommands` on results but does not yet expose `OverlayFs` or
+`analyze_commands()`.
+
+Works on Windows out of the box (the overlay root can be `C:/Users/me/project`;
+VFS paths inside are Unix-style). See the full workflow in the
+[Agent Sandbox Integration recipe](docs/recipes/agent-sandbox-integration.md)
+and the runnable [`examples/agent_harness.rs`](examples/agent_harness.rs).
 
 ## Installation
 
@@ -99,25 +162,11 @@ assert_eq!(result.exit_code, 0);
 
 ### Detecting commands the sandbox can't run
 
-When a command name resolves to nothing, `ExecResult::unresolved_commands` lists the
-missing names (execution continues, matching bash's exit-127 behavior). Hosts that
-need to rerun such scripts natively can stop at the first miss instead, or check a
-script statically before running it:
-
-```rust
-// Execution-time: record misses, stop the script at the first one.
-let mut shell = RustBashBuilder::new()
-    .abort_on_unresolved_commands(true)
-    .build()
-    .unwrap();
-let result = shell.exec("docker build .").unwrap();
-assert_eq!(result.unresolved_commands, vec!["docker"]);
-
-// Parse-time: analyze a script without executing anything.
-let shell = RustBashBuilder::new().build().unwrap();
-let analysis = shell.analyze_commands("git status && kubectl get pods").unwrap();
-assert_eq!(analysis.unresolved, vec!["git", "kubectl"]);
-```
+Unknown-command reporting works without an overlay, too. When a command name
+resolves to nothing, `ExecResult::unresolved_commands` lists the missing names
+(execution continues by default, matching bash's exit-127 behavior; enable
+`abort_on_unresolved_commands` to stop at the first miss), and
+`analyze_commands()` checks a script statically without executing anything.
 
 ## Custom Commands
 
@@ -383,6 +432,7 @@ interactive REPL with readline support:
 
 ## Use Cases
 
+- **Coding-agent harnesses** — best-effort sandbox over the real project directory: writes stay in memory until you commit them selectively (`OverlayFs::diff()`/`sync()`), and unknown commands are signaled so you can rerun natively
 - **AI agent tools** — give LLMs a bash sandbox without container overhead
 - **Code sandboxes** — run user-submitted scripts safely
 - **Testing** — deterministic bash execution with a controlled filesystem
@@ -488,22 +538,11 @@ let mut shell = RustBashBuilder::new()
 
 let result = shell.exec("cat /src/main.rs").unwrap();    // reads from disk
 shell.exec("echo patched > /src/main.rs").unwrap();       // writes to memory only
-
-// Export exactly what the session changed; apply it to disk yourself
-// (or prompt before applying):
-let d = overlay.diff();
-for w in &d.writes {
-    // w.path (VFS path), w.node_type, w.content (bytes), w.mode
-    // apply inside your project directory, or prompt for paths outside it
-}
-for p in &d.deletions {
-    // lower-layer paths removed during the session (top-most whiteouts)
-}
-
-// After applying (or when disk changed underneath), reconcile:
-// shadows that now match disk are dropped, genuine differences stay.
-overlay.sync();
 ```
+
+`diff()` exports the exact change set (writes with content bytes, plus
+deletions) for selective caller-side commits, and `sync()` reconciles with
+disk after applying — see [The agent sandbox pattern](#the-agent-sandbox-pattern).
 
 ### ReadWriteFs — Direct filesystem access
 
