@@ -10,7 +10,8 @@ This document captures the research for this fork's target use case:
 
 It maps what already exists in rust-bash onto that workflow, identifies the
 gaps, and evaluates the options for adding a WASI CPython tool that shares
-the same filesystem view.
+the same filesystem view. Scope of what this fork maintains at all is
+tracked separately in [fork-scope.md](fork-scope.md).
 
 ---
 
