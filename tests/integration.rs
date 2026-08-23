@@ -2561,8 +2561,56 @@ fn function_call_depth_limit() {
         })
         .build()
         .unwrap();
-    let r = sh.exec("f() { f; }; f");
-    assert!(r.is_err());
+    let err = sh.exec("f() { f; }; f").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            rust_bash::RustBashError::LimitExceeded {
+                limit_name: "max_call_depth",
+                ..
+            }
+        ),
+        "expected LimitExceeded(max_call_depth), got: {err:?}"
+    );
+}
+
+#[test]
+fn execution_is_unbounded_by_default() {
+    // The headline contract: limits are caller opt-in. A default shell must
+    // exceed several agent_preset() bounds without error.
+    let mut sh = shell();
+    // agent_preset: max_loop_iterations = 10_000, max_command_count = 10_000
+    let r = sh
+        .exec("for i in $(seq 1 20000); do :; done; echo done")
+        .unwrap();
+    assert_eq!(r.stdout, "done\n");
+    // agent_preset: max_brace_expansion = 10_000
+    let r = sh.exec("echo {1..20000} | wc -w").unwrap();
+    assert_eq!(r.stdout.trim(), "20000");
+}
+
+#[test]
+fn execution_limits_default_vs_preset_contract() {
+    let unbounded = rust_bash::ExecutionLimits::default();
+    assert_eq!(unbounded.max_call_depth, usize::MAX);
+    assert_eq!(unbounded.max_execution_time, std::time::Duration::MAX);
+    let preset = rust_bash::ExecutionLimits::agent_preset();
+    assert_eq!(preset.max_call_depth, 25);
+    assert_eq!(
+        preset.max_execution_time,
+        std::time::Duration::from_secs(30)
+    );
+}
+
+#[test]
+fn python_is_an_unresolved_command_in_bash() {
+    // Design contract: sandboxed Python is a separate tool; `python` in bash
+    // must NOT resolve, so project Python work (with dependencies) offloads
+    // to the host via the unresolved-command path.
+    let mut sh = shell();
+    let r = sh.exec("python --version").unwrap();
+    assert_eq!(r.unresolved_commands, vec!["python".to_string()]);
+    assert_eq!(r.exit_code, 127);
 }
 
 #[test]

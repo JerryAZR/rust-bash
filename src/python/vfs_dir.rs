@@ -48,6 +48,16 @@ pub(crate) fn map_filetype(t: NodeType) -> FileType {
     }
 }
 
+/// Resolve a WASI `SystemTimeSpec` to a concrete `SystemTime` (`SymbolicNow`
+/// = wall-clock now). Returns `None` when no time was specified.
+pub(crate) fn resolve_time_spec(spec: Option<SystemTimeSpec>) -> Option<std::time::SystemTime> {
+    match spec {
+        Some(SystemTimeSpec::SymbolicNow) => Some(std::time::SystemTime::now()),
+        Some(SystemTimeSpec::Absolute(t)) => Some(t.into_std()),
+        None => None,
+    }
+}
+
 pub(crate) fn map_metadata(m: &Metadata, filetype: FileType) -> Filestat {
     Filestat {
         device_id: 0,
@@ -62,7 +72,7 @@ pub(crate) fn map_metadata(m: &Metadata, filetype: FileType) -> Filestat {
 }
 
 /// A `WasiDir` rooted at an absolute path inside a `VirtualFs`.
-pub struct VfsDir {
+pub(crate) struct VfsDir {
     fs: Arc<dyn VirtualFs>,
     /// Absolute VFS path of this directory.
     path: PathBuf,
@@ -82,7 +92,11 @@ impl VfsDir {
     }
 
     fn resolve(&self, relative: &str) -> PathBuf {
-        vfs_resolve(self.path.to_str().unwrap_or("/"), relative)
+        let base = self
+            .path
+            .to_str()
+            .expect("VFS paths are built from UTF-8 strings");
+        vfs_resolve(base, relative)
     }
 
     fn stat_follow(&self, path: &Path, follow: bool) -> Result<Metadata, VfsError> {
@@ -198,12 +212,15 @@ impl WasiDir for VfsDir {
         let parent = self.path.parent().unwrap_or(&self.path).to_path_buf();
         let mut all: Vec<(String, FileType, u64)> = Vec::with_capacity(entries.len() + 2);
         for (name, dir) in [(".".to_string(), &self.path), ("..".to_string(), &parent)] {
+            // inode 0 is the getdents "deleted entry" convention; wasi-libc
+            // tolerates it, and CPython never reads d_ino. Only hit if stat
+            // of an entry that readdir just listed fails (shouldn't happen).
             let inode = self.fs.stat(dir).map(|m| m.file_id).unwrap_or(0);
             all.push((name, FileType::Directory, inode));
         }
         for e in entries {
             let child = crate::vfs::vfs_join(&self.path, &e.name);
-            let inode = self.fs.stat(&child).map(|m| m.file_id).unwrap_or(0);
+            let inode = self.fs.stat(&child).map(|m| m.file_id).unwrap_or(0); // see note above
             all.push((e.name, map_filetype(e.node_type), inode));
         }
 
@@ -269,7 +286,7 @@ impl WasiDir for VfsDir {
             .as_any()
             .downcast_ref::<VfsDir>()
             .filter(|d| Arc::ptr_eq(&d.fs, &self.fs))
-            .ok_or_else(|| Error::invalid_argument().context("rename across filesystems"))?;
+            .ok_or_else(|| Error::from(Errno::Xdev).context("rename across filesystems"))?;
         self.fs
             .rename(&self.resolve(path), &dest.resolve(dest_path))
             .map_err(map_err)
@@ -285,7 +302,7 @@ impl WasiDir for VfsDir {
             .as_any()
             .downcast_ref::<VfsDir>()
             .filter(|d| Arc::ptr_eq(&d.fs, &self.fs))
-            .ok_or_else(|| Error::invalid_argument().context("hard link across filesystems"))?;
+            .ok_or_else(|| Error::from(Errno::Xdev).context("hard link across filesystems"))?;
         self.fs
             .hardlink(&self.resolve(path), &dest.resolve(target_path))
             .map_err(map_err)
@@ -300,10 +317,8 @@ impl WasiDir for VfsDir {
     ) -> Result<(), Error> {
         let _ = (atime, follow_symlinks);
         let full = self.resolve(path);
-        let mtime = match mtime {
-            Some(SystemTimeSpec::SymbolicNow) => std::time::SystemTime::now(),
-            Some(SystemTimeSpec::Absolute(t)) => t.into_std(),
-            None => return Ok(()),
+        let Some(mtime) = resolve_time_spec(mtime) else {
+            return Ok(());
         };
         self.fs.utimes(&full, mtime).map_err(map_err)
     }

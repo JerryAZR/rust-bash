@@ -395,8 +395,8 @@ stays an unresolved command in bash so project Python work offloads to the
 host). Option (a) won: CPython 3.12.0 `wasm32-wasip1` under wasmtime 46.0.3
 + wasi-common 46.0.3, bridge in `src/python/` behind the `python` feature.
 See `docs/design/python-sandbox-shared-fs.md` §0 and
-`docs/design/python-wasm-artifacts-research.md`. Remaining follow-ups:
-fuel-based execution limits, module-compile caching.
+`docs/design/python-wasm-artifacts-research.md`. Remaining follow-up:
+module-compile caching.
 
 ### M8.5 — Embedded JavaScript Runtime
 

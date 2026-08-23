@@ -331,6 +331,7 @@ fn python_huge_offset_write_fails_without_host_abort() {
     let f = fixture(&[("/small.bin", b"x")]);
     // A guest-controlled offset must hit the bridge's EFBIG guard, not a
     // host allocation. If the host survives to assert, the guard worked.
+    // (Relies on try_reserve(1 PiB) failing on 47-bit-VA hosts; a 5-level-
     let out = run_python(
         f.overlay.clone(),
         r#"import os
@@ -359,14 +360,15 @@ fn python_huge_truncate_fails_without_host_abort() {
     let f = fixture(&[("/small.bin", b"x")]);
     let out = run_python(
         f.overlay.clone(),
-        "import os; os.truncate('/small.bin', 2**60)",
+        r#"import os, errno
+try:
+    os.truncate('/small.bin', 2**60)
+    print('TRUNCATE SUCCEEDED')
+except OSError as e:
+    print('truncate raised EFBIG:', e.errno == errno.EFBIG)
+"#,
     );
-    assert_eq!(out.exit_code, 1);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("OSError"),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert_eq!(out.stdout, b"truncate raised EFBIG: True\n");
     let r = rust_bash::VirtualFs::read_file(&*f.overlay, Path::new("/small.bin")).unwrap();
     assert_eq!(r, b"x");
 }
@@ -377,14 +379,15 @@ fn python_nofollow_open_on_symlink_fails() {
     f.shell.exec("ln -s /real.txt /link.txt").unwrap();
     let out = run_python(
         f.overlay,
-        "import os; os.open('/link.txt', os.O_RDONLY | os.O_NOFOLLOW)",
+        r#"import os, errno
+try:
+    os.open('/link.txt', os.O_RDONLY | os.O_NOFOLLOW)
+    print('OPEN SUCCEEDED')
+except OSError as e:
+    print('open raised ELOOP:', e.errno == errno.ELOOP)
+"#,
     );
-    assert_eq!(out.exit_code, 1);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("OSError"),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert_eq!(out.stdout, b"open raised ELOOP: True\n");
 }
 
 #[test]
@@ -450,11 +453,13 @@ except OSError as e:
 #[test]
 fn python_fuel_budget_stops_runaway_script() {
     let f = fixture(&[]);
+    // Budget rationale: measured CPython boot (wasi-vfs init + interpreter
+    // startup) costs ~2–5×10^8 fuel on this artifact/host; 2×10^9 leaves
+    // 4–10× margin for startup variance, and the loop burns the rest.
     let limits = rust_bash::python::PythonLimits {
-        fuel: Some(10_000_000_000),
+        fuel: Some(2_000_000_000),
         ..Default::default()
     };
-    let start = std::time::Instant::now();
     let result = interpreter().run(
         &[
             "python".into(),
@@ -466,10 +471,8 @@ fn python_fuel_budget_stops_runaway_script() {
         b"",
         Some(&limits),
     );
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(30),
-        "fuel-bounded run should terminate quickly"
-    );
+    // No wall-clock assertion: the Trap + fuel-exhaustion match IS the
+    // assertion; if metering broke, run() would hang regardless.
     match result {
         Err(rust_bash::python::PythonError::Trap(e, out)) => {
             assert!(
@@ -522,4 +525,109 @@ except OSError as e:
         )
         .expect("python run");
     assert_eq!(out.stdout, b"write raised errno 22\n");
+}
+
+// ── Errno mapping coverage ─────────────────────────────────────────
+
+#[test]
+fn python_path_through_file_raises_not_found() {
+    // NOTE: the VFS resolves `/file.txt/child` to ENOENT where POSIX would
+    // give ENOTDIR (it does not walk intermediate components) — same
+    // behavior bash sees through the same VFS. Pinned to document the
+    // divergence; if the VFS ever learns ENOTDIR, update this test.
+    let f = fixture(&[("/file.txt", b"x")]);
+    let out = run_python(f.overlay, "open('/file.txt/child')");
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("FileNotFoundError"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn python_rmdir_nonempty_raises_enotempty() {
+    let f = fixture(&[("/dir/child.txt", b"x")]);
+    let out = run_python(
+        f.overlay,
+        "import os, errno\ntry:\n    os.rmdir('/dir')\n    print('RMDIR SUCCEEDED')\nexcept OSError as e:\n    print('rmdir raised ENOTEMPTY:', e.errno == errno.ENOTEMPTY)\n",
+    );
+    assert_eq!(out.stdout, b"rmdir raised ENOTEMPTY: True\n");
+}
+
+#[test]
+fn python_read_on_write_only_fd_raises_ebadf() {
+    let f = fixture(&[]);
+    let out = run_python(
+        f.overlay,
+        "import os, errno\nfd = os.open('/w.txt', os.O_WRONLY | os.O_CREAT)\ntry:\n    os.read(fd, 1)\n    print('READ SUCCEEDED')\nexcept OSError as e:\n    print('read raised EBADF:', e.errno == errno.EBADF)\n",
+    );
+    assert_eq!(out.stdout, b"read raised EBADF: True\n");
+}
+
+// ── max_file_size cap boundary ─────────────────────────────────────
+
+#[test]
+fn python_max_file_size_boundary_exact() {
+    let f = fixture(&[]);
+    let limits = rust_bash::python::PythonLimits {
+        max_file_size: Some(16),
+        ..Default::default()
+    };
+    // Exactly-at-cap write succeeds; one byte over fails with EFBIG and
+    // leaves no partial file behind (splice rejects before writing).
+    let out = interpreter()
+        .run(
+            &["python".into(), "-c".into(),
+              "import os, errno\nf = open('/cap.bin', 'wb')\nf.write(b'x' * 16)\nf.flush()\nprint('at-cap ok')\ntry:\n    f.write(b'y')\n    f.flush()\n    print('over-cap SUCCEEDED')\nexcept OSError as e:\n    print('over-cap EFBIG:', e.errno == errno.EFBIG)\ntry:\n    f.close()\nexcept OSError:\n    pass\nprint('size:', os.path.getsize('/cap.bin'))".into()],
+            &[],
+            f.overlay,
+            b"",
+            Some(&limits),
+        )
+        .expect("python run");
+    assert_eq!(out.stdout, b"at-cap ok\nover-cap EFBIG: True\nsize: 16\n");
+}
+
+#[test]
+fn python_truncate_over_configured_cap_fails() {
+    let f = fixture(&[("/small.bin", b"x")]);
+    let limits = rust_bash::python::PythonLimits {
+        max_file_size: Some(16),
+        ..Default::default()
+    };
+    let out = interpreter()
+        .run(
+            &["python".into(), "-c".into(),
+              "import os, errno\ntry:\n    os.truncate('/small.bin', 100)\n    print('TRUNCATE SUCCEEDED')\nexcept OSError as e:\n    print('truncate raised EFBIG:', e.errno == errno.EFBIG)\n".into()],
+            &[],
+            f.overlay,
+            b"",
+            Some(&limits),
+        )
+        .expect("python run");
+    assert_eq!(out.stdout, b"truncate raised EFBIG: True\n");
+}
+
+// ── Error taxonomy & isolation ─────────────────────────────────────
+
+#[test]
+fn python_compile_error_on_invalid_module() {
+    let result = PythonInterpreter::new(b"this is not wasm");
+    assert!(
+        matches!(result, Err(rust_bash::python::PythonError::Compile(_))),
+        "expected Compile error, got: {:?}",
+        result.map(|_| ())
+    );
+}
+
+#[test]
+fn python_runs_are_state_isolated() {
+    let f = fixture(&[]);
+    let out1 = run_python(f.overlay.clone(), "GLOBAL_X = 42\nprint('first run')");
+    assert_eq!(out1.stdout, b"first run\n");
+    // A second run on the same interpreter gets a fresh interpreter state:
+    // GLOBAL_X from the first run must not exist.
+    let out2 = run_python(f.overlay, "print('GLOBAL_X' in dir())");
+    assert_eq!(out2.stdout, b"False\n");
 }

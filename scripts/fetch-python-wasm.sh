@@ -36,7 +36,10 @@ for url in "$MIRROR_URL" "$UPSTREAM_URL"; do
 done
 
 # Fallback for environments where curl's TLS stack is restricted but the
-# GitHub CLI is authenticated.
+# GitHub CLI is authenticated. (The --ssl-no-revoke retry above fires on ANY
+# curl failure, not just revocation errors — acceptable because the sha256
+# check below gates every acquisition path. Note: sha256sum is GNU coreutils;
+# macOS contributors need `shasum -a 256` or coreutils installed.)
 if command -v gh >/dev/null 2>&1; then
     echo "Trying gh release download"
     if gh release download python-wasm-3.12.0 --repo JerryAZR/rust-bash \

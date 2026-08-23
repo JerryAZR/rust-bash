@@ -57,12 +57,12 @@ glue-only. The bridge lives in-crate behind the `python` feature
 its `run_python_file` / `run_python_command` plumbing on top.
 
 **Delivered:** bridge module, `examples/python_overlay.rs` (bash + Python
-over one `Arc<OverlayFs>`, one `diff()`), 25 conformance tests
+over one `Arc<OverlayFs>`, one `diff()`), 35 conformance tests
 (`tests/python_bridge.rs`) covering cross-tool visibility, diff accounting,
-bridge semantics (seek/append/readdir/glob/symlinks/errno), and offset-safety
-(a guest cannot abort the host via huge offsets). **Deferred:** fuel-based
-execution limits and module-compile caching (until they land, run guest code
-on a thread whose lifetime you control).
+bridge semantics (seek/append/readdir/glob/symlinks/errno), opt-in limits
+(`PythonLimits::fuel` / `max_file_size`), and offset-safety (a guest cannot
+abort the host: huge allocations fail as `EFBIG` via `try_reserve`).
+**Deferred:** module-compile caching (first compile costs seconds).
 
 ---
 
@@ -197,8 +197,9 @@ methods. The design work is concentrated in four impedance mismatches:
    per-fd `{ path, cursor, flags }` on each `VfsFile`:
    - reads: `read_file` + slice at cursor/offset;
    - positional writes: read-modify-write (read whole, splice, `write_file`),
-     guarded by a 1 GiB `MAX_FILE_SIZE` (over-limit → `EFBIG`, never a
-     guest-triggerable host allocation);
+     with optional caller-set `max_file_size` (over-limit → `EFBIG`);
+     without a cap, huge allocations fail as `EFBIG` via `try_reserve` —
+     never a guest-triggerable host abort;
    - append: offset = current size at each write (POSIX EOF semantics).
    At sandbox scale this is fine. **Non-atomic** if both tools write the same
    file concurrently — sequential agent turns (the expected workflow) are

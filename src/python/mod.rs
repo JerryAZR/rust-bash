@@ -17,13 +17,18 @@
 //!
 //! # Current limitations (embedders: read before exposing to agents)
 //!
-//! - **No execution limits yet.** A `while True: pass` guest hangs the
-//!   calling thread; unbounded memory growth is uncapped. Fuel-based limits
-//!   and module-compile caching are tracked follow-ups — until they land,
-//!   only run guest code on a thread whose lifetime you control.
+//! - **Execution limits are opt-in** via [`PythonLimits`] (fuel for CPU,
+//!   `max_file_size` for the FS bridge). With no limits configured the guest
+//!   runs unbounded: a `while True: pass` hangs the calling thread and
+//!   unbounded memory growth is uncapped — the harness / tool wrapper owns
+//!   that policy and communicates it to the model. Module-compile caching is
+//!   a tracked follow-up (first compile costs seconds).
 //! - **Guest cwd is always `/`.** WASI p1 has no per-process working
 //!   directory; the preopen root *is* the guest's cwd. Harnesses that want
 //!   "run with the shell's cwd" must rewrite paths themselves.
+//! - **Trap semantics:** on a guest trap (fuel kill, crash), libc-buffered
+//!   stdout is lost while unbuffered stderr survives — as with a real
+//!   process dying. Treat stderr as the diagnostics channel for killed runs.
 
 mod vfs_dir;
 mod vfs_file;
@@ -190,6 +195,9 @@ impl PythonInterpreter {
                         } else {
                             e
                         };
+                        // The exit_code here is meaningless (the guest did
+                        // not exit) — consumers must use the `Err` variant,
+                        // not the payload's exit_code.
                         (0, Some(e))
                     }
                 },
@@ -198,8 +206,8 @@ impl PythonInterpreter {
 
         let out = |pipe: WritePipe<Cursor<Vec<u8>>>| -> Vec<u8> {
             pipe.try_into_inner()
-                .map(|c| c.into_inner())
-                .unwrap_or_default()
+                .expect("store dropped; stdio pipe uniquely owned")
+                .into_inner()
         };
         let output = PythonOutput {
             stdout: out(stdout),

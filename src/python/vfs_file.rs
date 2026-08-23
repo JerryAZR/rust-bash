@@ -20,10 +20,10 @@ use crate::error::VfsError;
 
 use crate::vfs::VirtualFs;
 
-use super::vfs_dir::{map_err, map_metadata};
+use super::vfs_dir::{map_err, map_metadata, resolve_time_spec};
 
 /// An open regular file on a `VirtualFs`, with its own cursor.
-pub struct VfsFile {
+pub(crate) struct VfsFile {
     fs: Arc<dyn VirtualFs>,
     path: PathBuf,
     readable: bool,
@@ -135,12 +135,20 @@ impl WasiFile for VfsFile {
     }
 
     async fn set_fdflags(&mut self, flags: FdFlags) -> Result<(), Error> {
+        if flags.intersects(FdFlags::DSYNC | FdFlags::SYNC | FdFlags::RSYNC) {
+            // Same policy as open_file: never silently ignore a
+            // guest-requested durability flag.
+            return Err(Error::not_supported().context("SYNC family of FdFlags"));
+        }
         // Only APPEND is mutable after open (POSIX fcntl F_SETFL semantics).
         self.append = flags.contains(FdFlags::APPEND);
         Ok(())
     }
 
     async fn get_filestat(&self) -> Result<Filestat, Error> {
+        // Divergence from POSIX: fstat on an open-but-since-unlinked file
+        // fails NOENT here (POSIX fstat works on the open fd). Harmless for
+        // stdlib glue; the VFS is path-addressed, not inode-addressed.
         let m = self.fs.stat(&self.path).map_err(map_err)?;
         Ok(map_metadata(&m, FileType::RegularFile))
     }
@@ -175,10 +183,8 @@ impl WasiFile for VfsFile {
         mtime: Option<SystemTimeSpec>,
     ) -> Result<(), Error> {
         let _ = atime;
-        let mtime = match mtime {
-            Some(SystemTimeSpec::SymbolicNow) => std::time::SystemTime::now(),
-            Some(SystemTimeSpec::Absolute(t)) => t.into_std(),
-            None => return Ok(()),
+        let Some(mtime) = resolve_time_spec(mtime) else {
+            return Ok(());
         };
         self.fs.utimes(&self.path, mtime).map_err(map_err)
     }
@@ -218,16 +224,16 @@ impl WasiFile for VfsFile {
 
     async fn seek(&self, pos: std::io::SeekFrom) -> Result<u64, Error> {
         let mut cursor = self.cursor.lock();
-        let new: i64 = match pos {
-            std::io::SeekFrom::Start(n) => n as i64,
-            std::io::SeekFrom::Current(d) => *cursor as i64 + d,
+        let new: i128 = match pos {
+            std::io::SeekFrom::Start(n) => n as i128,
+            std::io::SeekFrom::Current(d) => *cursor as i128 + d as i128,
             std::io::SeekFrom::End(d) => {
                 let size = self.fs.stat(&self.path).map_err(map_err)?.size;
-                size as i64 + d
+                size as i128 + d as i128
             }
         };
-        if new < 0 {
-            return Err(Error::invalid_argument().context("negative seek"));
+        if new < 0 || new > i64::MAX as i128 {
+            return Err(Error::invalid_argument().context("seek offset out of range"));
         }
         *cursor = new as u64;
         Ok(*cursor)

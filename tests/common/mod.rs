@@ -227,8 +227,6 @@ fn execute_and_compare(case: &TestCase) -> Option<String> {
     let mut builder = RustBashBuilder::new()
         .env(env_map)
         .execution_limits(ExecutionLimits {
-            max_call_depth: 25,
-            max_loop_iterations: 10_000,
             max_execution_time: std::time::Duration::from_secs(5),
             ..ExecutionLimits::agent_preset()
         });
