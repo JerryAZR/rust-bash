@@ -11,8 +11,9 @@ This is a fork of [shantanugoel/rust-bash](https://github.com/shantanugoel/rust-
 - **Cross-platform** — runs on Linux, macOS, and Windows (CI-tested on Linux and Windows). VFS paths are Unix-style (`/`-separated) everywhere.
 - **80 commands** — echo, cat, grep, awk, sed, jq, find, sort, diff, tar, and many more.
 - **Full bash syntax** — pipelines, redirections, variables, control flow, functions, command substitution, globs, brace expansion, arithmetic, here-documents, case statements.
-- **Execution limits** — 10 configurable bounds (time, commands, loops, output size, call depth, string length, glob results, substitution depth, heredoc size, brace expansion).
+- **Execution limits** — optional, caller-configured bounds, off by default (time, commands, loops, output size, call depth, string length, glob results, substitution depth, heredoc size, brace expansion, array elements).
 - **Multiple filesystem backends** — InMemoryFs (default), OverlayFs (copy-on-write), MountableFs (composite).
+- **Sandboxed Python companion** *(feature `python`)* — CPython (wasm32-wasip1 under wasmtime, stdlib-only) runs against the *same* `VirtualFs` as the shell: bash and Python see each other's pending writes, and one `overlay.diff()` reports both. See [`examples/python_overlay.rs`](examples/python_overlay.rs). Requires the CPython artifact: `scripts/fetch-python-wasm.sh`.
 - **Embeddable** — use as a Rust crate with a builder API. Custom commands via the `VirtualCommand` trait.
 
 ## What this promises (and what it doesn't)
@@ -177,6 +178,7 @@ assert_eq!(result.stdout, "got 2 args\n");
 - **Code sandboxes** — run user-submitted scripts safely
 - **Testing** — deterministic bash execution with a controlled filesystem
 - **Embedded scripting** — add bash scripting to Rust applications
+- **Glue-level Python** — let agents transform data with stdlib Python (json/csv/re/pathlib) inside the same reviewed-write sandbox, while project Python work offloads to the host
 
 ## Built-in Commands
 
@@ -225,9 +227,13 @@ let mut shell = RustBashBuilder::new()
     .unwrap();
 ```
 
-### Execution limits defaults
+### Execution limits (opt-in)
 
-| Limit | Default |
+Limits are **off by default** — the harness decides whether and how to bound
+scripts (and tells the model). `ExecutionLimits::default()` is unbounded;
+`ExecutionLimits::agent_preset()` is a guardrail preset for agent workloads:
+
+| Limit | `agent_preset()` |
 |-------|---------|
 | `max_call_depth` | 25 |
 | `max_command_count` | 10,000 |
@@ -239,6 +245,7 @@ let mut shell = RustBashBuilder::new()
 | `max_substitution_depth` | 50 |
 | `max_heredoc_size` | 10 MB |
 | `max_brace_expansion` | 10,000 |
+| `max_array_elements` | 100,000 |
 
 ## Filesystem Backends
 

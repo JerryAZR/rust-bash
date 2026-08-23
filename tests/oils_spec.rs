@@ -190,9 +190,10 @@ fn execute_oils_case(file_stem: &str, case: &OilsTestCase, legacy_tmp_dir: bool)
         .env(env_map)
         .cwd("/_tmp/spec-tmp")
         .execution_limits(ExecutionLimits {
+            max_call_depth: 25,
             max_loop_iterations: 10_000,
             max_execution_time: Duration::from_secs(5),
-            ..ExecutionLimits::default()
+            ..ExecutionLimits::agent_preset()
         });
 
     // Register Oils test helper commands (argv.py, printenv.py, etc.)

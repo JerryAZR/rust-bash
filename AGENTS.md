@@ -24,7 +24,7 @@ Agents MUST follow these steps for every task:
 - Reuse existing types/traits before adding new abstractions.
 - Keep changes incremental and test-gated.
 - Run `cargo fmt`, `cargo clippy -- -D warnings` and `cargo test` on touched areas before finishing.
-- Whenever any code changes are made, make sure all build and test targets (library, examples, integration/spec/comparison/oils test suites) pass
+- Whenever any code changes are made, make sure all build and test targets (library, examples, integration/spec/comparison/oils test suites) pass — use `--all-features` for test/clippy runs so the `python` feature is exercised (it requires the CPython artifact: `scripts/fetch-python-wasm.sh`)
 - File, function, and test names should describe behavior, not planning phases.
 - Avoid clippy allow directives — fix the underlying issue instead.
 - If requirements are unclear or conflicting, ask the user instead of guessing.

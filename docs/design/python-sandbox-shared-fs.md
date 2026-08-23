@@ -1,6 +1,9 @@
 # Design: Shared-Overlay Python Sandbox (WASI CPython)
 
-Status: **research / design proposal** — no implementation yet.
+Status: **implemented** (bridge + example + conformance tests). The runtime
+and artifact decisions below record the evaluated options; the *outcome*
+section records what was actually chosen and why it differs from the
+original lean.
 
 This document captures the research for this fork's target use case:
 
@@ -11,7 +14,55 @@ This document captures the research for this fork's target use case:
 It maps what already exists in rust-bash onto that workflow, identifies the
 gaps, and evaluates the options for adding a WASI CPython tool that shares
 the same filesystem view. Scope of what this fork maintains at all is
-tracked separately in [fork-scope.md](fork-scope.md).
+tracked separately in [fork-scope.md](fork-scope.md). Which CPython-wasm
+artifact to embed and how to wire it under wasmer 7 with a custom
+`virtual-fs::FileSystem` is researched in
+[python-wasm-artifacts-research.md](python-wasm-artifacts-research.md).
+
+---
+
+## 0. Implementation outcome (what was actually built)
+
+**Runtime: wasmtime 46.0.3 + wasi-common 46.0.3 (pinned pair).** The §3.3
+analysis leaned wasmer for its `virtual-fs` trait fit; the spike invalidated
+that on two discoveries:
+
+1. **wasmer 7.3 removed its Windows JIT backends** — both singlepass and
+   cranelift are `compile_error!`d on Windows with "use the V8 backend
+   instead" (the V8 backend downloads a prebuilt V8 — heavyweight and
+   network-dependent). wasmer 7.2.1 still works on Windows (verified), but
+   its own successor signals the platform's direction, so it was rejected.
+2. **wasmtime-wasi 48 removed the custom-FS seam** — the `WasiDir`/`WasiFile`
+   traits the bridge was planned against are gone; `filesystem::Dir` is a
+   concrete cap-std struct, preopens accept host paths only.
+
+The resolution: **`wasi-common` 46.0.3**, the Bytecode Alliance's
+legacy-but-maintained preview1 crate (kept in the wasmtime tree, required by
+`wasmtime-wasi-threads`). It is architected around exactly the missing seam:
+the embedder implements `WasiDir`/`WasiFile`, and the crate provides the fd
+table, all 43 p1 host functions, marshalling, and errno mapping. Sync
+embedding (no tokio). Both the ABI (wasip1) and the crate are frozen, which
+minimizes future churn; pinning wasmtime 46.0.3 to match.
+
+**Artifact: vmware-labs `python-3.12.0.wasm`** (single-file, stdlib embedded,
+plain wasip1; see [python-wasm-artifacts-research.md](python-wasm-artifacts-research.md)),
+mirrored as a release asset on this fork (`python-wasm-3.12.0` tag) and
+fetched by `scripts/fetch-python-wasm.sh` (sha256-verified).
+
+**Integration shape: separate harness tools, deliberately.** `python` inside
+bash remains an *unresolved command* so project Python work (with
+dependencies) offloads to the host, while the sandboxed interpreter is
+glue-only. The bridge lives in-crate behind the `python` feature
+(`src/python/`: `PythonInterpreter` + `VfsDir`/`VfsFile`); the harness owns
+its `run_python_file` / `run_python_command` plumbing on top.
+
+**Delivered:** bridge module, `examples/python_overlay.rs` (bash + Python
+over one `Arc<OverlayFs>`, one `diff()`), 25 conformance tests
+(`tests/python_bridge.rs`) covering cross-tool visibility, diff accounting,
+bridge semantics (seek/append/readdir/glob/symlinks/errno), and offset-safety
+(a guest cannot abort the host via huge offsets). **Deferred:** fuel-based
+execution limits and module-compile caching (until they land, run guest code
+on a thread whose lifetime you control).
 
 ---
 
@@ -142,10 +193,13 @@ methods. The design work is concentrated in four impedance mismatches:
 
 1. **Stateful fds vs. stateless VFS.** WASI fds carry a cursor, seek,
    append mode, and per-fd rights; `VirtualFs` has whole-file ops only. The
-   bridge keeps an fd table `fd → { path, offset, flags }`:
-   - reads: `read_file` + slice at offset;
-   - positional writes: read-modify-write (read whole, splice, `write_file`);
-   - append: `append_file` directly.
+   As built (§0): wasi-common owns the fd table; the bridge keeps only a
+   per-fd `{ path, cursor, flags }` on each `VfsFile`:
+   - reads: `read_file` + slice at cursor/offset;
+   - positional writes: read-modify-write (read whole, splice, `write_file`),
+     guarded by a 1 GiB `MAX_FILE_SIZE` (over-limit → `EFBIG`, never a
+     guest-triggerable host allocation);
+   - append: offset = current size at each write (POSIX EOF semantics).
    At sandbox scale this is fine. **Non-atomic** if both tools write the same
    file concurrently — sequential agent turns (the expected workflow) are
    unaffected. A per-path lock in the bridge would close even that.
@@ -228,17 +282,18 @@ deletion; write-then-delete within one op → absent from the diff).
    reads pending write, and vice versa), diff semantics for python-originated
    changes, symlink policy cases.
 
-## 6. Open questions for the caller
+## 6. Open questions — resolved
 
-1. **Harness surface** — Rust-native (current harness), or Node (pi
-   experiment; would require the napi diff exposure first)?
-2. **Runtime** — wasmtime or wasmer? (See §3.3; slight lean to wasmer for
-   trait fit, but verify maintenance/version state before committing.)
-3. **Python capability scope** — pure-Python stdlib only, or is there a
-   story needed for native-extension packages? (WASI can't provide the
-   latter; the tool description shown to agents should say so.)
-4. **Diff cadence** — per operation (apply+sync each time) or per turn
-   (accumulate, one decision round)? Both work; per-operation matches the
-   stated workflow.
-5. **Symlink policy for the Python preopen** — strict WASI preview1
-   semantics or VFS semantics (recommended)?
+1. **Harness surface** — Rust-native. A Node surface (napi diff exposure) is
+   deferred until a Node harness materializes.
+2. **Runtime** — wasmtime 46.0.3 + wasi-common 46.0.3 (pinned). See §0 for
+   why wasmer (Windows JIT removal) and wasmtime-wasi 48 (trait seam
+   removal) were rejected.
+3. **Python capability scope** — pure-Python stdlib only, permanently. The
+   interpreter is bash-enhancement glue, not a project development
+   environment; host offload covers dependency work.
+4. **Diff cadence** — per operation (apply + `sync()` between operations),
+   as recommended in §2.
+5. **Symlink policy** — VFS semantics (implemented in `VfsDir`: the
+   workspace preopen *is* the whole overlay, so WASI's escape-prevention is
+   moot).

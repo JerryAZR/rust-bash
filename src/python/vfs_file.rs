@@ -1,0 +1,266 @@
+//! WASI preview1 file handle over `VirtualFs`: per-fd cursor and flags on top
+//! of the VFS's whole-file operations.
+//!
+//! Positional reads/writes are read-modify-write at the VFS level. At sandbox
+//! scale (agent-sized files, sequential agent turns) this is fine; it is
+//! documented as non-atomic for concurrent writers in
+//! docs/design/python-sandbox-shared-fs.md §3.4.
+
+use std::any::Any;
+use std::io::{IoSlice, IoSliceMut};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use wasi_common::file::{FdFlags, FileType, Filestat, WasiFile};
+use wasi_common::snapshots::preview_1::error::Errno;
+use wasi_common::{Error, ErrorExt, SystemTimeSpec};
+
+use crate::error::VfsError;
+
+use crate::vfs::VirtualFs;
+
+use super::vfs_dir::{map_err, map_metadata};
+
+/// An open regular file on a `VirtualFs`, with its own cursor.
+pub struct VfsFile {
+    fs: Arc<dyn VirtualFs>,
+    path: PathBuf,
+    readable: bool,
+    writable: bool,
+    append: bool,
+    cursor: Mutex<u64>,
+    /// Optional caller-set size cap; `None` = bounded only by available
+    /// memory (allocation failures surface as `EFBIG`, never host aborts).
+    max_file_size: Option<u64>,
+}
+
+impl VfsFile {
+    pub fn new(
+        fs: Arc<dyn VirtualFs>,
+        path: PathBuf,
+        readable: bool,
+        writable: bool,
+        append: bool,
+        cursor: u64,
+        max_file_size: Option<u64>,
+    ) -> Self {
+        Self {
+            fs,
+            path,
+            readable,
+            writable,
+            append,
+            cursor: Mutex::new(cursor),
+            max_file_size,
+        }
+    }
+
+    fn read_all(&self) -> Result<Vec<u8>, Error> {
+        if !self.readable {
+            return Err(Error::badf().context("file not opened for reading"));
+        }
+        self.fs.read_file(&self.path).map_err(map_err)
+    }
+
+    /// Copy `src` into `bufs`, returning the number of bytes copied.
+    fn fill_bufs(src: &[u8], offset: u64, bufs: &mut [IoSliceMut<'_>]) -> u64 {
+        let available = src.len().saturating_sub(offset as usize);
+        let mut copied = 0u64;
+        for buf in bufs.iter_mut() {
+            if copied as usize >= available {
+                break;
+            }
+            let n = (available - copied as usize).min(buf.len());
+            buf[..n].copy_from_slice(&src[offset as usize + copied as usize..][..n]);
+            copied += n as u64;
+        }
+        copied
+    }
+
+    /// Splice `bufs` into the file at `offset`, extending with zeros if the
+    /// offset is past EOF (POSIX semantics), then write back.
+    fn splice(&self, offset: u64, bufs: &[IoSlice<'_>]) -> Result<u64, Error> {
+        if !self.writable {
+            return Err(Error::badf().context("file not opened for writing"));
+        }
+        let total: u64 = bufs.iter().map(|b| b.len() as u64).sum();
+        let end = offset
+            .checked_add(total)
+            .filter(|end| self.max_file_size.is_none_or(|cap| *end <= cap))
+            .ok_or_else(|| Error::from(Errno::Fbig).context("write beyond maximum file size"))?;
+        // A missing file reads as empty; every other read error must
+        // propagate (treating it as empty would silently truncate).
+        let mut content = match self.fs.read_file(&self.path) {
+            Ok(c) => c,
+            Err(VfsError::NotFound(_)) => Vec::new(),
+            Err(e) => return Err(map_err(e)),
+        };
+        // Reserve up front: an allocation failure is an `EFBIG` error here,
+        // never a host abort.
+        content
+            .try_reserve(end as usize)
+            .map_err(|_| Error::from(Errno::Fbig).context("file too large to materialize"))?;
+        let mut pos = offset as usize;
+        for buf in bufs {
+            let buf_end = pos + buf.len();
+            if buf_end > content.len() {
+                content.resize(buf_end, 0);
+            }
+            content[pos..buf_end].copy_from_slice(buf);
+            pos = buf_end;
+        }
+        debug_assert_eq!(pos as u64, end);
+        self.fs.write_file(&self.path, &content).map_err(map_err)?;
+        Ok(total)
+    }
+}
+
+#[async_trait::async_trait]
+impl WasiFile for VfsFile {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn get_filetype(&self) -> Result<FileType, Error> {
+        Ok(FileType::RegularFile)
+    }
+
+    async fn get_fdflags(&self) -> Result<FdFlags, Error> {
+        let mut flags = FdFlags::empty();
+        if self.append {
+            flags |= FdFlags::APPEND;
+        }
+        Ok(flags)
+    }
+
+    async fn set_fdflags(&mut self, flags: FdFlags) -> Result<(), Error> {
+        // Only APPEND is mutable after open (POSIX fcntl F_SETFL semantics).
+        self.append = flags.contains(FdFlags::APPEND);
+        Ok(())
+    }
+
+    async fn get_filestat(&self) -> Result<Filestat, Error> {
+        let m = self.fs.stat(&self.path).map_err(map_err)?;
+        Ok(map_metadata(&m, FileType::RegularFile))
+    }
+
+    async fn set_filestat_size(&self, size: u64) -> Result<(), Error> {
+        if !self.writable {
+            return Err(Error::badf().context("file not opened for writing"));
+        }
+        if self.max_file_size.is_some_and(|cap| size > cap) {
+            return Err(Error::from(Errno::Fbig).context("truncate beyond maximum file size"));
+        }
+        let mut content = self.fs.read_file(&self.path).map_err(map_err)?;
+        content
+            .try_reserve(size as usize)
+            .map_err(|_| Error::from(Errno::Fbig).context("file too large to materialize"))?;
+        content.resize(size as usize, 0);
+        self.fs.write_file(&self.path, &content).map_err(map_err)
+    }
+
+    async fn advise(
+        &self,
+        _offset: u64,
+        _len: u64,
+        _advice: wasi_common::file::Advice,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn set_times(
+        &self,
+        atime: Option<SystemTimeSpec>,
+        mtime: Option<SystemTimeSpec>,
+    ) -> Result<(), Error> {
+        let _ = atime;
+        let mtime = match mtime {
+            Some(SystemTimeSpec::SymbolicNow) => std::time::SystemTime::now(),
+            Some(SystemTimeSpec::Absolute(t)) => t.into_std(),
+            None => return Ok(()),
+        };
+        self.fs.utimes(&self.path, mtime).map_err(map_err)
+    }
+
+    async fn read_vectored<'a>(&self, bufs: &mut [IoSliceMut<'a>]) -> Result<u64, Error> {
+        let content = self.read_all()?;
+        let mut cursor = self.cursor.lock();
+        let n = Self::fill_bufs(&content, *cursor, bufs);
+        *cursor += n;
+        Ok(n)
+    }
+
+    async fn read_vectored_at<'a>(
+        &self,
+        bufs: &mut [IoSliceMut<'a>],
+        offset: u64,
+    ) -> Result<u64, Error> {
+        let content = self.read_all()?;
+        Ok(Self::fill_bufs(&content, offset, bufs))
+    }
+
+    async fn write_vectored<'a>(&self, bufs: &[IoSlice<'a>]) -> Result<u64, Error> {
+        let offset = if self.append {
+            self.fs.stat(&self.path).map_err(map_err)?.size
+        } else {
+            *self.cursor.lock()
+        };
+        let n = self.splice(offset, bufs)?;
+        // POSIX: the file offset is EOF after every O_APPEND write.
+        *self.cursor.lock() = offset + n;
+        Ok(n)
+    }
+
+    async fn write_vectored_at<'a>(&self, bufs: &[IoSlice<'a>], offset: u64) -> Result<u64, Error> {
+        self.splice(offset, bufs)
+    }
+
+    async fn seek(&self, pos: std::io::SeekFrom) -> Result<u64, Error> {
+        let mut cursor = self.cursor.lock();
+        let new: i64 = match pos {
+            std::io::SeekFrom::Start(n) => n as i64,
+            std::io::SeekFrom::Current(d) => *cursor as i64 + d,
+            std::io::SeekFrom::End(d) => {
+                let size = self.fs.stat(&self.path).map_err(map_err)?.size;
+                size as i64 + d
+            }
+        };
+        if new < 0 {
+            return Err(Error::invalid_argument().context("negative seek"));
+        }
+        *cursor = new as u64;
+        Ok(*cursor)
+    }
+
+    async fn peek(&self, buf: &mut [u8]) -> Result<u64, Error> {
+        let content = self.read_all()?;
+        let cursor = *self.cursor.lock();
+        Ok(Self::fill_bufs(
+            &content,
+            cursor,
+            &mut [IoSliceMut::new(buf)],
+        ))
+    }
+
+    async fn datasync(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn num_ready_bytes(&self) -> Result<u64, Error> {
+        let size = self.fs.stat(&self.path).map_err(map_err)?.size;
+        Ok(size.saturating_sub(*self.cursor.lock()))
+    }
+
+    async fn readable(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn writable(&self) -> Result<(), Error> {
+        Ok(())
+    }
+}

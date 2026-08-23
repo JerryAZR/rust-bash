@@ -38,6 +38,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo clippy --no-default-features -- -D warnings
 
   test:
@@ -51,5 +52,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: third_party/python-wasm/python-3.12.0.wasm
+          key: python-wasm-${{ hashFiles('third_party/python-wasm/python-3.12.0.wasm.sha256sum') }}
+      - name: Fetch CPython wasm artifact
+        run: bash scripts/fetch-python-wasm.sh
       - run: cargo test
+      - run: cargo test --all-features
       - run: cargo test --no-default-features

@@ -17,12 +17,25 @@ exclude = [
 [features]
 default = ["native-fs"]
 native-fs = []
+# Sandboxed CPython (wasm32-wasip1 under wasmtime) sharing the VirtualFs.
+# Off by default for downstream consumers; CI and local test runs use
+# --all-features and MUST exercise it.
+python = ["dep:async-trait", "dep:wasi-common", "dep:wasmtime"]
 
 [[example]]
 name = "agent_harness"
 required-features = ["native-fs"]
 
+[[example]]
+name = "python_wasm"
+required-features = ["python"]
+
+[[example]]
+name = "python_overlay"
+required-features = ["python", "native-fs"]
+
 [dependencies]
+async-trait = { version = "0.1.89", optional = true }
 base64 = "0.22"
 bitflags = "2.11.0"
 brush-parser = {git = "https://github.com/reubeno/brush.git", rev = "ae35b6dd09f394c66fd805bea747e35a013ee978"}
@@ -40,6 +53,8 @@ sha1 = "0.10"
 sha2 = "0.10"
 similar = "2.7.0"
 tar = "0.4"
+wasi-common = { version = "46.0.3", optional = true }
+wasmtime = { version = "46.0.3", optional = true }
 
 [dev-dependencies]
 datatest-stable = "0.3.3"

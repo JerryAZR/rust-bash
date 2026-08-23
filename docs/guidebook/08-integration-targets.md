@@ -103,3 +103,12 @@ Key points for embedders:
   writes.
 - Custom commands implement `VirtualCommand` and register via
   `RustBashBuilder::command(...)`.
+- With the `python` feature, sandboxed CPython runs as a *second client* of
+  the same `Arc<OverlayFs>` (`python::PythonInterpreter`) — bash and Python
+  share pending writes and one `diff()`; see
+  [`examples/python_overlay.rs`](../../examples/python_overlay.rs). Python is
+  stdlib-only glue by design; `python` stays an unresolved command in bash
+  so project Python work offloads to the host. **Caveat:** guest execution
+  limits are opt-in (`PythonLimits` — fuel, `max_file_size`); without them
+  the guest runs unbounded. The feature requires the CPython artifact:
+  `scripts/fetch-python-wasm.sh`.

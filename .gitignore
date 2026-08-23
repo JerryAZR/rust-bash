@@ -7,6 +7,9 @@
 /test_ansi_parse.rs
 /test_brush.sh
 
+# Python wasm artifact (fetched by scripts/fetch-python-wasm.sh)
+third_party/python-wasm/*.wasm
+
 # OS files
 .DS_Store
 Thumbs.db

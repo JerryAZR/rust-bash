@@ -5,24 +5,40 @@
 rust-bash is designed to run AI-generated scripts unattended, catching careless
 mistakes before they reach disk. This chapter covers what the sandbox promises
 (best-effort guardrails), what it explicitly does not promise (a security
-boundary), and the execution limits that bound runaway scripts.
+boundary), and the optional execution limits callers can enable against
+runaway scripts.
 
-## Execution Limits
+## Execution Limits (opt-in)
+
+**Limits are off by default.** The library makes no policy decision about how
+much work a script may do — the harness / tool wrapper owns that policy and
+communicates it to the model. `ExecutionLimits::default()` is unbounded on
+every field; `RustBashBuilder::execution_limits(...)` opts in, and
+`ExecutionLimits::agent_preset()` provides the bounds this crate once
+enforced by default:
 
 ```rust
 pub struct ExecutionLimits {
-    pub max_call_depth: usize,           // default: 25
-    pub max_command_count: usize,        // default: 10,000
-    pub max_loop_iterations: usize,      // default: 10,000
-    pub max_execution_time: Duration,    // default: 30s
-    pub max_output_size: usize,          // default: 10MB
-    pub max_string_length: usize,        // default: 10MB
-    pub max_glob_results: usize,         // default: 100,000
-    pub max_substitution_depth: usize,   // default: 50
-    pub max_heredoc_size: usize,         // default: 10MB
-    pub max_brace_expansion: usize,      // default: 10,000
+    pub max_call_depth: usize,           // agent_preset: 25
+    pub max_command_count: usize,        // agent_preset: 10,000
+    pub max_loop_iterations: usize,      // agent_preset: 10,000
+    pub max_execution_time: Duration,    // agent_preset: 30s
+    pub max_output_size: usize,          // agent_preset: 10MB
+    pub max_string_length: usize,        // agent_preset: 10MB
+    pub max_glob_results: usize,         // agent_preset: 100,000
+    pub max_substitution_depth: usize,   // agent_preset: 50
+    pub max_heredoc_size: usize,         // agent_preset: 10MB
+    pub max_brace_expansion: usize,      // agent_preset: 10,000
+    pub max_array_elements: usize,       // agent_preset: 100,000
 }
 ```
+
+> **Why a caller might still want a call/substitution depth bound:** deep
+> native recursion (`f() { f; }; f`, deeply nested `$($(...))`) is limited
+> only by the host's real stack when unbounded — matching real bash, which
+> also has no function-depth limit and can also crash. A harness exposing
+> arbitrary agent scripts should treat `agent_preset()` as the baseline, not
+> an afterthought.
 
 ### Enforcement Points
 

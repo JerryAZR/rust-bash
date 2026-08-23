@@ -2551,7 +2551,16 @@ fn function_return_in_loop() {
 
 #[test]
 fn function_call_depth_limit() {
-    let mut sh = shell();
+    // Call-depth bounds are opt-in: without them, unbounded recursion is
+    // host-stack-limited (matching real bash, which also has no function
+    // depth limit).
+    let mut sh = RustBashBuilder::new()
+        .execution_limits(rust_bash::ExecutionLimits {
+            max_call_depth: 25,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
     let r = sh.exec("f() { f; }; f");
     assert!(r.is_err());
 }

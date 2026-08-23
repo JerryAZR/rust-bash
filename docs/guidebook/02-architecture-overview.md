@@ -61,6 +61,7 @@ rust-bash/
 │   ├── api.rs              # Public API: RustBash, RustBashBuilder
 │   ├── interpreter/
 │   │   ├── mod.rs          # InterpreterState, ExecutionLimits, parse(), core types
+│   │   ├── analysis.rs     # Static command analysis (pre-flight unknown-command detection)
 │   │   ├── walker.rs       # AST walking: pipelines, redirections, compound commands
 │   │   ├── expansion.rs    # Word expansion (variables, quoting, globs, $())
 │   │   ├── arithmetic.rs   # Arithmetic expression evaluator ($((…)), let, ((…)))
@@ -85,6 +86,7 @@ rust-bash/
 │   │   │   ├── parser.rs
 │   │   │   └── runtime.rs
 │   │   ├── sed.rs          # sed stream editor
+│   │   ├── compression.rs  # gzip, gunzip, zcat, tar (over flate2/tar crates)
 │   │   ├── diff_cmd.rs     # diff (unified, context, normal formats)
 │   │   ├── jq_cmd.rs       # jq via jaq-core
 │   │   ├── exec_cmds.rs    # xargs, find
@@ -93,9 +95,16 @@ rust-bash/
 │   │   │                   # md5sum, sha256sum, whoami, hostname, uname, yes
 │   │   └── regex_util.rs   # BRE→ERE conversion shared by grep/sed/expr
 │   ├── platform.rs         # Platform abstractions (time types)
+│   ├── python/             # Sandboxed CPython bridge (feature `python`)
+│   │   ├── mod.rs          # PythonInterpreter: wasmtime + wasi-common runtime wrapper
+│   │   ├── vfs_dir.rs      # WasiDir impl over VirtualFs (preopen root)
+│   │   └── vfs_file.rs     # WasiFile impl (per-fd cursor, read-modify-write)
+│   ├── shell_bytes.rs      # Binary-safe string helpers
 │   └── error.rs            # Unified error types (RustBashError, VfsError)
 ├── examples/
-│   └── agent_harness.rs    # Reference agent-harness embedding (OverlayFs + diff loop)
+│   ├── agent_harness.rs    # Reference agent-harness embedding (OverlayFs + diff loop)
+│   ├── python_overlay.rs   # Bash + sandboxed Python over one shared OverlayFs
+│   └── python_wasm.rs      # CPython-under-wasmtime bring-up check
 ├── Cargo.toml
 └── tests/
     ├── integration.rs          # End-to-end shell integration tests

@@ -387,9 +387,16 @@ Implement `yq` for YAML/XML/TOML/CSV/INI processing with jq-style query syntax. 
 
 Implement `xan` as a CSV processing toolkit with subcommands: `headers`, `count`, `select`, `search`, `filter`, `sort`, `frequency`, `stats`, `sample`, `slice`, `split`, `cat`, `join`, `flatten`, `transpose`. Translate operations to queries where possible, sharing infrastructure with jq/yq.
 
-### M8.4 — Embedded Python Runtime
+### M8.4 — Embedded Python Runtime ✅ (implemented in altered shape)
 
-Add opt-in `python3`/`python` command. **Design exploration required**: evaluate (a) bundling CPython compiled to WASM (like just-bash), (b) calling host Python via `std::process::Command` behind a feature flag (breaks sandbox but is simpler), or (c) embedding RustPython (pure Rust Python implementation). Option (c) is most aligned with the sandbox model but has stdlib gaps. Feature-gate behind `python` cargo feature.
+Delivered as a **separate interpreter sharing the overlay**, not a
+`python`/`python3` command (that shape was deliberately rejected: `python`
+stays an unresolved command in bash so project Python work offloads to the
+host). Option (a) won: CPython 3.12.0 `wasm32-wasip1` under wasmtime 46.0.3
++ wasi-common 46.0.3, bridge in `src/python/` behind the `python` feature.
+See `docs/design/python-sandbox-shared-fs.md` §0 and
+`docs/design/python-wasm-artifacts-research.md`. Remaining follow-ups:
+fuel-based execution limits, module-compile caching.
 
 ### M8.5 — Embedded JavaScript Runtime
 

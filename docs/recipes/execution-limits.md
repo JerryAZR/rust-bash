@@ -4,11 +4,15 @@
 
 Configure resource bounds to prevent runaway scripts. Useful for AI agent sandboxes, unattended execution, and shared environments.
 
-## Default Limits
+## Limits Are Opt-In
 
-Every `RustBash` instance starts with these defaults:
+`ExecutionLimits::default()` is **unbounded** on every field — the library
+makes no policy decision about how much work a script may do. The harness /
+tool wrapper owns that policy (and communicates it to the model). The preset
+this crate once used as defaults is available as
+`ExecutionLimits::agent_preset()`:
 
-| Limit | Default | What it caps |
+| Limit | `agent_preset()` | What it caps |
 |-------|---------|--------------|
 | `max_call_depth` | 25 | Recursive function call nesting |
 | `max_command_count` | 10,000 | Total commands executed per `exec()` call |
@@ -20,10 +24,13 @@ Every `RustBash` instance starts with these defaults:
 | `max_substitution_depth` | 50 | Nested `$(...)` command substitution depth |
 | `max_heredoc_size` | 10 MB | Maximum heredoc content size |
 | `max_brace_expansion` | 10,000 | Terms produced by brace expansion |
+| `max_array_elements` | 100,000 | Elements in a single array |
 
 ## Configuring Limits
 
-Override defaults via `ExecutionLimits`:
+Opt in via `ExecutionLimits` (unset fields fall back to `Default`, i.e.
+unbounded — use `..ExecutionLimits::agent_preset()` as the base if you want
+bounds on everything):
 
 ```rust
 use rust_bash::{RustBashBuilder, ExecutionLimits};
@@ -35,7 +42,7 @@ let mut shell = RustBashBuilder::new()
         max_loop_iterations: 100,
         max_execution_time: Duration::from_secs(5),
         max_output_size: 1024 * 1024, // 1 MB
-        ..Default::default()  // keep defaults for all other limits
+        ..ExecutionLimits::agent_preset()  // bound everything else, too
     })
     .build()
     .unwrap();
@@ -122,13 +129,13 @@ let mut shell = RustBashBuilder::new()
 
 ### Permissive — trusted internal scripts
 
-Use the defaults, which are already generous:
+Use the preset, which is already generous:
 
 ```rust
 use rust_bash::{RustBashBuilder, ExecutionLimits};
 
 let mut shell = RustBashBuilder::new()
-    .execution_limits(ExecutionLimits::default()) // explicit default
+    .execution_limits(ExecutionLimits::agent_preset())
     .build()
     .unwrap();
 ```

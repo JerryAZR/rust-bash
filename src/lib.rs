@@ -27,7 +27,7 @@
 //! - **80 built-in commands** — echo, cat, grep, awk, sed, jq, find, sort, diff, tar, and more
 //! - **Full bash syntax** — pipelines, redirections, variables, control flow, functions,
 //!   command substitution, globs, brace expansion, arithmetic, here-documents, case statements
-//! - **Execution limits** — 10 configurable bounds (time, commands, loops, output size, etc.)
+//! - **Execution limits** — optional, caller-configured bounds, off by default (see [`ExecutionLimits`])
 //! - **Unknown-command signaling** — `analyze_commands()` pre-flight and
 //!   [`ExecResult::unresolved_commands`](crate::interpreter::ExecResult) report what the sandbox can't run
 //! - **Multiple filesystem backends** — [`InMemoryFs`], [`OverlayFs`], [`MountableFs`]
@@ -38,6 +38,8 @@ pub mod commands;
 pub mod error;
 pub mod interpreter;
 pub mod platform;
+#[cfg(feature = "python")]
+pub mod python;
 mod shell_bytes;
 pub mod vfs;
 

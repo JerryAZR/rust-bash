@@ -222,7 +222,34 @@ pub struct ExecutionLimits {
 }
 
 impl Default for ExecutionLimits {
+    /// **Unbounded**: the library makes no policy decision about how much
+    /// work a script may do. Limits are opt-in by the caller (the harness /
+    /// tool wrapper), which also decides how they are communicated to the
+    /// model. [`ExecutionLimits::agent_preset()`] offers the bounds this
+    /// crate previously enforced by default.
     fn default() -> Self {
+        Self {
+            max_call_depth: usize::MAX,
+            max_command_count: usize::MAX,
+            max_loop_iterations: usize::MAX,
+            max_execution_time: Duration::MAX,
+            max_output_size: usize::MAX,
+            max_string_length: usize::MAX,
+            max_glob_results: usize::MAX,
+            max_substitution_depth: usize::MAX,
+            max_heredoc_size: usize::MAX,
+            max_brace_expansion: usize::MAX,
+            max_array_elements: usize::MAX,
+        }
+    }
+}
+
+impl ExecutionLimits {
+    /// Guardrail preset for agent workloads (the crate's pre-0.9 defaults):
+    /// 25 call depth, 10k commands, 10k loop iterations, 30 s wall-clock,
+    /// 10 MB output/string/heredoc, 100k glob results, 50 substitution
+    /// depth, 10k brace expansions, 100k array elements.
+    pub fn agent_preset() -> Self {
         Self {
             max_call_depth: 25,
             max_command_count: 10_000,
