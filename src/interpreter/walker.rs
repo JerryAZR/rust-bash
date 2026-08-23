@@ -1762,10 +1762,7 @@ fn execute_simple_command(
     if let Some(suffix) = &cmd.suffix {
         for item in &suffix.0 {
             match item {
-                ast::CommandPrefixOrSuffixItem::Word(w) => match expand_word_mut(w, state) {
-                    Ok(expanded) => args.extend(expanded),
-                    Err(e) => return Err(e),
-                },
+                ast::CommandPrefixOrSuffixItem::Word(w) => args.extend(expand_word_mut(w, state)?),
                 ast::CommandPrefixOrSuffixItem::IoRedirect(redir) => {
                     redirects.push(redir);
                 }
@@ -3147,7 +3144,6 @@ fn execute_subshell(
             substitution_depth: state.counters.substitution_depth,
             call_depth: 0,
         },
-        network_policy: state.network_policy.clone(),
         should_exit: false,
         abort_command_list: false,
         loop_depth: 0,
@@ -3236,7 +3232,6 @@ fn make_pipeline_stage_state(state: &mut InterpreterState) -> InterpreterState {
             substitution_depth: state.counters.substitution_depth,
             call_depth: 0,
         },
-        network_policy: state.network_policy.clone(),
         should_exit: false,
         abort_command_list: false,
         loop_depth: 0,
@@ -3390,7 +3385,6 @@ pub(crate) fn make_exec_callback(
     let shell_opts = state.shell_opts.clone();
     let shopt_opts = state.shopt_opts.clone();
     let limits = state.limits.clone();
-    let network_policy = state.network_policy.clone();
     let positional_params = state.positional_params.clone();
     let shell_name = state.shell_name.clone();
     let random_seed = state.random_seed;
@@ -3448,7 +3442,6 @@ pub(crate) fn make_exec_callback(
                 substitution_depth: 0,
                 call_depth: 0,
             },
-            network_policy: network_policy.clone(),
             should_exit: false,
             abort_command_list: false,
             loop_depth: 0,
@@ -5062,7 +5055,6 @@ fn make_proc_sub_state(state: &mut InterpreterState) -> InterpreterState {
             substitution_depth: state.counters.substitution_depth,
             call_depth: 0,
         },
-        network_policy: state.network_policy.clone(),
         should_exit: false,
         abort_command_list: false,
         loop_depth: 0,

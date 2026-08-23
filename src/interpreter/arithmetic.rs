@@ -1517,7 +1517,6 @@ mod tests {
         ExecutionCounters, ExecutionLimits, InterpreterState, ShellOpts, ShoptOpts,
         new_unresolved_record,
     };
-    use crate::network::NetworkPolicy;
     use crate::vfs::InMemoryFs;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1534,7 +1533,6 @@ mod tests {
             shopt_opts: ShoptOpts::default(),
             limits: ExecutionLimits::default(),
             counters: ExecutionCounters::default(),
-            network_policy: NetworkPolicy::default(),
             should_exit: false,
             abort_command_list: false,
             loop_depth: 0,

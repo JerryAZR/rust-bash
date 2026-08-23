@@ -1006,22 +1006,15 @@ mod tests {
     use super::*;
     use crate::commands::{CommandContext, VirtualCommand};
     use crate::interpreter::ExecutionLimits;
-    use crate::network::NetworkPolicy;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn test_ctx() -> (
-        Arc<InMemoryFs>,
-        HashMap<String, String>,
-        ExecutionLimits,
-        NetworkPolicy,
-    ) {
+    fn test_ctx() -> (Arc<InMemoryFs>, HashMap<String, String>, ExecutionLimits) {
         (
             Arc::new(InMemoryFs::new()),
             HashMap::new(),
             ExecutionLimits::default(),
-            NetworkPolicy::default(),
         )
     }
 
@@ -1029,7 +1022,6 @@ mod tests {
         fs: &'a Arc<InMemoryFs>,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
         stdin: &'a str,
     ) -> CommandContext<'a> {
         CommandContext {
@@ -1040,7 +1032,6 @@ mod tests {
             stdin,
             stdin_bytes: None,
             limits,
-            network_policy,
             exec: None,
             shell_opts: None,
         }
@@ -1050,9 +1041,8 @@ mod tests {
         fs: &'a Arc<InMemoryFs>,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
     ) -> CommandContext<'a> {
-        ctx_with_stdin(fs, env, limits, network_policy, "")
+        ctx_with_stdin(fs, env, limits, "")
     }
 
     fn run(args: &[&str], context: &CommandContext) -> CommandResult {
@@ -1062,12 +1052,12 @@ mod tests {
 
     #[test]
     fn identical_files_exit_zero_no_output() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\nworld\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello\nworld\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "");
@@ -1075,12 +1065,12 @@ mod tests {
 
     #[test]
     fn different_files_exit_one_normal_diff() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"world\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("1c1"));
@@ -1090,12 +1080,12 @@ mod tests {
 
     #[test]
     fn unified_format_headers_and_hunks() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"line1\nline2\nline3\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"line1\nchanged\nline3\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-u", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("--- /a.txt"));
@@ -1107,12 +1097,12 @@ mod tests {
 
     #[test]
     fn context_format_headers() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"line1\nline2\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"line1\nline3\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-c", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("*** /a.txt"));
@@ -1122,7 +1112,7 @@ mod tests {
 
     #[test]
     fn recursive_directory_comparison() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.mkdir_p(std::path::Path::new("/dir1")).unwrap();
         fs.mkdir_p(std::path::Path::new("/dir2")).unwrap();
         fs.write_file(std::path::Path::new("/dir1/a.txt"), b"hello\n")
@@ -1137,7 +1127,7 @@ mod tests {
             .unwrap();
         fs.write_file(std::path::Path::new("/dir2/only2.txt"), b"y\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-r", "/dir1", "/dir2"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("Only in /dir1: only1.txt"));
@@ -1148,12 +1138,12 @@ mod tests {
 
     #[test]
     fn brief_mode() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"world\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-q", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.stdout, "Files /a.txt and /b.txt differ\n");
@@ -1161,46 +1151,46 @@ mod tests {
 
     #[test]
     fn ignore_case() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"Hello\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-i", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
     }
 
     #[test]
     fn ignore_all_whitespace() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello world\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"helloworld\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-w", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
     }
 
     #[test]
     fn ignore_space_change() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello  world\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello world\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-b", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
     }
 
     #[test]
     fn new_file_treats_absent_as_empty() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-N", "/a.txt", "/nonexistent.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("< hello"));
@@ -1208,10 +1198,10 @@ mod tests {
 
     #[test]
     fn absent_file_without_new_file_flag_errors() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/nonexistent.txt"], &c);
         assert_eq!(result.exit_code, 2);
         assert!(result.stderr.contains("No such file or directory"));
@@ -1219,12 +1209,12 @@ mod tests {
 
     #[test]
     fn report_identical_files() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"same\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"same\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-s", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "Files /a.txt and /b.txt are identical\n");
@@ -1232,10 +1222,10 @@ mod tests {
 
     #[test]
     fn single_line_files() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"a").unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"b").unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("< a"));
@@ -1244,10 +1234,10 @@ mod tests {
 
     #[test]
     fn empty_files_identical() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"").unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"").unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "");
@@ -1255,10 +1245,10 @@ mod tests {
 
     #[test]
     fn stdin_via_dash() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/b.txt"), b"world\n")
             .unwrap();
-        let c = ctx_with_stdin(&fs, &env, &limits, &np, "hello\n");
+        let c = ctx_with_stdin(&fs, &env, &limits, "hello\n");
         let result = run(&["-", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("< hello"));
@@ -1267,7 +1257,7 @@ mod tests {
 
     #[test]
     fn unified_custom_context() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(
             std::path::Path::new("/a.txt"),
             b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
@@ -1278,7 +1268,7 @@ mod tests {
             b"1\n2\n3\n4\nFIVE\n6\n7\n8\n9\n10\n",
         )
         .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-U1", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("--- /a.txt"));
@@ -1289,12 +1279,12 @@ mod tests {
 
     #[test]
     fn label_overrides_filename() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"world\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(
             &["-u", "--label", "old", "--label", "new", "/a.txt", "/b.txt"],
             &c,
@@ -1306,34 +1296,34 @@ mod tests {
 
     #[test]
     fn no_trailing_newline_files() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
     }
 
     #[test]
     fn ignore_blank_lines() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\n\nworld\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello\nworld\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-B", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
     }
 
     #[test]
     fn new_file_absent_first_file() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-N", "/nonexistent.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("> hello"));
@@ -1341,10 +1331,10 @@ mod tests {
 
     #[test]
     fn directories_without_recursive_flag_errors() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.mkdir_p(std::path::Path::new("/dir1")).unwrap();
         fs.mkdir_p(std::path::Path::new("/dir2")).unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/dir1", "/dir2"], &c);
         assert_eq!(result.exit_code, 2);
         assert!(result.stderr.contains("is a directory"));
@@ -1352,8 +1342,8 @@ mod tests {
 
     #[test]
     fn requires_two_arguments() {
-        let (fs, env, limits, np) = test_ctx();
-        let c = ctx(&fs, &env, &limits, &np);
+        let (fs, env, limits) = test_ctx();
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt"], &c);
         assert_eq!(result.exit_code, 2);
         assert!(result.stderr.contains("requires exactly two"));
@@ -1361,12 +1351,12 @@ mod tests {
 
     #[test]
     fn normal_diff_add_lines() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"line1\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"line1\nline2\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("1a2"));
@@ -1375,12 +1365,12 @@ mod tests {
 
     #[test]
     fn normal_diff_delete_lines() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"line1\nline2\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"line1\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("2d1"));
@@ -1389,14 +1379,14 @@ mod tests {
 
     #[test]
     fn recursive_nested_directories() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.mkdir_p(std::path::Path::new("/d1/sub")).unwrap();
         fs.mkdir_p(std::path::Path::new("/d2/sub")).unwrap();
         fs.write_file(std::path::Path::new("/d1/sub/f.txt"), b"old\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/d2/sub/f.txt"), b"new\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-r", "/d1", "/d2"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("< old"));
@@ -1405,12 +1395,12 @@ mod tests {
 
     #[test]
     fn context_format_custom_context() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"1\n2\n3\n4\n5\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"1\n2\nX\n4\n5\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-C1", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("*** /a.txt"));
@@ -1420,10 +1410,10 @@ mod tests {
 
     #[test]
     fn new_file_flag_with_unified() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"hello\nworld\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-uN", "/a.txt", "/missing.txt"], &c);
         assert_eq!(result.exit_code, 1);
         assert!(result.stdout.contains("--- /a.txt"));
@@ -1432,12 +1422,12 @@ mod tests {
 
     #[test]
     fn brief_identical_no_output() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"same\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"same\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-q", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "");
@@ -1445,12 +1435,12 @@ mod tests {
 
     #[test]
     fn combined_flags() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"HELLO  WORLD\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello world\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         // -i ignores case, -b ignores space changes → should be identical
         let result = run(&["-ib", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 0);
@@ -1461,12 +1451,12 @@ mod tests {
         // Verify -i flag influences the diff algorithm, not just identity check.
         // Lines that differ only in case should be treated as equal context,
         // so only the truly different line appears in output.
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"Hello\nfoo\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"hello\nbar\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-i", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         // "Hello" vs "hello" should match with -i, so only foo/bar differs
@@ -1478,12 +1468,12 @@ mod tests {
 
     #[test]
     fn context_format_uses_exclamation_for_replace() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         fs.write_file(std::path::Path::new("/a.txt"), b"line1\nold\nline3\n")
             .unwrap();
         fs.write_file(std::path::Path::new("/b.txt"), b"line1\nnew\nline3\n")
             .unwrap();
-        let c = ctx(&fs, &env, &limits, &np);
+        let c = ctx(&fs, &env, &limits);
         let result = run(&["-c", "/a.txt", "/b.txt"], &c);
         assert_eq!(result.exit_code, 1);
         // Replace ops should use ! marker, not - / +

@@ -230,7 +230,6 @@ fn collect_inputs(files: &[String], ctx: &CommandContext) -> Result<Vec<(String,
 mod tests {
     use super::*;
     use crate::interpreter::ExecutionLimits;
-    use crate::network::NetworkPolicy;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -247,7 +246,6 @@ mod tests {
             stdin,
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -267,7 +265,6 @@ mod tests {
             stdin,
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -291,7 +288,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -440,7 +436,6 @@ mod tests {
             stdin: "hello world\n",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };

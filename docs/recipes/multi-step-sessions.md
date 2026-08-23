@@ -2,7 +2,7 @@
 
 ## Goal
 
-Maintain shell state — variables, files, working directory, functions — across multiple `exec()` calls. This is essential for interactive agents, REPL-like workflows, and multi-turn conversations.
+Maintain shell state — variables, files, working directory, functions — across multiple `exec()` calls. This is essential for interactive agents, line-by-line input workflows, and multi-turn conversations.
 
 ## State That Persists
 
@@ -126,7 +126,7 @@ assert_eq!(result.stdout, "exists\n");
 
 ## Checking Completion with is_input_complete
 
-For REPL-like interfaces, use `RustBash::is_input_complete()` to detect whether the user's input is a complete statement or needs more lines:
+For interactive interfaces, use `RustBash::is_input_complete()` to detect whether the user's input is a complete statement or needs more lines:
 
 ```rust
 use rust_bash::RustBash;

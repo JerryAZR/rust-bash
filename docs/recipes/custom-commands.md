@@ -116,7 +116,6 @@ assert_eq!(result.stdout, "/data.txt: 18 bytes, 3 lines\n");
 | `env` | `&HashMap<String, String>` | All shell variables (names → values) |
 | `stdin` | `&str` | Standard input (piped data or redirect content) |
 | `limits` | `&ExecutionLimits` | Current execution limits |
-| `network_policy` | `&NetworkPolicy` | Network access policy |
 | `exec` | `Option<ExecCallback>` | Callback for sub-command execution (used by `xargs`/`find -exec`) |
 
 ## Processing stdin
@@ -216,87 +215,3 @@ let result = shell.exec("echo hello").unwrap();
 assert_eq!(result.stdout, "[AUDIT] hello\n");
 ```
 
----
-
-## TypeScript: Custom Commands with defineCommand
-
-The `rust-bash` npm package provides `defineCommand()` for creating custom commands in TypeScript:
-
-### Basic Command
-
-```typescript
-import { Bash, defineCommand } from 'rust-bash';
-
-const greet = defineCommand('greet', async (args, ctx) => {
-  const name = args[0] ?? 'world';
-  return { stdout: `Hello, ${name}!\n`, stderr: '', exitCode: 0 };
-});
-
-const bash = await Bash.create(createBackend, {
-  customCommands: [greet],
-});
-
-const result = await bash.exec('greet Alice');
-// result.stdout === "Hello, Alice!\n"
-```
-
-### Async Commands (e.g., HTTP fetch)
-
-```typescript
-import { defineCommand } from 'rust-bash';
-
-const fetchCmd = defineCommand('fetch', async (args, ctx) => {
-  const url = args[0];
-  if (!url) {
-    return { stdout: '', stderr: 'fetch: missing URL\n', exitCode: 1 };
-  }
-  const response = await globalThis.fetch(url);
-  const text = await response.text();
-  return { stdout: text, stderr: '', exitCode: response.ok ? 0 : 1 };
-});
-```
-
-### Accessing the Filesystem
-
-Custom commands receive a `CommandContext` with VFS access:
-
-```typescript
-const countLines = defineCommand('count-lines', async (args, ctx) => {
-  const path = args[0];
-  if (!path) {
-    return { stdout: '', stderr: 'count-lines: missing path\n', exitCode: 1 };
-  }
-  try {
-    const content = ctx.fs.readFileSync(path);
-    const lines = content.split('\n').length;
-    return { stdout: `${lines}\n`, stderr: '', exitCode: 0 };
-  } catch {
-    return { stdout: '', stderr: `count-lines: ${path}: No such file\n`, exitCode: 1 };
-  }
-});
-```
-
-### Using exec() for Sub-Commands
-
-Custom commands can invoke other commands:
-
-```typescript
-const deploy = defineCommand('deploy', async (args, ctx) => {
-  const result = await ctx.exec('cat /app/manifest.json | jq -r .version');
-  return {
-    stdout: `Deploying version ${result.stdout.trim()}...\n`,
-    stderr: '',
-    exitCode: 0,
-  };
-});
-```
-
-### Multiple Commands
-
-```typescript
-const bash = await Bash.create(createBackend, {
-  customCommands: [greet, fetchCmd, countLines, deploy],
-});
-
-await bash.exec('greet Bob && count-lines /data.txt');
-```

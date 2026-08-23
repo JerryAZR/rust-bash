@@ -3,14 +3,9 @@ mod mountable;
 
 #[cfg(feature = "native-fs")]
 mod overlay;
-#[cfg(feature = "native-fs")]
-mod readwrite;
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(all(test, feature = "native-fs"))]
-mod readwrite_tests;
 
 #[cfg(all(test, feature = "native-fs"))]
 mod overlay_tests;
@@ -23,8 +18,6 @@ pub use mountable::MountableFs;
 
 #[cfg(feature = "native-fs")]
 pub use overlay::{OverlayDiff, OverlayFs, OverlayWrite};
-#[cfg(feature = "native-fs")]
-pub use readwrite::ReadWriteFs;
 
 use crate::error::VfsError;
 use crate::platform::SystemTime;
@@ -32,8 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// VFS paths always use Unix-style `/` separators. `std::path::Path::is_absolute()`
-/// is platform-dependent and returns `false` on `wasm32-unknown-unknown` even for
-/// `/home/user`, so we roll our own check.
+/// is platform-dependent (Windows drive/UNC prefixes), so we roll our own check.
 pub(crate) fn vfs_path_is_absolute(path: &Path) -> bool {
     path.to_str().is_some_and(|s| s.starts_with('/'))
 }
@@ -303,7 +295,6 @@ pub trait VirtualFs: Send + Sync {
     /// decides what "independent copy" means:
     /// - InMemoryFs: clones the entire tree
     /// - OverlayFs: clones the upper layer and whiteouts; lower is shared
-    /// - ReadWriteFs: no isolation (returns Arc::clone — writes hit real FS)
     /// - MountableFs: recursively deep-clones each mount
     fn deep_clone(&self) -> Arc<dyn VirtualFs>;
 }

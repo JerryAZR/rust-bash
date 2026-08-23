@@ -7,8 +7,6 @@ pub(crate) mod exec_cmds;
 pub(crate) mod file_ops;
 pub(crate) mod jq_cmd;
 pub(crate) mod navigation;
-#[cfg(feature = "network")]
-pub(crate) mod net;
 pub(crate) mod regex_util;
 pub(crate) mod sed;
 pub(crate) mod test_cmd;
@@ -17,7 +15,6 @@ pub(crate) mod utils;
 
 use crate::error::RustBashError;
 use crate::interpreter::ExecutionLimits;
-use crate::network::NetworkPolicy;
 use crate::vfs::VirtualFs;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,7 +46,6 @@ pub struct CommandContext<'a> {
     /// Commands that handle binary input check this first, falling back to `stdin`.
     pub stdin_bytes: Option<&'a [u8]>,
     pub limits: &'a ExecutionLimits,
-    pub network_policy: &'a NetworkPolicy,
     pub exec: Option<ExecCallback<'a>>,
     /// Shell options (`set -o`), used by `test -o optname`.
     pub shell_opts: Option<&'a crate::interpreter::ShellOpts>,
@@ -1150,38 +1146,26 @@ pub fn register_default_commands() -> HashMap<String, Arc<dyn VirtualCommand>> {
     for cmd in defaults {
         commands.insert(cmd.name().to_string(), cmd);
     }
-    // M3.2: network (feature-gated)
-    #[cfg(feature = "network")]
-    {
-        commands.insert("curl".to_string(), Arc::new(net::CurlCommand));
-    }
     commands
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::NetworkPolicy;
     use crate::vfs::InMemoryFs;
     use std::sync::Arc;
 
-    fn test_ctx() -> (
-        Arc<InMemoryFs>,
-        HashMap<String, String>,
-        ExecutionLimits,
-        NetworkPolicy,
-    ) {
+    fn test_ctx() -> (Arc<InMemoryFs>, HashMap<String, String>, ExecutionLimits) {
         (
             Arc::new(InMemoryFs::new()),
             HashMap::new(),
             ExecutionLimits::default(),
-            NetworkPolicy::default(),
         )
     }
 
     #[test]
     fn echo_no_args() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1190,7 +1174,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1201,7 +1184,7 @@ mod tests {
 
     #[test]
     fn echo_simple_text() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1210,7 +1193,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1220,7 +1202,7 @@ mod tests {
 
     #[test]
     fn echo_flag_n() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1229,7 +1211,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1239,7 +1220,7 @@ mod tests {
 
     #[test]
     fn echo_escape_newline() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1248,7 +1229,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1258,7 +1238,7 @@ mod tests {
 
     #[test]
     fn echo_escape_tab() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1267,7 +1247,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1277,7 +1256,7 @@ mod tests {
 
     #[test]
     fn echo_escape_stop_output() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1286,7 +1265,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1296,7 +1274,7 @@ mod tests {
 
     #[test]
     fn echo_non_flag_dash_arg() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1305,7 +1283,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1315,7 +1292,7 @@ mod tests {
 
     #[test]
     fn echo_combined_flags() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1324,7 +1301,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1334,7 +1310,7 @@ mod tests {
 
     #[test]
     fn true_succeeds() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1343,7 +1319,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1352,7 +1327,7 @@ mod tests {
 
     #[test]
     fn false_fails() {
-        let (fs, env, limits, np) = test_ctx();
+        let (fs, env, limits) = test_ctx();
         let ctx = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1361,7 +1336,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };

@@ -6,13 +6,31 @@
 |---|-----------|------|
 | ✅ M1 | Core Shell | Production interpreter + VFS trait + ~35 commands |
 | ✅ M2 | Text Processing | awk, sed, jq, diff + remaining text commands |
-| ✅ M3 | Execution Safety | Limits enforcement, network policy |
-| ✅ M4 | Filesystem Backends | OverlayFs, ReadWriteFs, MountableFs |
-| ✅ M5 | Integration | C FFI, WASM, CLI binary, AI SDK wrapper |
+| ✅ M3 | Execution Safety | Limits enforcement (~~network policy~~ — removed from fork scope) |
+| ✅ M4 | Filesystem Backends | OverlayFs, MountableFs (~~ReadWriteFs~~ — removed from fork scope) |
+| ~~M5~~ | ~~Integration~~ | ~~C FFI, WASM, CLI binary, AI SDK wrapper~~ — removed from fork scope |
 | ✅ M6 | Shell Language Completeness | Arrays, shopt, process substitution, special vars, advanced redirections, missing builtins, differential testing |
 | ✅ M7 | Command Coverage & Discoverability | Missing commands, `--help` for all commands, compression/archiving, command fidelity, AI agent docs |
 | M8 | Embedded Runtimes & Data Formats | Python, JavaScript, SQLite, yq, xan, runtime boundary hardening |
 | M9 | Platform, Security & Execution API | Cancellation, lazy files, AST transforms, sandbox API, fuzz testing, threat model, binary encoding, network enhancements, VFS fidelity |
+
+---
+
+## Fork Scope Note
+
+This fork maintains only the Rust crate for agent-harness embedding
+(`docs/design/fork-scope.md`). Accordingly:
+
+- **M3.2 (network policy / curl), M4.2 (ReadWriteFs), and all of M5 (CLI, C
+  FFI, WASM, npm package, MCP, AI SDK tool definitions) were removed** — code
+  deleted, not just deprecated. Entries below are kept as historical record.
+- Later-milestone items tied to those surfaces are likewise void: M9.9
+  (network enhancements), the WASM/FFI boundary audits in M8.6, and any
+  npm/CLI distribution items. Security-boundary items (e.g. the M9.6
+  threat-model documentation) are also void — this fork is a guardrail
+  against careless mistakes, not a security boundary (see Chapter 7).
+- Remaining milestones (M6–M9 interpreter/platform work) are evaluated on
+  their merits for the fork's use case.
 
 ---
 
@@ -118,7 +136,7 @@ Via `similar` crate. Unified (`-u`), context (`-c`), and normal diff formats. `-
 
 Add `ExecutionLimits` + `ExecutionCounters` to state. Check limits at command dispatch, function calls, loop iterations, output appends, and wall-clock time. Return structured `LimitExceeded` errors. Additional limits to add: `maxSourceDepth` (default 100 — prevents `source` nesting stack overflow), `maxFileDescriptors` (default 1024 — prevents FD exhaustion from `exec 3<file` loops).
 
-### M3.2 — Network Access Control ✅
+### M3.2 — Network Access Control ✅ (removed from fork scope)
 
 Implement `NetworkPolicy`. Sandboxed `curl` validates URL against allow-list before HTTP request. Method restrictions, redirect following, response size limits. Additional security features to add: **DNS rebinding / SSRF protection** — `denyPrivateRanges: bool` option that DNS-resolves the URL hostname *before* the HTTP request and rejects private IP ranges (10.x, 172.16.x, 192.168.x, 127.x, ::1, link-local); pin resolved IP to the connection to prevent TOCTOU attacks. **Request transforms / credential brokering** — per-allowed-URL `transform` callback that can inject headers (auth tokens) at the fetch boundary so secrets never enter the sandbox environment. This enables secure API access without exposing credentials to scripts.
 
@@ -130,7 +148,7 @@ Implement `NetworkPolicy`. Sandboxed `curl` validates URL against allow-list bef
 
 Read from real directory, write to in-memory layer. Whiteout tracking for deletions. Merged directory listings.
 
-### M4.2 — ReadWriteFs ✅
+### M4.2 — ReadWriteFs ✅ (removed from fork scope)
 
 Thin `std::fs` wrapper. Optional path restriction (chroot-like).
 
@@ -142,21 +160,21 @@ Composite backend with path-based delegation. Longest-prefix mount matching.
 
 ## Milestone 5: Integration
 
-### M5.1 — CLI Binary ✅
+### M5.1 — CLI Binary ✅ (removed from fork scope)
 
 Static binary. `--files`, `--cwd`, `--env` flags. Interactive REPL. `--json` output mode.
 
-### M5.2 — C FFI ✅
+### M5.2 — C FFI ✅ (removed from fork scope)
 
 Stable C ABI: 6 exported functions (`rust_bash_create`, `rust_bash_exec`, `rust_bash_result_free`, `rust_bash_free`, `rust_bash_last_error`, `rust_bash_version`). JSON config. Generated C header.
 
-### M5.3 — WASM Target ✅
+### M5.3 — WASM Target ✅ (removed from fork scope)
 
 `wasm32-unknown-unknown` + `wasm-bindgen`. JavaScript wrapper. npm package (`rust-bash`) with TypeScript types, dual-entry (Node.js + browser), WASM backend with `initWasm()` / `createWasmBackend()`.
 
 **Design decision:** Separate `wasm-bindgen` (browser) and planned napi-rs (Node.js native addon) builds, unified under a single `rust-bash` package with conditional exports. The package auto-detects the environment: `tryLoadNative()` for Node.js, `initWasm()` for browsers.
 
-### M5.4 — AI SDK Integration ✅
+### M5.4 — AI SDK Integration ✅ (removed from fork scope)
 
 Framework-agnostic tool definitions (JSON Schema + handler functions) exported from the npm package. MCP server mode for the CLI binary (`rust-bash --mcp`). Documented recipe-based adapters for Vercel AI SDK, LangChain.js, OpenAI API, and Anthropic API. The core exports `bashToolDefinition` (JSON Schema), `createBashToolHandler()`, `formatToolForProvider()`, and `handleToolCall()` — the universal building blocks that work with any AI agent framework. Framework-specific adapters are thin (~10-line) wrappers documented as recipes, not hard dependencies.
 
@@ -343,7 +361,7 @@ Add infrastructure for systematic command correctness:
 - ✅ **Comparison test suite**: Fixture-based tests that run scripts against real bash and assert matching stdout/stderr/exit code. Record expected output in fixture files for offline replay. Enables differential testing without requiring bash at every `cargo test`.
 - ✅ **Per-command flag metadata**: Each command exports a declarative flag list (name, type, implemented vs stubbed). Enables coverage tracking and systematic fuzzing of flag combinations.
 
-### ✅ M7.9 — AI Agent Documentation (`AGENTS.md`)
+### ✅ M7.9 — AI Agent Documentation (`AGENTS.md`) (removed from fork scope)
 
 Ship a purpose-built `AGENTS.md` in the npm package and alongside the CLI binary. This is the primary interface documentation for AI agents consuming rust-bash. Inspired by just-bash's `packages/core/AGENTS.md` which ships as `dist/AGENTS.md`.
 

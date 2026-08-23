@@ -1,7 +1,7 @@
 #![cfg(feature = "native-fs")]
 //! Integration tests for filesystem backends through the `RustBash` API.
 //!
-//! These tests exercise OverlayFs, ReadWriteFs, and MountableFs end-to-end,
+//! These tests exercise OverlayFs and MountableFs end-to-end,
 //! verifying that each backend works correctly when wired into the shell
 //! via `RustBashBuilder::fs()`.
 
@@ -9,9 +9,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use rust_bash::{
-    InMemoryFs, MountableFs, OverlayFs, ReadWriteFs, RustBash, RustBashBuilder, VirtualFs,
-};
+use rust_bash::{InMemoryFs, MountableFs, OverlayFs, RustBash, RustBashBuilder, VirtualFs};
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -168,82 +166,6 @@ fn overlay_pipeline_with_real_files() {
     assert_stdout(&mut shell, "grep an /words.txt", "banana\n");
 }
 
-// ── ReadWriteFs integration ────────────────────────────────────────
-
-#[test]
-fn readwrite_reads_and_writes_real_files() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(root.join("home")).unwrap();
-
-    let rwfs = ReadWriteFs::with_root(&root).unwrap();
-    let mut shell = RustBashBuilder::new()
-        .fs(Arc::new(rwfs))
-        .cwd("/")
-        .build()
-        .unwrap();
-
-    shell.exec("echo real > /home/test.txt").unwrap();
-    assert_stdout(&mut shell, "cat /home/test.txt", "real\n");
-
-    // Verify it actually hit disk
-    let disk = std::fs::read_to_string(root.join("home/test.txt")).unwrap();
-    assert_eq!(disk, "real\n");
-}
-
-#[test]
-fn readwrite_restricted_root_prevents_escape() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(&root).unwrap();
-
-    let rwfs = ReadWriteFs::with_root(&root).unwrap();
-    let mut shell = RustBashBuilder::new()
-        .fs(Arc::new(rwfs))
-        .cwd("/")
-        .build()
-        .unwrap();
-
-    let r = shell.exec("cat /../../../etc/passwd").unwrap();
-    assert_ne!(r.exit_code, 0, "should fail to escape root");
-}
-
-#[test]
-fn readwrite_pipeline_with_real_files() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::write(root.join("nums.txt"), b"3\n1\n2\n").unwrap();
-
-    let rwfs = ReadWriteFs::with_root(&root).unwrap();
-    let mut shell = RustBashBuilder::new()
-        .fs(Arc::new(rwfs))
-        .cwd("/")
-        .build()
-        .unwrap();
-
-    assert_stdout(&mut shell, "sort /nums.txt", "1\n2\n3\n");
-}
-
-#[test]
-fn readwrite_subshell_writes_are_visible() {
-    // ReadWriteFs has no subshell isolation — writes go to the real FS
-    // and are visible in the parent shell.
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
-
-    let rwfs = ReadWriteFs::with_root(&root).unwrap();
-    let mut shell = RustBashBuilder::new()
-        .fs(Arc::new(rwfs))
-        .cwd("/")
-        .build()
-        .unwrap();
-
-    shell.exec("echo before > /rw.txt").unwrap();
-    shell.exec("(echo after > /rw.txt)").unwrap();
-    // Unlike OverlayFs/MountableFs, ReadWriteFs subshell writes ARE visible
-    assert_stdout(&mut shell, "cat /rw.txt", "after\n");
-}
-
 // ── MountableFs integration ────────────────────────────────────────
 
 #[test]
@@ -324,26 +246,6 @@ fn mountable_cross_mount_copy() {
     shell.exec("echo data > /file.txt").unwrap();
     shell.exec("cp /file.txt /other/copy.txt").unwrap();
     assert_stdout(&mut shell, "cat /other/copy.txt", "data\n");
-}
-
-#[test]
-fn mountable_readwrite_at_mount_point() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
-    std::fs::create_dir_all(root.join("data")).unwrap();
-    std::fs::write(root.join("data/info.txt"), b"real info\n").unwrap();
-
-    let rwfs = ReadWriteFs::with_root(&root).unwrap();
-    let mountable = MountableFs::new()
-        .mount("/", Arc::new(InMemoryFs::new()))
-        .mount("/real", Arc::new(rwfs));
-    let mut shell = RustBashBuilder::new()
-        .fs(Arc::new(mountable))
-        .cwd("/")
-        .build()
-        .unwrap();
-
-    assert_stdout(&mut shell, "cat /real/data/info.txt", "real info\n");
 }
 
 #[test]
@@ -559,27 +461,6 @@ fn builder_files_work_with_overlay() {
     assert_stdout(&mut shell, "cat /seed/data.txt", "seeded content\n");
     // Seed file only in memory, not on disk
     assert!(!tmp.path().join("seed/data.txt").exists());
-}
-
-#[test]
-fn builder_files_work_with_readwrite() {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = tmp.path().to_path_buf();
-    let rwfs = ReadWriteFs::with_root(&root).unwrap();
-    let mut shell = RustBashBuilder::new()
-        .fs(Arc::new(rwfs))
-        .files(HashMap::from([(
-            "/init.txt".to_string(),
-            b"initialized\n".to_vec(),
-        )]))
-        .cwd("/")
-        .build()
-        .unwrap();
-
-    assert_stdout(&mut shell, "cat /init.txt", "initialized\n");
-    // ReadWriteFs writes to disk
-    let disk = std::fs::read_to_string(root.join("init.txt")).unwrap();
-    assert_eq!(disk, "initialized\n");
 }
 
 // ── Control flow with backends ─────────────────────────────────────

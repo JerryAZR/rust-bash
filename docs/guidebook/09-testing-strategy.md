@@ -192,7 +192,6 @@ rust-bash/
 ├── src/
 │   ├── vfs/
 │   │   ├── memory.rs          # InMemoryFs implementation
-│   │   ├── readwrite_tests.rs # #[cfg(test)] ReadWriteFs tests
 │   │   ├── overlay_tests.rs   # #[cfg(test)] OverlayFs tests
 │   │   ├── mountable_tests.rs # #[cfg(test)] MountableFs tests
 │   │   └── tests.rs           # #[cfg(test)] shared VFS trait tests
@@ -210,8 +209,6 @@ rust-bash/
     ├── common/
     │   └── mod.rs             # Shared data model and test execution logic
     ├── filesystem_backends.rs # VFS backend integration tests
-    ├── cli.rs                 # CLI entry-point tests
-    ├── ffi.rs                 # FFI/C-binding tests
     ├── fixtures/
     │   ├── comparison/        # TOML fixtures recorded from real bash
     │   │   ├── basic_echo.toml

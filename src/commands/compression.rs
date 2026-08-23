@@ -1139,22 +1139,15 @@ mod tests {
     use super::*;
     use crate::commands::VirtualCommand;
     use crate::interpreter::ExecutionLimits;
-    use crate::network::NetworkPolicy;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn setup() -> (
-        Arc<InMemoryFs>,
-        HashMap<String, String>,
-        ExecutionLimits,
-        NetworkPolicy,
-    ) {
+    fn setup() -> (Arc<InMemoryFs>, HashMap<String, String>, ExecutionLimits) {
         (
             Arc::new(InMemoryFs::new()),
             HashMap::new(),
             ExecutionLimits::default(),
-            NetworkPolicy::default(),
         )
     }
 
@@ -1162,7 +1155,6 @@ mod tests {
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        np: &'a NetworkPolicy,
     ) -> CommandContext<'a> {
         CommandContext {
             fs,
@@ -1172,7 +1164,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits,
-            network_policy: np,
             exec: None,
             shell_opts: None,
         }
@@ -1182,7 +1173,6 @@ mod tests {
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        np: &'a NetworkPolicy,
         stdin: &'a str,
         stdin_bytes: Option<&'a [u8]>,
     ) -> CommandContext<'a> {
@@ -1194,7 +1184,6 @@ mod tests {
             stdin,
             stdin_bytes,
             limits,
-            network_policy: np,
             exec: None,
             shell_opts: None,
         }
@@ -1204,10 +1193,10 @@ mod tests {
 
     #[test]
     fn gzip_compress_file_creates_gz() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.txt"), b"hello world\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = GzipCommand.execute(&["test.txt".into()], &c);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
         assert!(fs.exists(Path::new("/test.txt.gz")));
@@ -1216,10 +1205,10 @@ mod tests {
 
     #[test]
     fn gzip_keep_original() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.txt"), b"hello world\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = GzipCommand.execute(&["-k".into(), "test.txt".into()], &c);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
         assert!(fs.exists(Path::new("/test.txt.gz")));
@@ -1228,10 +1217,10 @@ mod tests {
 
     #[test]
     fn gzip_decompress_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.txt"), b"hello world\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         // Compress first
         GzipCommand.execute(&["test.txt".into()], &c);
@@ -1249,10 +1238,10 @@ mod tests {
 
     #[test]
     fn gzip_to_stdout() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.txt"), b"hello world\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = GzipCommand.execute(&["-c".into(), "test.txt".into()], &c);
         assert_eq!(r.exit_code, 0, "stderr: {}", r.stderr);
         assert!(r.stdout_bytes.is_some());
@@ -1261,18 +1250,18 @@ mod tests {
 
     #[test]
     fn gzip_stdin_compress_decompress_roundtrip() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input = "hello binary world\n";
 
         // Compress from stdin
-        let c = ctx_with_stdin_bytes(&*fs, &env, &limits, &np, input, None);
+        let c = ctx_with_stdin_bytes(&*fs, &env, &limits, input, None);
         let compressed = GzipCommand.execute(&[], &c);
         assert_eq!(compressed.exit_code, 0, "stderr: {}", compressed.stderr);
         assert!(compressed.stdout_bytes.is_some());
 
         // Decompress from stdin_bytes (simulating pipeline)
         let bytes = compressed.stdout_bytes.unwrap();
-        let c2 = ctx_with_stdin_bytes(&*fs, &env, &limits, &np, "", Some(&bytes));
+        let c2 = ctx_with_stdin_bytes(&*fs, &env, &limits, "", Some(&bytes));
         let decompressed = GunzipCommand.execute(&[], &c2);
         assert_eq!(decompressed.exit_code, 0, "stderr: {}", decompressed.stderr);
         let output = decompressed
@@ -1284,9 +1273,9 @@ mod tests {
 
     #[test]
     fn gunzip_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.txt"), b"hello\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         GzipCommand.execute(&["test.txt".into()], &c);
         let r = GunzipCommand.execute(&["test.txt.gz".into()], &c);
@@ -1298,10 +1287,10 @@ mod tests {
 
     #[test]
     fn zcat_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.txt"), b"zcat test\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         GzipCommand.execute(&["-k".into(), "test.txt".into()], &c);
         let r = ZcatCommand.execute(&["test.txt.gz".into()], &c);
@@ -1316,8 +1305,8 @@ mod tests {
 
     #[test]
     fn gzip_nonexistent_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GzipCommand.execute(&["nonexistent.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("nonexistent.txt"));
@@ -1325,13 +1314,13 @@ mod tests {
 
     #[test]
     fn gzip_compression_levels() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let data = "a".repeat(1000);
         fs.write_file(Path::new("/test.txt"), data.as_bytes())
             .unwrap();
 
         // Fast compression
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r1 = GzipCommand.execute(&["-c".into(), "-1".into(), "test.txt".into()], &c);
         assert_eq!(r1.exit_code, 0);
         let fast_size = r1.stdout_bytes.as_ref().unwrap().len();
@@ -1349,10 +1338,10 @@ mod tests {
 
     #[test]
     fn tar_create_and_extract_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/hello.txt"), b"hello world\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         // Create archive
         let r = TarCommand.execute(&["cf".into(), "archive.tar".into(), "hello.txt".into()], &c);
@@ -1373,10 +1362,10 @@ mod tests {
 
     #[test]
     fn tar_create_and_list() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/a.txt"), b"aaa").unwrap();
         fs.write_file(Path::new("/b.txt"), b"bbb").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         TarCommand.execute(
             &[
@@ -1396,13 +1385,13 @@ mod tests {
 
     #[test]
     fn tar_create_directory() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/mydir")).unwrap();
         fs.write_file(Path::new("/mydir/file1.txt"), b"content1")
             .unwrap();
         fs.write_file(Path::new("/mydir/file2.txt"), b"content2")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         TarCommand.execute(&["cf".into(), "archive.tar".into(), "mydir".into()], &c);
 
@@ -1416,10 +1405,10 @@ mod tests {
 
     #[test]
     fn tar_with_gzip() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.txt"), b"gzipped tar content\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         // Create gzipped tar
         let r = TarCommand.execute(
@@ -1441,9 +1430,9 @@ mod tests {
 
     #[test]
     fn tar_verbose() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/file.txt"), b"data").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         let r = TarCommand.execute(&["cvf".into(), "archive.tar".into(), "file.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
@@ -1452,12 +1441,12 @@ mod tests {
 
     #[test]
     fn tar_change_dir() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/src")).unwrap();
         fs.write_file(Path::new("/src/code.rs"), b"fn main() {}")
             .unwrap();
         fs.mkdir_p(Path::new("/dest")).unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
 
         // Create archive from /src
         let r = TarCommand.execute(
@@ -1488,8 +1477,8 @@ mod tests {
 
     #[test]
     fn tar_no_mode_specified() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TarCommand.execute(&["-f".into(), "test.tar".into()], &c);
         assert_eq!(r.exit_code, 2);
         assert!(r.stderr.contains("must specify"));
@@ -1497,8 +1486,8 @@ mod tests {
 
     #[test]
     fn tar_empty_archive_refused() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TarCommand.execute(&["cf".into(), "empty.tar".into()], &c);
         assert_eq!(r.exit_code, 2);
         assert!(r.stderr.contains("empty archive"));

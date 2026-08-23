@@ -54,13 +54,13 @@ Semantics of `diff()` worth relying on for per-operation reporting:
 
 ## 2. Gaps relative to the fork's workflow
 
-1. **`diff()` is Rust-API-only.** The fork added `OverlayDiff`/`diff()` to
-   the crate API but has not yet extended the (upstream-era) WASM
-   (`src/wasm.rs`), C FFI (`src/ffi.rs`), MCP (`src/mcp.rs`), or npm
-   (`packages/core/`) surfaces to match. A harness written in Node today
-   cannot get the change set without going through the Rust API. *Decision
-   needed:* which surface does this fork's caller use? If Node, exposing
-   diff over napi is a prerequisite task.
+1. **`diff()` is Rust-API-only.** This is now structural: the trim
+   ([fork-scope.md](fork-scope.md)) deleted upstream's WASM, C FFI, MCP, and
+   npm surfaces, leaving the Rust crate as the only integration target. A
+   future Node harness (e.g. pi) would need a purpose-built napi package
+   exposing `OverlayFs`/`diff()` — a new design, not a revival of the
+   deleted dual native+wasm package. *Decision deferred* until such a
+   harness actually materializes.
 2. **Diff granularity is overlay-lifetime, not per-operation.** `diff()`
    accumulates across `exec()` calls. Per-operation change sets require the
    caller to either (a) apply + `sync()` between operations, or (b) snapshot
@@ -216,8 +216,9 @@ deletion; write-then-delete within one op → absent from the diff).
 
 ## 5. Task list implied by this design (not scheduled)
 
-1. Decide harness surface; if Node, expose `diff()` (+ apply helper?) over
-   napi in `packages/core`.
+1. Decide harness surface; if a Node harness (pi experiment) materializes,
+   design a purpose-built napi package exposing `diff()` (+ apply helper?)
+   — the upstream npm package was deleted.
 2. Choose WASI runtime (wasmtime vs wasmer — §3.3) and CPython WASI
    distribution (§3.2); pin versions; verify current FS-trait APIs.
 3. Implement the FS bridge module (fd table, path mapping, errno mapping) —
@@ -229,8 +230,8 @@ deletion; write-then-delete within one op → absent from the diff).
 
 ## 6. Open questions for the caller
 
-1. **Harness surface** — Rust-native, or Node/npm (requiring napi diff
-   exposure first)?
+1. **Harness surface** — Rust-native (current harness), or Node (pi
+   experiment; would require the napi diff exposure first)?
 2. **Runtime** — wasmtime or wasmer? (See §3.3; slight lean to wasmer for
    trait fit, but verify maintenance/version state before committing.)
 3. **Python capability scope** — pure-Python stdlib only, or is there a

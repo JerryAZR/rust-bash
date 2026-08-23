@@ -600,10 +600,9 @@ fn parse_chmod_mode(mode_str: &str) -> Option<ParsedChmodMode> {
     let (who, op_and_perms) = mode_str.split_at(op_pos);
     let (add, perms) = if let Some(perms) = op_and_perms.strip_prefix('+') {
         (true, perms)
-    } else if let Some(perms) = op_and_perms.strip_prefix('-') {
-        (false, perms)
     } else {
-        return None;
+        let perms = op_and_perms.strip_prefix('-')?;
+        (false, perms)
     };
     if perms.is_empty() {
         return None;
@@ -1405,35 +1404,23 @@ mod tests {
     use super::*;
     use crate::commands::{CommandContext, VirtualCommand};
     use crate::interpreter::ExecutionLimits;
-    use crate::network::NetworkPolicy;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn setup() -> (
-        Arc<InMemoryFs>,
-        HashMap<String, String>,
-        ExecutionLimits,
-        NetworkPolicy,
-    ) {
+    fn setup() -> (Arc<InMemoryFs>, HashMap<String, String>, ExecutionLimits) {
         let fs = Arc::new(InMemoryFs::new());
         fs.write_file(Path::new("/file1.txt"), b"hello\n").unwrap();
         fs.write_file(Path::new("/file2.txt"), b"world\n").unwrap();
         fs.mkdir_p(Path::new("/dir1")).unwrap();
         fs.write_file(Path::new("/dir1/a.txt"), b"aaa\n").unwrap();
-        (
-            fs,
-            HashMap::new(),
-            ExecutionLimits::default(),
-            NetworkPolicy::default(),
-        )
+        (fs, HashMap::new(), ExecutionLimits::default())
     }
 
     fn ctx<'a>(
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
     ) -> CommandContext<'a> {
         CommandContext {
             fs,
@@ -1443,7 +1430,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits,
-            network_policy,
             exec: None,
             shell_opts: None,
         }
@@ -1453,8 +1439,8 @@ mod tests {
 
     #[test]
     fn cp_basic_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CpCommand.execute(&["file1.txt".into(), "copy.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(fs.read_file(Path::new("/copy.txt")).unwrap(), b"hello\n");
@@ -1462,8 +1448,8 @@ mod tests {
 
     #[test]
     fn cp_into_directory() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CpCommand.execute(&["file1.txt".into(), "dir1".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(
@@ -1474,8 +1460,8 @@ mod tests {
 
     #[test]
     fn cp_recursive() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CpCommand.execute(&["-r".into(), "dir1".into(), "dir2".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(fs.read_file(Path::new("/dir2/a.txt")).unwrap(), b"aaa\n");
@@ -1483,8 +1469,8 @@ mod tests {
 
     #[test]
     fn cp_dir_without_r_fails() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CpCommand.execute(&["dir1".into(), "dir2".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("omitting directory"));
@@ -1492,16 +1478,16 @@ mod tests {
 
     #[test]
     fn cp_missing_operand() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CpCommand.execute(&["file1.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn cp_nonexistent_source() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CpCommand.execute(&["nope.txt".into(), "out.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("cannot stat"));
@@ -1511,8 +1497,8 @@ mod tests {
 
     #[test]
     fn mv_basic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = MvCommand.execute(&["file1.txt".into(), "moved.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(fs.read_file(Path::new("/moved.txt")).is_ok());
@@ -1521,8 +1507,8 @@ mod tests {
 
     #[test]
     fn mv_into_directory() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = MvCommand.execute(&["file1.txt".into(), "dir1".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(fs.read_file(Path::new("/dir1/file1.txt")).is_ok());
@@ -1530,8 +1516,8 @@ mod tests {
 
     #[test]
     fn mv_missing_operand() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = MvCommand.execute(&["file1.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -1540,8 +1526,8 @@ mod tests {
 
     #[test]
     fn rm_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RmCommand.execute(&["file1.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(!fs.exists(Path::new("/file1.txt")));
@@ -1549,16 +1535,16 @@ mod tests {
 
     #[test]
     fn rm_force_nonexistent() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RmCommand.execute(&["-f".into(), "nope.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
     }
 
     #[test]
     fn rm_dir_without_r_fails() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RmCommand.execute(&["dir1".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("Is a directory"));
@@ -1566,8 +1552,8 @@ mod tests {
 
     #[test]
     fn rm_recursive_dir() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RmCommand.execute(&["-rf".into(), "dir1".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(!fs.exists(Path::new("/dir1")));
@@ -1575,16 +1561,16 @@ mod tests {
 
     #[test]
     fn rm_no_args() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RmCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn rm_force_no_args() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RmCommand.execute(&["-f".into()], &c);
         assert_eq!(r.exit_code, 0);
     }
@@ -1593,7 +1579,7 @@ mod tests {
 
     #[test]
     fn tee_write_to_file_and_stdout() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let c = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1602,7 +1588,6 @@ mod tests {
             stdin: "piped data",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1617,7 +1602,7 @@ mod tests {
 
     #[test]
     fn tee_append() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let c = CommandContext {
             fs: &*fs,
             cwd: "/",
@@ -1626,7 +1611,6 @@ mod tests {
             stdin: "more",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &np,
             exec: None,
             shell_opts: None,
         };
@@ -1642,8 +1626,8 @@ mod tests {
 
     #[test]
     fn stat_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = StatCommand.execute(&["file1.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("file1.txt"));
@@ -1652,8 +1636,8 @@ mod tests {
 
     #[test]
     fn stat_directory() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = StatCommand.execute(&["dir1".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("directory"));
@@ -1661,8 +1645,8 @@ mod tests {
 
     #[test]
     fn stat_nonexistent() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = StatCommand.execute(&["nope".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -1671,8 +1655,8 @@ mod tests {
 
     #[test]
     fn chmod_basic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ChmodCommand.execute(&["755".into(), "file1.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         let meta = fs.stat(Path::new("/file1.txt")).unwrap();
@@ -1681,8 +1665,8 @@ mod tests {
 
     #[test]
     fn chmod_invalid_mode() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ChmodCommand.execute(&["xyz".into(), "file1.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("invalid mode"));
@@ -1690,8 +1674,8 @@ mod tests {
 
     #[test]
     fn chmod_missing_operand() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ChmodCommand.execute(&["755".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -1700,8 +1684,8 @@ mod tests {
 
     #[test]
     fn ln_symbolic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = LnCommand.execute(&["-s".into(), "file1.txt".into(), "link.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         let meta = fs.lstat(Path::new("/link.txt")).unwrap();
@@ -1710,8 +1694,8 @@ mod tests {
 
     #[test]
     fn ln_hard() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = LnCommand.execute(&["file1.txt".into(), "hard.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(fs.read_file(Path::new("/hard.txt")).unwrap(), b"hello\n");
@@ -1719,8 +1703,8 @@ mod tests {
 
     #[test]
     fn ln_missing_operand() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = LnCommand.execute(&["file1.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -1729,8 +1713,8 @@ mod tests {
 
     #[test]
     fn cp_double_dash() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CpCommand.execute(&["--".into(), "file1.txt".into(), "dd.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(fs.read_file(Path::new("/dd.txt")).unwrap(), b"hello\n");

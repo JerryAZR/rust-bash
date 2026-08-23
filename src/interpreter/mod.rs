@@ -10,7 +10,6 @@ mod walker;
 
 use crate::commands::VirtualCommand;
 use crate::error::RustBashError;
-use crate::network::NetworkPolicy;
 use crate::platform::Instant;
 use crate::vfs::VirtualFs;
 use bitflags::bitflags;
@@ -432,7 +431,6 @@ pub struct InterpreterState {
     pub shopt_opts: ShoptOpts,
     pub limits: ExecutionLimits,
     pub counters: ExecutionCounters,
-    pub network_policy: NetworkPolicy,
     pub(crate) should_exit: bool,
     /// When set, the current compound list (semicolon-separated command sequence)
     /// is aborted. Cleared at the end of each compound list.
@@ -1673,7 +1671,6 @@ mod tests {
             shopt_opts: ShoptOpts::default(),
             limits: ExecutionLimits::default(),
             counters: ExecutionCounters::default(),
-            network_policy: NetworkPolicy::default(),
             should_exit: false,
             abort_command_list: false,
             loop_depth: 0,

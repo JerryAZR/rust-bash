@@ -10,10 +10,10 @@ Internal engineering documentation for rust-bash — a Rust-based sandboxed bash
 | 2 | [Architecture Overview](02-architecture-overview.md) | High-level design, module structure, data flow |
 | 3 | [Parsing Layer](03-parsing-layer.md) | brush-parser integration, AST types, parsing pipeline |
 | 4 | [Interpreter Engine](04-interpreter-engine.md) | AST walking, word expansion, control flow, pipelines |
-| 5 | [Virtual Filesystem](05-virtual-filesystem.md) | VFS trait, InMemoryFs, OverlayFs, MountableFs, ReadWriteFs |
+| 5 | [Virtual Filesystem](05-virtual-filesystem.md) | VFS trait, InMemoryFs, OverlayFs, MountableFs |
 | 6 | [Command System](06-command-system.md) | Command trait, registry, command categories, custom commands |
-| 7 | [Execution Safety](07-execution-safety.md) | Limits, network policy, security model, threat mitigations |
-| 8 | [Integration Targets](08-integration-targets.md) | C FFI, WASM, CLI binary, AI SDK tool definitions |
+| 7 | [Execution Safety](07-execution-safety.md) | Limits, the guardrails-not-security model, promises and non-promises |
+| 8 | [Integration Targets](08-integration-targets.md) | Rust crate API, agent-harness embedding |
 | 9 | [Testing Strategy](09-testing-strategy.md) | Unit tests, snapshot tests, differential testing, fuzzing |
 | 10 | [Implementation Plan](10-implementation-plan.md) | Milestones, dependencies, build order, risk register |
 
@@ -23,7 +23,7 @@ Internal engineering documentation for rust-bash — a Rust-based sandboxed bash
 - **Implementing a feature?** Read the relevant chapter for the subsystem you're touching, then check Chapter 10 for milestone context and dependencies.
 - **Adding a command?** Chapter 6 covers the command trait, registration, and conventions.
 - **Working on the interpreter?** Chapters 3 and 4 cover parsing and execution in detail.
-- **Security review?** Chapter 7 covers the threat model and all mitigations.
+- **Reviewing the safety model?** Chapter 7 states what the sandbox promises (best-effort guardrails) and what it doesn't (a security boundary).
 
 ## Conventions
 

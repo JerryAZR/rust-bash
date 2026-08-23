@@ -25,7 +25,6 @@ pub struct CommandContext<'a> {
     pub stdin: &'a str,
     pub stdin_bytes: Option<&'a [u8]>,
     pub limits: &'a ExecutionLimits,
-    pub network_policy: &'a NetworkPolicy,
     pub exec: Option<ExecCallback<'a>>,
 }
 ```
@@ -42,7 +41,6 @@ pub struct CommandContext<'a> {
 | `stdin` | Input piped from the previous command in a pipeline |
 | `stdin_bytes` | Binary input from pipeline (used by compression commands) |
 | `limits` | Execution limits (commands should respect max_output_size) |
-| `network_policy` | Network access policy (checked by `curl` before any HTTP request) |
 | `exec` | Callback to execute sub-commands (used by `xargs`, `find -exec`, etc.) |
 
 ## CommandResult
@@ -120,9 +118,7 @@ shared recorder (`Arc<Mutex<UnresolvedCommandRecord>>` on `InterpreterState`), s
 misses inside subshells, pipelines, function bodies, and exec callbacks (`xargs`,
 `find -exec`, `sh -c`) all funnel into the top-level `ExecResult`. Names are
 deduplicated in first-encountered order; the recorder is reset at the start of each
-`exec()` call. The list is exposed in the CLI `--json` output
-(`unresolved_commands`), the WASM binding (`unresolvedCommands`), and appended to
-the MCP `bash` tool result.
+`exec()` call. The list is returned on `ExecResult` for the embedding host to act on.
 
 **Abort mode** (opt-in): `RustBashBuilder::abort_on_unresolved_commands(true)` makes
 the first miss abort the whole script immediately. The abort signal lives on the
@@ -296,12 +292,6 @@ for byte-transparent pipeline propagation (binary data is never corrupted by UTF
 | `gunzip` | `-c`, `-k`, `-f` | Decompress (equivalent to `gzip -d`) |
 | `zcat` | | Decompress to stdout (equivalent to `gzip -dc`) |
 | `tar` | `-c`, `-x`, `-t`, `-f`, `-z`, `-v`, `-C` | Create, extract, list archives. `-z` for gzip compression |
-
-### Network
-
-| Command | Notes |
-|---------|-------|
-| `curl` | Sandboxed HTTP — validates every request against `NetworkPolicy` |
 
 ## Implementing a New Command
 

@@ -29,7 +29,6 @@ pub struct InterpreterState {
     pub shell_opts: ShellOpts,
     pub limits: ExecutionLimits,
     pub counters: ExecutionCounters,
-    pub network_policy: NetworkPolicy,
     pub positional_params: Vec<String>,
     pub shell_name: String,
     // Internal fields (pub(crate)):

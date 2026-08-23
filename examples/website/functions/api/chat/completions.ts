@@ -1,1 +1,0 @@
-export { onRequestPost } from '../chat';

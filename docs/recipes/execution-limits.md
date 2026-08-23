@@ -2,7 +2,7 @@
 
 ## Goal
 
-Configure resource bounds to prevent runaway scripts. Useful for untrusted input, AI agent sandboxes, and multi-tenant environments.
+Configure resource bounds to prevent runaway scripts. Useful for AI agent sandboxes, unattended execution, and shared environments.
 
 ## Default Limits
 
@@ -70,7 +70,7 @@ match shell.exec("for i in $(seq 1 100); do echo $i; done") {
 
 Here are suggested profiles for common scenarios:
 
-### Strict — untrusted user input
+### Strict — short, fully unattended runs
 
 ```rust
 use rust_bash::{RustBashBuilder, ExecutionLimits};
@@ -163,74 +163,3 @@ Each simple command execution increments the counter. This includes:
 
 Builtins like `cd`, `export`, `set`, and variable assignments also count as commands.
 
----
-
-## TypeScript: Configuring Execution Limits
-
-The `rust-bash` npm package supports the same execution limits:
-
-### Setting Limits
-
-```typescript
-import { Bash } from 'rust-bash';
-
-const bash = await Bash.create(createBackend, {
-  executionLimits: {
-    maxCommandCount: 500,
-    maxLoopIterations: 100,
-    maxExecutionTimeSecs: 5,
-    maxOutputSize: 1024 * 1024, // 1 MB
-  },
-});
-```
-
-All fields in `executionLimits` are optional — unset fields use defaults.
-
-### Available Limits
-
-| TypeScript Field | Default | What it caps |
-|-----------------|---------|--------------|
-| `maxCallDepth` | 100 | Recursive function call nesting |
-| `maxCommandCount` | 10,000 | Total commands per `exec()` call |
-| `maxLoopIterations` | 10,000 | Iterations per loop |
-| `maxExecutionTimeSecs` | 30 | Wall-clock seconds per `exec()` call |
-| `maxOutputSize` | 10,485,760 | Combined stdout + stderr bytes |
-| `maxStringLength` | 10,485,760 | Maximum single variable value length |
-| `maxGlobResults` | 100,000 | Glob expansion result count |
-| `maxSubstitutionDepth` | 50 | Nested `$(...)` depth |
-| `maxHeredocSize` | 10,485,760 | Maximum heredoc content size |
-| `maxBraceExpansion` | 10,000 | Terms from brace expansion |
-
-### Preset Profiles (TypeScript)
-
-```typescript
-// Strict — untrusted user input
-const strictBash = await Bash.create(createBackend, {
-  executionLimits: {
-    maxCallDepth: 10,
-    maxCommandCount: 100,
-    maxLoopIterations: 50,
-    maxExecutionTimeSecs: 2,
-    maxOutputSize: 64 * 1024,
-    maxStringLength: 64 * 1024,
-    maxGlobResults: 100,
-    maxSubstitutionDepth: 5,
-    maxHeredocSize: 64 * 1024,
-    maxBraceExpansion: 100,
-  },
-});
-
-// Moderate — AI agent sandbox
-const agentBash = await Bash.create(createBackend, {
-  executionLimits: {
-    maxCallDepth: 50,
-    maxCommandCount: 5000,
-    maxLoopIterations: 1000,
-    maxExecutionTimeSecs: 10,
-    maxOutputSize: 1024 * 1024,
-  },
-});
-
-// Permissive — trusted scripts (defaults are already generous)
-const trustedBash = await Bash.create(createBackend, {});
-```

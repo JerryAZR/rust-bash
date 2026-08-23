@@ -2,7 +2,7 @@
 
 ## Goal
 
-Choose and configure the right virtual filesystem backend for your use case: fully sandboxed, copy-on-write over real files, direct host access, or a composite of all three.
+Choose and configure the right virtual filesystem backend for your use case: fully sandboxed, copy-on-write over real files, or a composite of both.
 
 ## Overview
 
@@ -10,7 +10,6 @@ Choose and configure the right virtual filesystem backend for your use case: ful
 |---------|-----------|-----------|-------------|----------|
 | `InMemoryFs` | Memory | Memory | None | Sandboxed execution, testing, AI agents |
 | `OverlayFs` | Disk (lower) + Memory (upper) | Memory only | Read-only | Code analysis, safe experimentation |
-| `ReadWriteFs` | Disk | Disk | Full (or chroot-restricted) | Trusted scripts, build tools |
 | `MountableFs` | Delegated per mount | Delegated per mount | Depends on mounts | Composite environments |
 
 ## InMemoryFs (Default)
@@ -87,34 +86,6 @@ assert_ne!(result.exit_code, 0); // file appears deleted
 // But on disk: std::fs::metadata("./my_project/README.md").is_ok() == true
 ```
 
-## ReadWriteFs — Direct Filesystem Access
-
-For trusted scripts that need real filesystem access. Use `with_root()` for chroot-like confinement.
-
-```rust
-use rust_bash::{RustBashBuilder, ReadWriteFs};
-use std::sync::Arc;
-
-// Unrestricted access to the entire filesystem:
-// let rwfs = ReadWriteFs::new();
-
-// Confined to a subtree (recommended):
-let rwfs = ReadWriteFs::with_root("/tmp/sandbox").unwrap();
-let mut shell = RustBashBuilder::new()
-    .fs(Arc::new(rwfs))
-    .cwd("/")
-    .build()
-    .unwrap();
-
-// All paths are resolved relative to the root
-shell.exec("mkdir -p /output && echo hello > /output/result.txt").unwrap();
-// This actually writes to /tmp/sandbox/output/result.txt on disk
-
-// Path traversal beyond the root is blocked
-let result = shell.exec("cat /../../etc/passwd").unwrap();
-assert_ne!(result.exit_code, 0); // PermissionDenied
-```
-
 ## MountableFs — Combine Backends
 
 Delegate different path prefixes to different backends. Longest-prefix matching determines which backend handles each operation.
@@ -144,15 +115,16 @@ shell.exec("echo scratch > /tmp/work.txt").unwrap();
 shell.exec("echo hello > /root-file.txt").unwrap();
 ```
 
-### Real-world example: isolated build environment
+### Real-world example: multi-directory analysis workspace
 
 ```rust
-use rust_bash::{RustBashBuilder, InMemoryFs, MountableFs, ReadWriteFs};
+use rust_bash::{RustBashBuilder, InMemoryFs, MountableFs, OverlayFs};
 use std::sync::Arc;
 
 let mountable = MountableFs::new()
     .mount("/", Arc::new(InMemoryFs::new()))
-    .mount("/output", Arc::new(ReadWriteFs::with_root("/tmp/build-output").unwrap()));
+    .mount("/project", Arc::new(OverlayFs::new("./myproject").unwrap()))
+    .mount("/fixtures", Arc::new(OverlayFs::new("./test-fixtures").unwrap()));
 
 let mut shell = RustBashBuilder::new()
     .fs(Arc::new(mountable))
@@ -160,13 +132,11 @@ let mut shell = RustBashBuilder::new()
     .build()
     .unwrap();
 
-// Script can write real files only under /output
-shell.exec("echo 'build artifact' > /output/result.txt").unwrap();
-// /output/result.txt is a real file at /tmp/build-output/result.txt
+// Both real directories are readable side by side
+shell.exec("diff -r /project/expected /fixtures/expected").unwrap();
 
-// Everything else is sandboxed in memory
-shell.exec("echo 'temp data' > /scratch.txt").unwrap();
-// /scratch.txt exists only in memory
+// Reports land in the in-memory root — the host is never modified
+shell.exec("grep -r TODO /project > /todo-report.txt").unwrap();
 ```
 
 ## Seeding Files from a Host Directory
@@ -204,198 +174,3 @@ let mut shell = RustBashBuilder::new()
 ```
 
 This copies files into the InMemoryFs at build time. For large directories, prefer `OverlayFs` to avoid the upfront memory cost.
-
-## Lazy File Loading (TypeScript)
-
-The `rust-bash` package supports three file entry types, letting you defer expensive I/O until the file is actually needed.
-
-### The Three Patterns
-
-```typescript
-import { Bash } from 'rust-bash';
-
-const bash = await Bash.create(createBackend, {
-  files: {
-    // 1. Eager (string) — written immediately at creation time
-    '/data.txt': 'hello world',
-
-    // 2. Lazy sync (() => string) — resolved on first exec() or readFile()
-    '/config.json': () => JSON.stringify(getConfig()),
-
-    // 3. Lazy async (() => Promise<string>) — resolved on first exec()
-    '/remote.txt': async () => {
-      const res = await fetch('https://api.example.com/data');
-      return await res.text();
-    },
-  },
-});
-```
-
-| Type | Signature | When Resolved | Use Case |
-|------|-----------|---------------|----------|
-| Eager | `string` | Immediately at `Bash.create()` | Small, known-at-definition-time content |
-| Lazy sync | `() => string` | On first `exec()` or `readFile()` | Computed content, environment-dependent config |
-| Lazy async | `() => Promise<string>` | On first `exec()` (all lazy files materialized) | Remote content, database queries, file reads |
-
-### Deferred Resolution
-
-Lazy files are **not** resolved during `Bash.create()` — construction is instant. They are materialized on first `exec()` call via `Promise.all()` (all lazy files resolved concurrently). Sync lazy files can also be resolved individually via `readFile()`.
-
-If `writeFile()` is called on a lazy path before it's ever read, the lazy callback is skipped entirely (write-before-read optimization).
-
-```typescript
-const bash = await Bash.create(createBackend, {
-  files: {
-    '/api/users.json': async () => {
-      const res = await fetch('https://api.example.com/users');
-      return await res.text();
-    },
-    '/api/config.json': async () => {
-      const res = await fetch('https://api.example.com/config');
-      return await res.text();
-    },
-    '/generated.txt': () => generateReport(),  // sync, also resolved in parallel batch
-    '/static.txt': 'always available',          // eager, written immediately
-  },
-});
-// Bash.create() returns immediately — no I/O happens yet
-// Both fetches and generateReport() run in parallel on the first exec() call
-```
-
-### Use Cases
-
-**Large files loaded on demand:**
-
-```typescript
-const bash = await Bash.create(createBackend, {
-  files: {
-    // Only reads the 50 MB log file when a Bash instance is actually created
-    '/var/log/app.log': () => fs.readFileSync('/real/path/to/app.log', 'utf-8'),
-  },
-});
-```
-
-**Remote content fetched lazily:**
-
-```typescript
-const bash = await Bash.create(createBackend, {
-  files: {
-    '/schema.sql': async () => {
-      const res = await fetch('https://raw.githubusercontent.com/org/repo/main/schema.sql');
-      return await res.text();
-    },
-  },
-});
-
-await bash.exec('grep CREATE /schema.sql | wc -l');
-```
-
-**Environment-dependent configuration:**
-
-```typescript
-const bash = await Bash.create(createBackend, {
-  files: {
-    '/etc/app.conf': () => {
-      const env = process.env.NODE_ENV ?? 'development';
-      return `environment=${env}\nlog_level=${env === 'production' ? 'warn' : 'debug'}\n`;
-    },
-  },
-});
-```
-
----
-
-## TypeScript: Virtual Filesystem
-
-The `rust-bash` npm package provides file seeding at creation time and direct VFS access.
-
-### Seeding Files
-
-```typescript
-import { Bash } from 'rust-bash';
-
-const bash = await Bash.create(createBackend, {
-  files: {
-    '/src/main.rs': 'fn main() {}',
-    '/src/lib.rs': 'pub fn hello() {}',
-    '/config.json': '{"debug": true}',
-  },
-});
-
-const result = await bash.exec('find / -name "*.rs"');
-// result.stdout includes /src/main.rs and /src/lib.rs
-```
-
-### Lazy File Loading
-
-File values can be functions — resolved concurrently at `Bash.create()` time via `Promise.all`. This keeps the config declarative while deferring expensive I/O until the instance is actually created:
-
-```typescript
-const bash = await Bash.create(createBackend, {
-  files: {
-    // Eager — written immediately
-    '/data.txt': 'hello world',
-
-    // Lazy sync — resolved at Bash.create() time
-    '/config.json': () => JSON.stringify(getConfig()),
-
-    // Lazy async — resolved at Bash.create() time (awaited)
-    '/remote.txt': async () => {
-      const res = await fetch('https://example.com/data');
-      return await res.text();
-    },
-  },
-});
-
-// /remote.txt is only fetched when a command reads it:
-await bash.exec('cat /remote.txt');
-```
-
-### Direct VFS Access
-
-The `bash.fs` proxy provides synchronous filesystem operations:
-
-```typescript
-// Write files
-bash.fs.writeFileSync('/output.txt', 'content');
-
-// Read files
-const data = bash.fs.readFileSync('/output.txt');
-
-// Check existence
-const exists = bash.fs.existsSync('/output.txt');
-
-// Create directories
-bash.fs.mkdirSync('/dir/subdir', { recursive: true });
-
-// List directory contents
-const entries = bash.fs.readdirSync('/');
-
-// File stats
-const stat = bash.fs.statSync('/output.txt');
-console.log(stat.isFile, stat.size);
-
-// Remove files
-bash.fs.rmSync('/output.txt');
-bash.fs.rmSync('/dir', { recursive: true });
-```
-
-### Browser Example
-
-In the browser, only `InMemoryFs` is available (no host filesystem access):
-
-```typescript
-import { Bash, initWasm, createWasmBackend } from 'rust-bash/browser';
-
-await initWasm();
-const bash = await Bash.create(createWasmBackend, {
-  files: {
-    '/index.html': '<h1>Hello</h1>',
-    '/style.css': 'body { color: red; }',
-  },
-});
-
-// All operations are in-memory
-await bash.exec('cat /index.html | grep -o "Hello"');
-bash.fs.writeFileSync('/output.txt', 'generated');
-```

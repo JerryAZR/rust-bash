@@ -543,7 +543,6 @@ fn execute_command_substitution(
             substitution_depth: state.counters.substitution_depth,
             call_depth: 0,
         },
-        network_policy: state.network_policy.clone(),
         should_exit: false,
         abort_command_list: false,
         loop_depth: 0,
@@ -5136,7 +5135,6 @@ mod tests {
         ExecutionCounters, ExecutionLimits, InterpreterState, ShellOpts, ShoptOpts, Variable,
         VariableAttrs, VariableValue, new_unresolved_record,
     };
-    use crate::network::NetworkPolicy;
     use crate::vfs::InMemoryFs;
     use brush_parser::word::{ParameterExpr, WordPiece};
     use std::collections::{BTreeMap, HashMap};
@@ -5160,7 +5158,6 @@ mod tests {
             shopt_opts: ShoptOpts::default(),
             limits: ExecutionLimits::default(),
             counters: ExecutionCounters::default(),
-            network_policy: NetworkPolicy::default(),
             should_exit: false,
             abort_command_list: false,
             loop_depth: 0,

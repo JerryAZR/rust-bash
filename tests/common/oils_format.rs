@@ -247,10 +247,9 @@ fn parse_bash_override_prefix(s: &str) -> Option<(OverrideKind, &str)> {
         (OverrideKind::NI, r)
     } else if let Some(r) = s.strip_prefix("BUG ") {
         (OverrideKind::Bug, r)
-    } else if let Some(r) = s.strip_prefix("OK ") {
-        (OverrideKind::Ok, r)
     } else {
-        return None;
+        let r = s.strip_prefix("OK ")?;
+        (OverrideKind::Ok, r)
     };
 
     // The rest is: shell_list metadata_key_value

@@ -65,7 +65,6 @@ pub enum RustBashError {
         limit_value: usize,
         actual_value: usize,
     },
-    Network(String),
     Vfs(VfsError),
     Timeout,
 }
@@ -90,7 +89,6 @@ impl fmt::Display for RustBashError {
                 f,
                 "limit exceeded: {limit_name} ({actual_value}) exceeded limit ({limit_value})"
             ),
-            RustBashError::Network(msg) => write!(f, "network error: {msg}"),
             RustBashError::Vfs(e) => write!(f, "vfs error: {e}"),
             RustBashError::Timeout => write!(f, "execution timed out"),
         }

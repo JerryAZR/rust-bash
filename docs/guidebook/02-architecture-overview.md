@@ -11,7 +11,7 @@ We evaluated three approaches and chose **Strategy B+**:
 | C: Wrap brush-core | Intercept at command level | Rejected — can't intercept redirect setup without forking |
 
 **Why B+ works**:
-- `brush-parser` is standalone (no brush-core dependency), WASM-ready, MIT licensed
+- `brush-parser` is standalone (no brush-core dependency), MIT licensed
 - `brush_parser::word::parse()` handles the hardest part — decomposing word strings into expansion pieces
 - We get a full bash grammar parser for free; we only write the execution engine
 - VFS is native from day one — no retrofitting real FS abstractions
@@ -45,7 +45,6 @@ We evaluated three approaches and chose **Strategy B+**:
 │  70+ commands   │   │  trait VirtualFs                 │
 │  dispatched by  │   │  ├── InMemoryFs (default)       │
 │  name lookup    │   │  ├── OverlayFs (CoW over real)  │
-│                 │   │  ├── ReadWriteFs (passthrough)   │
 │  CommandContext  │   │  └── MountableFs (composites)   │
 │  provides fs,   │   │                                 │
 │  cwd, env,      │   │  All commands receive            │
@@ -72,7 +71,6 @@ rust-bash/
 │   │   ├── mod.rs          # VirtualFs trait definition, Metadata, FsNode types
 │   │   ├── memory.rs       # InMemoryFs — default sandboxed backend
 │   │   ├── overlay.rs      # OverlayFs — copy-on-write over real directory
-│   │   ├── readwrite.rs    # ReadWriteFs — passthrough to real filesystem
 │   │   └── mountable.rs    # MountableFs — composite mount points
 │   ├── commands/
 │   │   ├── mod.rs          # VirtualCommand trait, CommandContext, echo, registry
@@ -91,14 +89,13 @@ rust-bash/
 │   │   ├── jq_cmd.rs       # jq via jaq-core
 │   │   ├── exec_cmds.rs    # xargs, find
 │   │   ├── test_cmd.rs     # test / [ command
-│   │   ├── net.rs          # curl with network policy
 │   │   ├── utils.rs        # expr, date, sleep, seq, env, printenv, which, base64,
 │   │   │                   # md5sum, sha256sum, whoami, hostname, uname, yes
 │   │   └── regex_util.rs   # BRE→ERE conversion shared by grep/sed/expr
-│   ├── network.rs          # NetworkPolicy, URL allow-listing
+│   ├── platform.rs         # Platform abstractions (time types)
 │   └── error.rs            # Unified error types (RustBashError, VfsError)
 ├── examples/
-│   └── shell.rs            # Interactive REPL shell
+│   └── agent_harness.rs    # Reference agent-harness embedding (OverlayFs + diff loop)
 ├── Cargo.toml
 └── tests/
     ├── integration.rs          # End-to-end shell integration tests
@@ -135,7 +132,6 @@ The `RustBash` owns a persistent `InterpreterState`. Each `exec()` call mutates 
 │  ├── shell_opts: ShellOpts         (errexit, nounset, …)  │
 │  ├── limits: ExecutionLimits       (immutable config)     │
 │  ├── counters: ExecutionCounters   (reset per exec())     │
-│  ├── network_policy: NetworkPolicy                        │
 │  ├── traps: HashMap<String, String>                       │
 │  ├── positional_params: Vec<String>                       │
 │  └── (internal: loop_depth, control_flow, local_scopes,   │
@@ -166,7 +162,6 @@ All public APIs return `Result<T, RustBashError>`. The error hierarchy:
 - `RustBashError::Execution` — runtime error during script execution
 - `RustBashError::LimitExceeded` — an execution limit was hit
 - `RustBashError::Vfs` — filesystem operation failed
-- `RustBashError::Network` — network policy violation or HTTP error
 - `RustBashError::Timeout` — wall-clock execution time exceeded
 
 Errors implement `std::error::Error` + `Display`. Command-level errors are reported via stderr and exit codes (matching bash behavior), not by propagating Rust errors — only truly exceptional conditions become `RustBashError`.

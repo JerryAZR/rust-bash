@@ -1,9 +1,0 @@
-node_modules/
-dist/
-*.tsbuildinfo
-.wrangler/
-.dev.vars
-test-results/
-public/rust_bash_bg.wasm
-public/repo-vfs-files.json
-public/repo-vfs-files.*.json

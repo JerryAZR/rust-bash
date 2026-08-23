@@ -172,37 +172,6 @@ Keep a second `Arc<OverlayFs>` handle when mounting through `MountableFs` —
 `diff()` is called on the host's handle, while the interpreter operates on the
 same underlying instance.
 
-### ReadWriteFs (Passthrough)
-
-Thin wrapper over `std::fs` implementing the `VirtualFs` trait. For trusted execution where you want real filesystem access.
-
-```rust
-struct ReadWriteFs {
-    root: Option<PathBuf>,  // optional chroot-like restriction
-}
-```
-
-If `root` is set, all paths are resolved relative to it and path traversal beyond the root is rejected with `PermissionDenied`. Symlink-based escape attempts are also caught.
-
-**Subshell isolation** (`deep_clone`): Creates a new `ReadWriteFs` with the same root — both instances point to the same real filesystem. There is no isolation since writes go directly to disk.
-
-**Example**:
-```rust
-use rust_bash::{RustBashBuilder, ReadWriteFs};
-use std::sync::Arc;
-
-// Restricted to a directory (chroot-like)
-let rwfs = ReadWriteFs::with_root("/tmp/sandbox").unwrap();
-let mut shell = RustBashBuilder::new()
-    .fs(Arc::new(rwfs))
-    .cwd("/")
-    .build()
-    .unwrap();
-
-// Operations hit the real filesystem under /tmp/sandbox
-shell.exec("echo hello > /output.txt").unwrap();  // writes to /tmp/sandbox/output.txt
-```
-
 ### MountableFs (Composite)
 
 Combines multiple backends at different mount points.
@@ -310,17 +279,15 @@ VFS paths are Unix-style by construction, on every platform:
   separator (`\` on Windows). Never use `Path::components()` on a VFS path —
   it splits on `\` on Windows. Likewise `Path::is_absolute()` returns `false`
   for `/`-rooted paths on Windows; use `vfs_path_is_absolute()`.
-- **Host paths are host-style.** `OverlayFs`/`ReadWriteFs` convert at the
+- **Host paths are host-style.** `OverlayFs` converts at the
   boundary (`lower_path()` strips the leading `/` and joins onto the host
-  root; `ReadWriteFs::logical_normalize` preserves Windows drive/UNC
-  prefixes).
+  root).
 - **Windows file modes are optimistic.** Windows has no Unix mode bits, so
   metadata maps to `0o755` for everything, `0o555` when the read-only
   attribute is set (`unix_mode_from_metadata`). This mirrors MSYS/Git Bash
   `noacl` semantics; falsely-permissive modes are safe because VFS operations
-  are never gated on mode bits. `chmod` on `ReadWriteFs` approximates with the
-  read-only attribute; `symlink` uses `symlink_file`/`symlink_dir` (may
-  require Developer Mode or admin on Windows).
+  are never gated on mode bits. `symlink` uses `symlink_file`/`symlink_dir`
+  (may require Developer Mode or admin on Windows).
 - **Default features build and test on Windows.** The full suite (including
   `native-fs` backends) is expected green on Windows; a few Unix-only tests
   (symlink escapes to `/etc`, exact mode-bit preservation) are `#[cfg(unix)]`,

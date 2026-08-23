@@ -2,7 +2,10 @@
 
 ## Overview
 
-rust-bash is designed to run untrusted, AI-generated scripts. This chapter covers all safety mechanisms: execution limits, network policy, and the broader security model.
+rust-bash is designed to run AI-generated scripts unattended, catching careless
+mistakes before they reach disk. This chapter covers what the sandbox promises
+(best-effort guardrails), what it explicitly does not promise (a security
+boundary), and the execution limits that bound runaway scripts.
 
 ## Execution Limits
 
@@ -64,71 +67,63 @@ RustBashError::LimitExceeded {
 
 This error is returned as `Err(RustBashError::LimitExceeded{...})` from `shell.exec()`. The sandbox remains usable for subsequent `exec()` calls — hitting a limit does not poison the sandbox or its state.
 
-## Network Policy
+## The Model: Guardrails, Not a Security Boundary
 
-```rust
-pub struct NetworkPolicy {
-    pub enabled: bool,                     // default: false
-    pub allowed_url_prefixes: Vec<String>, // e.g., ["https://api.example.com/"]
-    pub allowed_methods: HashSet<String>,  // e.g., {"GET", "POST"}
-    pub max_redirects: usize,             // default: 5
-    pub max_response_size: usize,         // default: 10MB
-    pub timeout: Duration,                // default: 30s
-}
-```
+The problem this fork solves is **approval fatigue**. Approving every agent
+command by hand doesn't scale; running everything directly on disk is
+careless. rust-bash lets a harness run scripts unattended and compresses the
+human review into one small, exact change set per operation (`OverlayFs::diff()`).
 
-**Network is disabled by default.** The `curl` command checks the network policy before making any HTTP request. If networking is disabled or the URL doesn't match an allowed prefix, the command returns an error without making any network call.
+That makes rust-bash a guardrail against **careless yet destructive mistakes**
+— the wrong path, the unintended overwrite, the fat-fingered `rm` — by holding
+their effects in memory until someone (or some policy) approves them. It is
+**not** a sandbox in the security sense, and it does not try to be one.
 
-### URL Validation
+### What we promise (best-effort)
 
-URL prefixes are matched literally. `"https://api.example.com/"` allows:
-- `https://api.example.com/v1/data`
-- `https://api.example.com/users?id=1`
+1. **Writes never touch disk directly** — with `OverlayFs` (or `InMemoryFs`),
+   every script write goes to memory and is reported exactly (paths, content
+   bytes, deletions). The caller decides per path what lands on disk.
+2. **Unknown commands are visible, never silently wrong** — commands the
+   sandbox doesn't implement are reported (pre-flight and at runtime) so the
+   harness can rerun the script natively.
+3. **Bounded execution** — the limits above terminate runaway scripts
+   (infinite loops, unbounded output, memory-hungry expansions).
+4. **No process spawning** — the codebase contains zero calls to
+   `std::process::Command`; a script can't escape into a real subprocess.
 
-But rejects:
-- `https://api.example.com.evil.org/` (different domain)
-- `http://api.example.com/` (different scheme)
+### What we don't promise
 
-### Redirect Safety
+1. **No protection against a hostile script.** A script can read everything
+   the filesystem backend exposes (with `OverlayFs`, that *is* your project),
+   and can print any of it to stdout — which the agent loop then handles.
+   Nothing here prevents secret leakage. If you need to contain adversarial
+   code, use OS-level isolation (containers, VMs) instead; rust-bash can run
+   inside such a boundary but is not one itself.
+2. **No intent detection.** The guardrail makes effects reviewable before
+   they become real; it cannot distinguish a mistake from an attack. Both are
+   merely *visible*.
+3. **No hard memory/CPU caps** — limits bound strings, output, iterations,
+   and wall-clock time, but a pathological script can still use significant
+   memory within those bounds, and `max_execution_time` is wall-clock, not
+   CPU time.
+4. **No deterministic output** — `date`, `$RANDOM`, and the real clock leak
+   through. For deterministic testing, inject fixed values via environment
+   variables.
 
-Even when a URL matches the allow list, redirects are followed only if:
-1. The redirect count hasn't exceeded `max_redirects`
-2. Each redirect target URL also matches an allowed prefix
+### Design properties
 
-This prevents an allowed URL from redirecting to a malicious endpoint.
+Engineering facts that the guardrails rest on (useful when reasoning about
+what a script *can* affect):
 
-## Security Model
-
-### Threat Matrix
-
-| Attack Vector | Mitigation | Status |
-|---------------|------------|--------|
-| Real filesystem access | All operations go through `VirtualFs` trait; `InMemoryFs` has zero `std::fs` calls | Core design |
-| Process spawning | No `std::process::Command` anywhere; all commands are in-process Rust | Core design |
-| Network exfiltration | `NetworkPolicy` disabled by default; URL prefix allow-listing when enabled | ✅ |
-| Infinite loops | `max_loop_iterations` limit | ✅ |
-| Fork bombs / recursion | `max_call_depth` limit | ✅ |
-| Resource exhaustion | `max_command_count`, `max_execution_time`, `max_output_size` limits | ✅ |
-| Memory exhaustion | `max_string_length`, `max_heredoc_size`, `max_brace_expansion` limits | ✅ |
-| Path traversal | VFS path normalization handles `..`; OverlayFs restricts reads to specified base | Core design |
-| Host time leakage | `SystemTime::now()` exposes real clock; future: inject clock abstraction | Known limitation |
-| Lock poisoning | `parking_lot::RwLock` (non-poisoning) prevents command panics from killing VFS | Design decision |
-| Glob DoS | `max_glob_results` prevents unbounded glob expansion | ✅ |
-| Nested substitution | `max_substitution_depth` prevents `$($($(...)))` stack overflow | ✅ |
-
-### What We Guarantee
-
-1. **No real filesystem mutation** — when using `InMemoryFs` or `OverlayFs`, no file on the host is ever written or deleted.
-2. **No process spawning** — the codebase contains zero calls to `std::process::Command`.
-3. **No network access by default** — networking requires explicit opt-in via `NetworkPolicy`.
-4. **Bounded execution** — configurable limits prevent any script from consuming unbounded resources.
-
-### What We Don't Guarantee
-
-1. **Timing side channels** — `SystemTime::now()` leaks real time. A determined attacker could measure execution timing.
-2. **Memory usage** — we limit string sizes and output, but don't have a hard memory cap. A pathological script could still use significant memory within the per-limit bounds.
-3. **CPU time** — `max_execution_time` is wall-clock, not CPU time. On a loaded system, a script might use more CPU time than expected.
-4. **Deterministic output** — commands like `date` and `$RANDOM` produce non-deterministic output. For deterministic testing, inject fixed values via environment variables or clock abstraction.
+| Property | Mechanism |
+|----------|-----------|
+| All file ops virtualized | `VirtualFs` trait everywhere; `InMemoryFs` has zero `std::fs` calls |
+| No subprocesses | No `std::process::Command` anywhere; all commands are in-process Rust |
+| Reads confined to the overlay root | `OverlayFs` resolves paths under its configured base directory; VFS normalization handles `..` |
+| No network code in the crate | No HTTP client and no network command; a script that needs the network fails command resolution and is rerun natively by the host (a curl may return if a faithful-enough design is ever found — see `docs/design/fork-scope.md`) |
+| Panics don't kill the VFS | `parking_lot::RwLock` (non-poisoning) |
+| Runaway scripts terminate | The execution limits above |
 
 ## Configuration
 
@@ -137,11 +132,6 @@ let mut shell = RustBashBuilder::new()
     .execution_limits(ExecutionLimits {
         max_command_count: 1_000,
         max_execution_time: Duration::from_secs(5),
-        ..Default::default()
-    })
-    .network_policy(NetworkPolicy {
-        enabled: true,
-        allowed_url_prefixes: vec!["https://api.example.com/".into()],
         ..Default::default()
     })
     .build()

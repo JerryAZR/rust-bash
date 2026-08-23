@@ -5358,18 +5358,12 @@ mod tests {
     use super::*;
     use crate::commands::{CommandContext, VirtualCommand};
     use crate::interpreter::ExecutionLimits;
-    use crate::network::NetworkPolicy;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
 
-    fn setup() -> (
-        Arc<InMemoryFs>,
-        HashMap<String, String>,
-        ExecutionLimits,
-        NetworkPolicy,
-    ) {
+    fn setup() -> (Arc<InMemoryFs>, HashMap<String, String>, ExecutionLimits) {
         let fs = Arc::new(InMemoryFs::new());
         fs.write_file(Path::new("/lines.txt"), b"banana\napple\ncherry\napple\n")
             .unwrap();
@@ -5378,19 +5372,13 @@ mod tests {
         fs.write_file(Path::new("/data.txt"), b"a:b:c\nd:e:f\n")
             .unwrap();
         fs.write_file(Path::new("/empty.txt"), b"").unwrap();
-        (
-            fs,
-            HashMap::new(),
-            ExecutionLimits::default(),
-            NetworkPolicy::default(),
-        )
+        (fs, HashMap::new(), ExecutionLimits::default())
     }
 
     fn ctx_with_stdin<'a>(
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
         stdin: &'a str,
     ) -> CommandContext<'a> {
         CommandContext {
@@ -5401,7 +5389,6 @@ mod tests {
             stdin,
             stdin_bytes: None,
             limits,
-            network_policy,
             exec: None,
             shell_opts: None,
         }
@@ -5411,17 +5398,16 @@ mod tests {
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
     ) -> CommandContext<'a> {
-        ctx_with_stdin(fs, env, limits, network_policy, "")
+        ctx_with_stdin(fs, env, limits, "")
     }
 
     // ── grep tests ───────────────────────────────────────────────────
 
     #[test]
     fn grep_basic_match() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["apple".into(), "lines.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "apple\napple\n");
@@ -5429,16 +5415,16 @@ mod tests {
 
     #[test]
     fn grep_no_match() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["grape".into(), "lines.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn grep_case_insensitive() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-i".into(), "APPLE".into(), "lines.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "apple\napple\n");
@@ -5446,16 +5432,16 @@ mod tests {
 
     #[test]
     fn grep_invert() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-v".into(), "apple".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "banana\ncherry\n");
     }
 
     #[test]
     fn grep_line_numbers() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-n".into(), "apple".into(), "lines.txt".into()], &c);
         assert!(r.stdout.contains("2:apple"));
         assert!(r.stdout.contains("4:apple"));
@@ -5463,48 +5449,48 @@ mod tests {
 
     #[test]
     fn grep_count() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-c".into(), "apple".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "2\n");
     }
 
     #[test]
     fn grep_files_with_matches() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-l".into(), "apple".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "lines.txt\n");
     }
 
     #[test]
     fn grep_stdin() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello\nworld\nhello\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello\nworld\nhello\n");
         let r = GrepCommand.execute(&["hello".into()], &c);
         assert_eq!(r.stdout, "hello\nhello\n");
     }
 
     #[test]
     fn grep_missing_pattern() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 2);
     }
 
     #[test]
     fn grep_fixed_string() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a.b\na*b\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a.b\na*b\n");
         let r = GrepCommand.execute(&["-F".into(), "a.b".into()], &c);
         assert_eq!(r.stdout, "a.b\n");
     }
 
     #[test]
     fn grep_extended_regexp_alternation() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "cat\ndog\nbird\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "cat\ndog\nbird\n");
         let r = GrepCommand.execute(&["-E".into(), "cat|dog".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "cat\ndog\n");
@@ -5512,16 +5498,16 @@ mod tests {
 
     #[test]
     fn grep_extended_regexp_groups() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "abcabc\nabc\nab\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "abcabc\nabc\nab\n");
         let r = GrepCommand.execute(&["-E".into(), "(abc)+".into()], &c);
         assert_eq!(r.stdout, "abcabc\nabc\n");
     }
 
     #[test]
     fn grep_basic_regexp_bre_translation() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "abc\ndef\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "abc\ndef\n");
         // In BRE, \(abc\) should become group (abc) in ERE
         let r = GrepCommand.execute(&["-G".into(), r"\(abc\)".to_string()], &c);
         assert_eq!(r.exit_code, 0);
@@ -5530,8 +5516,8 @@ mod tests {
 
     #[test]
     fn grep_perl_regexp_warns() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello\nworld\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello\nworld\n");
         let r = GrepCommand.execute(&["-P".into(), "hello".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "hello\n");
@@ -5540,8 +5526,8 @@ mod tests {
 
     #[test]
     fn grep_word_regexp() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "cat concatenate\nthe cat sat\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "cat concatenate\nthe cat sat\n");
         let r = GrepCommand.execute(&["-w".into(), "cat".into()], &c);
         assert_eq!(r.exit_code, 0);
         // Both lines contain "cat" as a whole word
@@ -5550,8 +5536,8 @@ mod tests {
 
     #[test]
     fn grep_word_regexp_no_partial() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "concatenate\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "concatenate\n");
         let r = GrepCommand.execute(&["-ow".into(), "cat".into()], &c);
         // "cat" does not appear as whole word in "concatenate"
         assert_eq!(r.exit_code, 1);
@@ -5560,15 +5546,15 @@ mod tests {
 
     #[test]
     fn grep_line_regexp() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello\nhello world\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello\nhello world\n");
         let r = GrepCommand.execute(&["-x".into(), "hello".into()], &c);
         assert_eq!(r.stdout, "hello\n");
     }
 
     #[test]
     fn grep_recursive_search() {
-        let (fs, env, limits, _np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/project/src")).unwrap();
         fs.write_file(Path::new("/project/src/main.rs"), b"fn main() {}\n")
             .unwrap();
@@ -5585,7 +5571,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -5598,7 +5583,7 @@ mod tests {
 
     #[test]
     fn grep_recursive_with_include() {
-        let (fs, env, limits, _np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/proj/src")).unwrap();
         fs.write_file(Path::new("/proj/src/main.rs"), b"fn hello() {}\n")
             .unwrap();
@@ -5613,7 +5598,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -5625,7 +5609,7 @@ mod tests {
 
     #[test]
     fn grep_recursive_with_exclude() {
-        let (fs, env, limits, _np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/proj2/logs")).unwrap();
         fs.write_file(Path::new("/proj2/data.txt"), b"error found\n")
             .unwrap();
@@ -5640,7 +5624,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -5652,12 +5635,11 @@ mod tests {
 
     #[test]
     fn grep_after_context() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let c = ctx_with_stdin(
             &*fs,
             &env,
             &limits,
-            &np,
             "line1\nline2\nmatch\nline4\nline5\nline6\n",
         );
         let r = GrepCommand.execute(&["-A".into(), "2".into(), "match".into()], &c);
@@ -5669,14 +5651,8 @@ mod tests {
 
     #[test]
     fn grep_before_context() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(
-            &*fs,
-            &env,
-            &limits,
-            &np,
-            "line1\nline2\nmatch\nline4\nline5\n",
-        );
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "line1\nline2\nmatch\nline4\nline5\n");
         let r = GrepCommand.execute(&["-B".into(), "2".into(), "match".into()], &c);
         assert!(r.stdout.contains("line1"));
         assert!(r.stdout.contains("line2"));
@@ -5686,8 +5662,8 @@ mod tests {
 
     #[test]
     fn grep_context_both() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\nb\nc\nmatch\ne\nf\ng\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\nb\nc\nmatch\ne\nf\ng\n");
         let r = GrepCommand.execute(&["-C".into(), "1".into(), "match".into()], &c);
         assert!(r.stdout.contains("c\n"));
         assert!(r.stdout.contains("match\n"));
@@ -5697,32 +5673,32 @@ mod tests {
 
     #[test]
     fn grep_context_separator() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\nmatch1\nb\nc\nd\nmatch2\ne\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\nmatch1\nb\nc\nd\nmatch2\ne\n");
         let r = GrepCommand.execute(&["-C".into(), "0".into(), "match".into()], &c);
         assert!(r.stdout.contains("match1\n--\nmatch2\n"));
     }
 
     #[test]
     fn grep_only_matching() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "foo123bar\nhello456\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "foo123bar\nhello456\n");
         let r = GrepCommand.execute(&["-oE".into(), "[0-9]+".into()], &c);
         assert_eq!(r.stdout, "123\n456\n");
     }
 
     #[test]
     fn grep_with_filename() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-H".into(), "apple".into(), "lines.txt".into()], &c);
         assert!(r.stdout.contains("lines.txt:apple"));
     }
 
     #[test]
     fn grep_no_filename() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(
             &[
                 "-h".into(),
@@ -5739,8 +5715,8 @@ mod tests {
 
     #[test]
     fn grep_quiet_match() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-q".into(), "apple".into(), "lines.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "");
@@ -5748,8 +5724,8 @@ mod tests {
 
     #[test]
     fn grep_quiet_no_match() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-q".into(), "grape".into(), "lines.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert_eq!(r.stdout, "");
@@ -5757,8 +5733,8 @@ mod tests {
 
     #[test]
     fn grep_max_count() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(
             &["-m".into(), "1".into(), "apple".into(), "lines.txt".into()],
             &c,
@@ -5768,8 +5744,8 @@ mod tests {
 
     #[test]
     fn grep_multiple_patterns_with_e() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(
             &[
                 "-e".into(),
@@ -5788,10 +5764,10 @@ mod tests {
 
     #[test]
     fn grep_patterns_from_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/patterns.txt"), b"apple\ncherry\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(
             &["-f".into(), "patterns.txt".into(), "lines.txt".into()],
             &c,
@@ -5804,8 +5780,8 @@ mod tests {
 
     #[test]
     fn grep_files_without_match() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(
             &[
                 "-L".into(),
@@ -5821,8 +5797,8 @@ mod tests {
 
     #[test]
     fn grep_files_without_match_partial() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(
             &[
                 "-L".into(),
@@ -5841,8 +5817,8 @@ mod tests {
 
     #[test]
     fn grep_files_without_match_all_matched() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         // "a" appears in both lines.txt and data.txt
         let r = GrepCommand.execute(
             &[
@@ -5860,8 +5836,8 @@ mod tests {
 
     #[test]
     fn grep_combined_short_flags() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-in".into(), "apple".into(), "lines.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("2:apple"));
@@ -5870,7 +5846,7 @@ mod tests {
 
     #[test]
     fn grep_combined_recursive_insensitive_line_numbers() {
-        let (fs, env, limits, _np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/rtest")).unwrap();
         fs.write_file(Path::new("/rtest/a.txt"), b"Hello\nworld\n")
             .unwrap();
@@ -5883,7 +5859,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -5895,8 +5870,8 @@ mod tests {
 
     #[test]
     fn grep_empty_pattern_matches_all() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "line1\nline2\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "line1\nline2\n");
         let r = GrepCommand.execute(&["".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "line1\nline2\n");
@@ -5904,8 +5879,8 @@ mod tests {
 
     #[test]
     fn grep_no_matches_exit_code_1() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "aaa\nbbb\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "aaa\nbbb\n");
         let r = GrepCommand.execute(&["zzz".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert_eq!(r.stdout, "");
@@ -5913,8 +5888,8 @@ mod tests {
 
     #[test]
     fn grep_long_flags() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(
             &[
                 "--ignore-case".into(),
@@ -5931,8 +5906,8 @@ mod tests {
     #[test]
     fn grep_e_combined_value() {
         // Test -e with value attached: -epattern
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-eapple".into(), "lines.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "apple\napple\n");
@@ -5940,8 +5915,8 @@ mod tests {
 
     #[test]
     fn grep_context_with_line_numbers() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\nb\nMATCH\nd\ne\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\nb\nMATCH\nd\ne\n");
         let r = GrepCommand.execute(
             &[
                 "-n".into(),
@@ -5960,8 +5935,8 @@ mod tests {
 
     #[test]
     fn grep_max_count_with_context() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\nmatch\nb\nmatch\nc\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\nmatch\nb\nmatch\nc\n");
         let r = GrepCommand.execute(
             &[
                 "-m".into(),
@@ -5982,14 +5957,14 @@ mod tests {
 
     #[test]
     fn grep_recursive_on_explicit_directory() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/searchdir/sub")).unwrap();
         fs.write_file(Path::new("/searchdir/a.txt"), b"found it\n")
             .unwrap();
         fs.write_file(Path::new("/searchdir/sub/b.txt"), b"found it too\n")
             .unwrap();
 
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = GrepCommand.execute(&["-r".into(), "found".into(), "/searchdir".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("found it"));
@@ -5998,16 +5973,16 @@ mod tests {
 
     #[test]
     fn grep_only_matching_with_filename() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "abc123def\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "abc123def\n");
         let r = GrepCommand.execute(&["-oHE".into(), "[0-9]+".into()], &c);
         assert!(r.stdout.contains("(standard input):123"));
     }
 
     #[test]
     fn grep_context_long_flag_equals() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\nb\nMATCH\nd\ne\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\nb\nMATCH\nd\ne\n");
         let r = GrepCommand.execute(&["--context=1".into(), "MATCH".into()], &c);
         assert!(r.stdout.contains("b\n"));
         assert!(r.stdout.contains("MATCH\n"));
@@ -6017,16 +5992,16 @@ mod tests {
     #[test]
     fn grep_bre_default_plus_literal() {
         // Default mode is BRE: bare + is literal
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a+b\naab\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a+b\naab\n");
         let r = GrepCommand.execute(&["a+b".into()], &c);
         assert_eq!(r.stdout, "a+b\n");
     }
 
     #[test]
     fn grep_bre_escaped_plus_is_quantifier() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "aab\nab\nb\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "aab\nab\nb\n");
         let r = GrepCommand.execute(&[r"a\+b".to_string()], &c);
         // \+ in BRE means one-or-more: matches "aab" and "ab"
         assert!(r.stdout.contains("aab"));
@@ -6036,8 +6011,8 @@ mod tests {
 
     #[test]
     fn grep_bre_pipe_literal() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a|b\nab\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a|b\nab\n");
         let r = GrepCommand.execute(&["a|b".into()], &c);
         // Bare | is literal in BRE
         assert_eq!(r.stdout, "a|b\n");
@@ -6045,8 +6020,8 @@ mod tests {
 
     #[test]
     fn grep_end_of_options_separator() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "-v\nhello\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "-v\nhello\n");
         // Search for literal "-v" using -- separator
         let r = GrepCommand.execute(&["--".into(), "-v".into()], &c);
         assert_eq!(r.exit_code, 0);
@@ -6055,8 +6030,8 @@ mod tests {
 
     #[test]
     fn grep_e_pattern_starting_with_dash() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "-v\nhello\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "-v\nhello\n");
         let r = GrepCommand.execute(&["-e".into(), "-v".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "-v\n");
@@ -6064,7 +6039,7 @@ mod tests {
 
     #[test]
     fn grep_recursive_no_matches_exit_1() {
-        let (fs, env, limits, _np) = setup();
+        let (fs, env, limits) = setup();
         fs.mkdir_p(Path::new("/nomatch")).unwrap();
         fs.write_file(Path::new("/nomatch/a.txt"), b"hello\n")
             .unwrap();
@@ -6076,7 +6051,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits: &limits,
-            network_policy: &NetworkPolicy::default(),
             exec: None,
             shell_opts: None,
         };
@@ -6086,8 +6060,8 @@ mod tests {
 
     #[test]
     fn grep_word_and_line_regexp_combined() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "cat\ncat dog\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "cat\ncat dog\n");
         let r = GrepCommand.execute(&["-xw".into(), "cat".into()], &c);
         assert_eq!(r.stdout, "cat\n");
     }
@@ -6096,36 +6070,35 @@ mod tests {
 
     #[test]
     fn sort_basic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SortCommand.execute(&["lines.txt".into()], &c);
         assert_eq!(r.stdout, "apple\napple\nbanana\ncherry\n");
     }
 
     #[test]
     fn sort_reverse() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SortCommand.execute(&["-r".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "cherry\nbanana\napple\napple\n");
     }
 
     #[test]
     fn sort_numeric() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SortCommand.execute(&["-n".into(), "nums.txt".into()], &c);
         assert_eq!(r.stdout, "1\n2\n3\n10\n");
     }
 
     #[test]
     fn sort_numeric_with_leading_spaces() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let c = ctx_with_stdin(
             &*fs,
             &env,
             &limits,
-            &np,
             "      3 eng\n      1 dept\n      2 sales\n",
         );
         let r = SortCommand.execute(&["-rn".into()], &c);
@@ -6145,16 +6118,16 @@ mod tests {
 
     #[test]
     fn sort_unique() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SortCommand.execute(&["-u".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "apple\nbanana\ncherry\n");
     }
 
     #[test]
     fn sort_stdin() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "z\na\nm\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "z\na\nm\n");
         let r = SortCommand.execute(&[], &c);
         assert_eq!(r.stdout, "a\nm\nz\n");
     }
@@ -6163,16 +6136,16 @@ mod tests {
 
     #[test]
     fn uniq_basic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "aaa\naaa\nbbb\nccc\nccc\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "aaa\naaa\nbbb\nccc\nccc\n");
         let r = UniqCommand.execute(&[], &c);
         assert_eq!(r.stdout, "aaa\nbbb\nccc\n");
     }
 
     #[test]
     fn uniq_count() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\na\nb\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\na\nb\n");
         let r = UniqCommand.execute(&["-c".into()], &c);
         assert!(r.stdout.contains("2 a"));
         assert!(r.stdout.contains("1 b"));
@@ -6180,16 +6153,16 @@ mod tests {
 
     #[test]
     fn uniq_duplicates_only() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\na\nb\nc\nc\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\na\nb\nc\nc\n");
         let r = UniqCommand.execute(&["-d".into()], &c);
         assert_eq!(r.stdout, "a\nc\n");
     }
 
     #[test]
     fn uniq_unique_only() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\na\nb\nc\nc\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\na\nb\nc\nc\n");
         let r = UniqCommand.execute(&["-u".into()], &c);
         assert_eq!(r.stdout, "b\n");
     }
@@ -6198,8 +6171,8 @@ mod tests {
 
     #[test]
     fn cut_fields() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CutCommand.execute(
             &[
                 "-d".into(),
@@ -6215,16 +6188,16 @@ mod tests {
 
     #[test]
     fn cut_characters() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello\nworld\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello\nworld\n");
         let r = CutCommand.execute(&["-c".into(), "1-3".into()], &c);
         assert_eq!(r.stdout, "hel\nwor\n");
     }
 
     #[test]
     fn cut_missing_spec() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = CutCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -6233,12 +6206,11 @@ mod tests {
 
     #[test]
     fn head_default() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let c = ctx_with_stdin(
             &*fs,
             &env,
             &limits,
-            &np,
             "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
         );
         let r = HeadCommand.execute(&[], &c);
@@ -6250,16 +6222,16 @@ mod tests {
 
     #[test]
     fn head_n3() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = HeadCommand.execute(&["-n".into(), "2".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "banana\napple\n");
     }
 
     #[test]
     fn head_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = HeadCommand.execute(&["-n".into(), "1".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "banana\n");
     }
@@ -6268,12 +6240,11 @@ mod tests {
 
     #[test]
     fn tail_default() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let c = ctx_with_stdin(
             &*fs,
             &env,
             &limits,
-            &np,
             "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n",
         );
         let r = TailCommand.execute(&[], &c);
@@ -6285,8 +6256,8 @@ mod tests {
 
     #[test]
     fn tail_n2() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TailCommand.execute(&["-n".into(), "2".into(), "lines.txt".into()], &c);
         assert_eq!(r.stdout, "cherry\napple\n");
     }
@@ -6295,8 +6266,8 @@ mod tests {
 
     #[test]
     fn wc_all() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello world\nfoo\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello world\nfoo\n");
         let r = WcCommand.execute(&[], &c);
         assert!(r.stdout.contains("2")); // lines
         assert!(r.stdout.contains("3")); // words
@@ -6304,16 +6275,16 @@ mod tests {
 
     #[test]
     fn wc_lines_only() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\nb\nc\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\nb\nc\n");
         let r = WcCommand.execute(&["-l".into()], &c);
         assert!(r.stdout.contains("3"));
     }
 
     #[test]
     fn wc_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = WcCommand.execute(&["-l".into(), "lines.txt".into()], &c);
         assert!(r.stdout.contains("4"));
     }
@@ -6322,32 +6293,32 @@ mod tests {
 
     #[test]
     fn tr_translate() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello");
         let r = TrCommand.execute(&["a-z".into(), "A-Z".into()], &c);
         assert_eq!(r.stdout, "HELLO");
     }
 
     #[test]
     fn tr_delete() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello world");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello world");
         let r = TrCommand.execute(&["-d".into(), " ".into()], &c);
         assert_eq!(r.stdout, "helloworld");
     }
 
     #[test]
     fn tr_squeeze() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "aabbcc");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "aabbcc");
         let r = TrCommand.execute(&["-s".into(), "a-z".into()], &c);
         assert_eq!(r.stdout, "abc");
     }
 
     #[test]
     fn tr_missing_operand() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TrCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -6356,8 +6327,8 @@ mod tests {
 
     #[test]
     fn rev_basic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello\nworld\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello\nworld\n");
         let r = RevCommand.execute(&[], &c);
         assert_eq!(r.stdout, "olleh\ndlrow\n");
     }
@@ -6366,17 +6337,17 @@ mod tests {
 
     #[test]
     fn fold_default_width() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let short = "short\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, short);
+        let c = ctx_with_stdin(&*fs, &env, &limits, short);
         let r = FoldCommand.execute(&[], &c);
         assert_eq!(r.stdout, "short\n");
     }
 
     #[test]
     fn fold_custom_width() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "abcdefghij\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "abcdefghij\n");
         let r = FoldCommand.execute(&["-w".into(), "5".into()], &c);
         assert_eq!(r.stdout, "abcde\nfghij\n");
     }
@@ -6385,8 +6356,8 @@ mod tests {
 
     #[test]
     fn nl_basic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "first\nsecond\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "first\nsecond\n");
         let r = NlCommand.execute(&[], &c);
         assert!(r.stdout.contains("1\tfirst"));
         assert!(r.stdout.contains("2\tsecond"));
@@ -6394,8 +6365,8 @@ mod tests {
 
     #[test]
     fn nl_empty_line_not_numbered() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\n\nb\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\n\nb\n");
         let r = NlCommand.execute(&[], &c);
         assert!(r.stdout.contains("1\ta"));
         assert!(r.stdout.contains("2\tb"));
@@ -6405,144 +6376,144 @@ mod tests {
 
     #[test]
     fn printf_string() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["hello %s\n".into(), "world".into()], &c);
         assert_eq!(r.stdout, "hello world\n");
     }
 
     #[test]
     fn printf_int() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%d\n".into(), "42".into()], &c);
         assert_eq!(r.stdout, "42\n");
     }
 
     #[test]
     fn printf_hex() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%x\n".into(), "255".into()], &c);
         assert_eq!(r.stdout, "ff\n");
     }
 
     #[test]
     fn printf_octal() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%o\n".into(), "8".into()], &c);
         assert_eq!(r.stdout, "10\n");
     }
 
     #[test]
     fn printf_percent() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["100%%\n".into()], &c);
         assert_eq!(r.stdout, "100%\n");
     }
 
     #[test]
     fn printf_no_args() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 2);
     }
 
     #[test]
     fn printf_multiple_args_cycle() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%s\n".into(), "a".into(), "b".into(), "c".into()], &c);
         assert_eq!(r.stdout, "a\nb\nc\n");
     }
 
     #[test]
     fn printf_zero_padded_int() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%05d".into(), "42".into()], &c);
         assert_eq!(r.stdout, "00042");
     }
 
     #[test]
     fn printf_left_aligned_string() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%-10s|".into(), "hi".into()], &c);
         assert_eq!(r.stdout, "hi        |");
     }
 
     #[test]
     fn printf_right_aligned_string() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%10s|".into(), "hi".into()], &c);
         assert_eq!(r.stdout, "        hi|");
     }
 
     #[test]
     fn printf_precision_float() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%.2f".into(), "3.14159".into()], &c);
         assert_eq!(r.stdout, "3.14");
     }
 
     #[test]
     fn printf_width_and_precision_float() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%10.2f".into(), "3.14".into()], &c);
         assert_eq!(r.stdout, "      3.14");
     }
 
     #[test]
     fn printf_plus_sign_int() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%+d".into(), "42".into()], &c);
         assert_eq!(r.stdout, "+42");
     }
 
     #[test]
     fn printf_plus_sign_negative_int() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%+d".into(), "-5".into()], &c);
         assert_eq!(r.stdout, "-5");
     }
 
     #[test]
     fn printf_alt_form_hex() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%#x".into(), "255".into()], &c);
         assert_eq!(r.stdout, "0xff");
     }
 
     #[test]
     fn printf_alt_form_octal() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%#o".into(), "8".into()], &c);
         assert_eq!(r.stdout, "010");
     }
 
     #[test]
     fn printf_string_precision_truncates() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%.3s".into(), "hello".into()], &c);
         assert_eq!(r.stdout, "hel");
     }
 
     #[test]
     fn printf_star_width() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%*d".into(), "8".into(), "42".into()], &c);
         assert_eq!(r.stdout, "      42");
     }
@@ -6572,8 +6543,8 @@ mod tests {
 
     #[test]
     fn printf_percent_c_uses_first_byte_of_utf8_string() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintfCommand.execute(&["%c".into(), "μμ".into()], &c);
         assert_eq!(
             crate::shell_bytes::encode_shell_string(&r.stdout),
@@ -6616,20 +6587,20 @@ mod tests {
 
     #[test]
     fn paste_basic() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/p1.txt"), b"a\nb\n").unwrap();
         fs.write_file(Path::new("/p2.txt"), b"1\n2\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = PasteCommand.execute(&["p1.txt".into(), "p2.txt".into()], &c);
         assert_eq!(r.stdout, "a\t1\nb\t2\n");
     }
 
     #[test]
     fn paste_custom_delimiter() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/p1.txt"), b"a\nb\n").unwrap();
         fs.write_file(Path::new("/p2.txt"), b"1\n2\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = PasteCommand.execute(
             &["-d".into(), ",".into(), "p1.txt".into(), "p2.txt".into()],
             &c,
@@ -6639,8 +6610,8 @@ mod tests {
 
     #[test]
     fn paste_stdin() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "x\ny\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "x\ny\n");
         let r = PasteCommand.execute(&[], &c);
         assert_eq!(r.stdout, "x\ny\n");
     }
@@ -6649,8 +6620,8 @@ mod tests {
 
     #[test]
     fn tac_reverse_lines() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a\nb\nc\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a\nb\nc\n");
         let r = TacCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "c\nb\na\n");
@@ -6658,8 +6629,8 @@ mod tests {
 
     #[test]
     fn tac_from_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TacCommand.execute(&["lines.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "apple\ncherry\napple\nbanana\n");
@@ -6667,16 +6638,16 @@ mod tests {
 
     #[test]
     fn tac_single_line() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "only\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "only\n");
         let r = TacCommand.execute(&[], &c);
         assert_eq!(r.stdout, "only\n");
     }
 
     #[test]
     fn tac_empty_input() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "");
         let r = TacCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "");
@@ -6684,8 +6655,8 @@ mod tests {
 
     #[test]
     fn tac_custom_separator() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "a:b:c");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "a:b:c");
         let r = TacCommand.execute(&["-s".into(), ":".into()], &c);
         assert_eq!(r.stdout, "c:b:a\n");
     }
@@ -6694,12 +6665,12 @@ mod tests {
 
     #[test]
     fn comm_basic() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/sorted1.txt"), b"a\nb\nd\n")
             .unwrap();
         fs.write_file(Path::new("/sorted2.txt"), b"b\nc\nd\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = CommCommand.execute(&["sorted1.txt".into(), "sorted2.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "a\n\t\tb\n\tc\n\t\td\n");
@@ -6707,40 +6678,40 @@ mod tests {
 
     #[test]
     fn comm_suppress_col1() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/s1.txt"), b"a\nb\nd\n").unwrap();
         fs.write_file(Path::new("/s2.txt"), b"b\nc\nd\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = CommCommand.execute(&["-1".into(), "s1.txt".into(), "s2.txt".into()], &c);
         assert_eq!(r.stdout, "\tb\nc\n\td\n");
     }
 
     #[test]
     fn comm_suppress_col2() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/s1.txt"), b"a\nb\nd\n").unwrap();
         fs.write_file(Path::new("/s2.txt"), b"b\nc\nd\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = CommCommand.execute(&["-2".into(), "s1.txt".into(), "s2.txt".into()], &c);
         assert_eq!(r.stdout, "a\n\tb\n\td\n");
     }
 
     #[test]
     fn comm_suppress_col3() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/s1.txt"), b"a\nb\nd\n").unwrap();
         fs.write_file(Path::new("/s2.txt"), b"b\nc\nd\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = CommCommand.execute(&["-3".into(), "s1.txt".into(), "s2.txt".into()], &c);
         assert_eq!(r.stdout, "a\n\tc\n");
     }
 
     #[test]
     fn comm_suppress_col12() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/s1.txt"), b"a\nb\nd\n").unwrap();
         fs.write_file(Path::new("/s2.txt"), b"b\nc\nd\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = CommCommand.execute(&["-12".into(), "s1.txt".into(), "s2.txt".into()], &c);
         assert_eq!(r.stdout, "b\nd\n");
     }
@@ -6749,12 +6720,12 @@ mod tests {
 
     #[test]
     fn join_basic() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/j1.txt"), b"1 Alice\n2 Bob\n3 Carol\n")
             .unwrap();
         fs.write_file(Path::new("/j2.txt"), b"1 NY\n2 LA\n4 SF\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = JoinCommand.execute(&["j1.txt".into(), "j2.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "1 Alice NY\n2 Bob LA\n");
@@ -6762,12 +6733,12 @@ mod tests {
 
     #[test]
     fn join_with_separator() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/j1.txt"), b"1:Alice\n2:Bob\n")
             .unwrap();
         fs.write_file(Path::new("/j2.txt"), b"1:NY\n2:LA\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = JoinCommand.execute(
             &["-t".into(), ":".into(), "j1.txt".into(), "j2.txt".into()],
             &c,
@@ -6777,12 +6748,12 @@ mod tests {
 
     #[test]
     fn join_unpairable() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/j1.txt"), b"1 Alice\n2 Bob\n3 Carol\n")
             .unwrap();
         fs.write_file(Path::new("/j2.txt"), b"1 NY\n2 LA\n4 SF\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = JoinCommand.execute(
             &["-a".into(), "1".into(), "j1.txt".into(), "j2.txt".into()],
             &c,
@@ -6796,10 +6767,10 @@ mod tests {
 
     #[test]
     fn fmt_reflow_paragraph() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input =
             "This is a long line that should be reflowed to fit within forty characters width.\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, input);
+        let c = ctx_with_stdin(&*fs, &env, &limits, input);
         let r = FmtCommand.execute(&["-w".into(), "40".into()], &c);
         assert_eq!(r.exit_code, 0);
         for line in r.stdout.lines() {
@@ -6818,9 +6789,9 @@ mod tests {
 
     #[test]
     fn fmt_preserves_paragraph_breaks() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input = "Para one.\n\nPara two.\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, input);
+        let c = ctx_with_stdin(&*fs, &env, &limits, input);
         let r = FmtCommand.execute(&["-w".into(), "75".into()], &c);
         assert!(
             r.stdout.contains("\n\n"),
@@ -6830,9 +6801,9 @@ mod tests {
 
     #[test]
     fn fmt_split_only() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input = "short\nvery long line that exceeds twenty characters in width\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, input);
+        let c = ctx_with_stdin(&*fs, &env, &limits, input);
         let r = FmtCommand.execute(&["-s".into(), "-w".into(), "20".into()], &c);
         // Short lines should NOT be joined
         assert!(r.stdout.starts_with("short\n"));
@@ -6840,8 +6811,8 @@ mod tests {
 
     #[test]
     fn fmt_empty_input() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "");
         let r = FmtCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "");
@@ -6851,9 +6822,9 @@ mod tests {
 
     #[test]
     fn column_table_mode() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input = "name age city\nAlice 30 NYC\nBob 25 LA\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, input);
+        let c = ctx_with_stdin(&*fs, &env, &limits, input);
         let r = ColumnCommand.execute(&["-t".into()], &c);
         assert_eq!(r.exit_code, 0);
         let lines: Vec<&str> = r.stdout.lines().collect();
@@ -6866,9 +6837,9 @@ mod tests {
 
     #[test]
     fn column_table_custom_sep() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input = "Alice:30:NYC\nBob:25:LA\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, input);
+        let c = ctx_with_stdin(&*fs, &env, &limits, input);
         let r = ColumnCommand.execute(&["-t".into(), "-s".into(), ":".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("Alice"));
@@ -6877,9 +6848,9 @@ mod tests {
 
     #[test]
     fn column_table_custom_output_sep() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input = "a 1\nb 2\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, input);
+        let c = ctx_with_stdin(&*fs, &env, &limits, input);
         let r = ColumnCommand.execute(&["-t".into(), "-o".into(), " | ".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains(" | "));
@@ -6887,8 +6858,8 @@ mod tests {
 
     #[test]
     fn column_empty_input() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "");
         let r = ColumnCommand.execute(&["-t".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "");
@@ -6898,8 +6869,8 @@ mod tests {
 
     #[test]
     fn expand_default() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "\thello\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "\thello\n");
         let r = ExpandCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "        hello\n");
@@ -6907,42 +6878,42 @@ mod tests {
 
     #[test]
     fn expand_custom_width() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "\thello\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "\thello\n");
         let r = ExpandCommand.execute(&["-t".into(), "4".into()], &c);
         assert_eq!(r.stdout, "    hello\n");
     }
 
     #[test]
     fn expand_tab_positions() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "\ta\tb\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "\ta\tb\n");
         let r = ExpandCommand.execute(&["-t".into(), "4,8".into()], &c);
         assert_eq!(r.stdout, "    a   b\n");
     }
 
     #[test]
     fn expand_mid_line_tab() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "ab\tcd\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "ab\tcd\n");
         let r = ExpandCommand.execute(&["-t".into(), "8".into()], &c);
         assert_eq!(r.stdout, "ab      cd\n");
     }
 
     #[test]
     fn expand_from_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/tabs.txt"), b"\thello\n\tworld\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = ExpandCommand.execute(&["-t".into(), "4".into(), "tabs.txt".into()], &c);
         assert_eq!(r.stdout, "    hello\n    world\n");
     }
 
     #[test]
     fn expand_empty_input() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "");
         let r = ExpandCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "");
@@ -6952,8 +6923,8 @@ mod tests {
 
     #[test]
     fn unexpand_leading_spaces() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "        hello\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "        hello\n");
         let r = UnexpandCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "\thello\n");
@@ -6961,16 +6932,16 @@ mod tests {
 
     #[test]
     fn unexpand_custom_width() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "    hello\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "    hello\n");
         let r = UnexpandCommand.execute(&["-t".into(), "4".into()], &c);
         assert_eq!(r.stdout, "\thello\n");
     }
 
     #[test]
     fn unexpand_all_spaces() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello   world\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello   world\n");
         let r = UnexpandCommand.execute(&["-a".into(), "-t".into(), "4".into()], &c);
         // "hello   world" - 'hello' takes cols 0-4, then 3 spaces at cols 5,6,7 -> tab at 8
         assert_eq!(r.stdout, "hello\tworld\n");
@@ -6978,8 +6949,8 @@ mod tests {
 
     #[test]
     fn unexpand_no_convert_middle_without_a() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello        world\n");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello        world\n");
         let r = UnexpandCommand.execute(&[], &c);
         // Without -a, only leading spaces are converted; there are no leading spaces
         assert_eq!(r.stdout, "hello        world\n");
@@ -6987,8 +6958,8 @@ mod tests {
 
     #[test]
     fn unexpand_empty_input() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "");
         let r = UnexpandCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "");
@@ -6998,12 +6969,12 @@ mod tests {
 
     #[test]
     fn join_a2_unpairable_file2() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/j1.txt"), b"1 Alice\n2 Bob\n")
             .unwrap();
         fs.write_file(Path::new("/j2.txt"), b"1 NY\n3 SF\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = JoinCommand.execute(
             &["-a".into(), "2".into(), "j1.txt".into(), "j2.txt".into()],
             &c,
@@ -7013,22 +6984,22 @@ mod tests {
 
     #[test]
     fn join_duplicate_keys_cross_product() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/j1.txt"), b"1 A\n1 B\n").unwrap();
         fs.write_file(Path::new("/j2.txt"), b"1 X\n1 Y\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = JoinCommand.execute(&["j1.txt".into(), "j2.txt".into()], &c);
         assert_eq!(r.stdout, "1 A X\n1 A Y\n1 B X\n1 B Y\n");
     }
 
     #[test]
     fn join_output_format() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/j1.txt"), b"1 Alice\n2 Bob\n")
             .unwrap();
         fs.write_file(Path::new("/j2.txt"), b"1 NY\n2 LA\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = JoinCommand.execute(
             &[
                 "-o".into(),
@@ -7043,11 +7014,11 @@ mod tests {
 
     #[test]
     fn join_empty_replacement() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/j1.txt"), b"1 Alice\n2 Bob\n")
             .unwrap();
         fs.write_file(Path::new("/j2.txt"), b"1 NY\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = JoinCommand.execute(
             &[
                 "-a".into(),
@@ -7066,19 +7037,19 @@ mod tests {
 
     #[test]
     fn tac_multiple_files() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/t1.txt"), b"a\nb\n").unwrap();
         fs.write_file(Path::new("/t2.txt"), b"c\nd\n").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = TacCommand.execute(&["t1.txt".into(), "t2.txt".into()], &c);
         assert_eq!(r.stdout, "d\nc\nb\na\n");
     }
 
     #[test]
     fn column_fill_mode() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let input = "alpha\nbeta\ngamma\ndelta\n";
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, input);
+        let c = ctx_with_stdin(&*fs, &env, &limits, input);
         let r = ColumnCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert!(!r.stdout.is_empty());
@@ -7089,11 +7060,11 @@ mod tests {
 
     #[test]
     fn comm_with_empty_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/nonempty.txt"), b"a\nb\n")
             .unwrap();
         fs.write_file(Path::new("/mt.txt"), b"").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = CommCommand.execute(&["nonempty.txt".into(), "mt.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stdout, "a\nb\n");

@@ -367,21 +367,8 @@ impl super::VirtualCommand for SleepCommand {
         let capped = seconds.min(max_secs);
         let duration = std::time::Duration::from_secs_f64(capped);
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = duration;
-            return CommandResult {
-                stderr: "sleep: not supported in browser environment\n".into(),
-                exit_code: 1,
-                ..Default::default()
-            };
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            std::thread::sleep(duration);
-            CommandResult::default()
-        }
+        std::thread::sleep(duration);
+        CommandResult::default()
     }
 }
 
@@ -2070,18 +2057,12 @@ mod tests {
     use super::*;
     use crate::commands::{CommandContext, VirtualCommand};
     use crate::interpreter::ExecutionLimits;
-    use crate::network::NetworkPolicy;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
 
-    fn setup() -> (
-        Arc<InMemoryFs>,
-        HashMap<String, String>,
-        ExecutionLimits,
-        NetworkPolicy,
-    ) {
+    fn setup() -> (Arc<InMemoryFs>, HashMap<String, String>, ExecutionLimits) {
         let fs = Arc::new(InMemoryFs::new());
         fs.write_file(Path::new("/hello.txt"), b"hello world\n")
             .unwrap();
@@ -2089,19 +2070,13 @@ mod tests {
         env.insert("USER".into(), "testuser".into());
         env.insert("HOSTNAME".into(), "myhost".into());
         env.insert("HOME".into(), "/home/testuser".into());
-        (
-            fs,
-            env,
-            ExecutionLimits::default(),
-            NetworkPolicy::default(),
-        )
+        (fs, env, ExecutionLimits::default())
     }
 
     fn ctx<'a>(
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
     ) -> CommandContext<'a> {
         CommandContext {
             fs,
@@ -2111,7 +2086,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits,
-            network_policy,
             exec: None,
             shell_opts: None,
         }
@@ -2121,7 +2095,6 @@ mod tests {
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
         stdin: &'a str,
     ) -> CommandContext<'a> {
         CommandContext {
@@ -2132,7 +2105,6 @@ mod tests {
             stdin,
             stdin_bytes: None,
             limits,
-            network_policy,
             exec: None,
             shell_opts: None,
         }
@@ -2142,8 +2114,8 @@ mod tests {
 
     #[test]
     fn expr_addition() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["1".into(), "+".into(), "2".into()], &c);
         assert_eq!(r.stdout, "3\n");
         assert_eq!(r.exit_code, 0);
@@ -2151,32 +2123,32 @@ mod tests {
 
     #[test]
     fn expr_multiplication() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["3".into(), "*".into(), "4".into()], &c);
         assert_eq!(r.stdout, "12\n");
     }
 
     #[test]
     fn expr_division() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["10".into(), "/".into(), "3".into()], &c);
         assert_eq!(r.stdout, "3\n");
     }
 
     #[test]
     fn expr_modulo() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["10".into(), "%".into(), "3".into()], &c);
         assert_eq!(r.stdout, "1\n");
     }
 
     #[test]
     fn expr_comparison() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["5".into(), ">".into(), "3".into()], &c);
         assert_eq!(r.stdout, "1\n");
         assert_eq!(r.exit_code, 0);
@@ -2184,16 +2156,16 @@ mod tests {
 
     #[test]
     fn expr_length() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["length".into(), "hello".into()], &c);
         assert_eq!(r.stdout, "5\n");
     }
 
     #[test]
     fn expr_substr() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(
             &["substr".into(), "hello".into(), "2".into(), "3".into()],
             &c,
@@ -2203,32 +2175,32 @@ mod tests {
 
     #[test]
     fn expr_match() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["hello".into(), ":".into(), "hel".into()], &c);
         assert_eq!(r.stdout, "3\n");
     }
 
     #[test]
     fn expr_division_by_zero() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["5".into(), "/".into(), "0".into()], &c);
         assert_eq!(r.exit_code, 2);
     }
 
     #[test]
     fn expr_missing_operand() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 2);
     }
 
     #[test]
     fn expr_zero_result() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = ExprCommand.execute(&["0".into(), "+".into(), "0".into()], &c);
         assert_eq!(r.stdout, "0\n");
         assert_eq!(r.exit_code, 1);
@@ -2238,8 +2210,8 @@ mod tests {
 
     #[test]
     fn date_default() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DateCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 0);
         assert!(!r.stdout.is_empty());
@@ -2247,8 +2219,8 @@ mod tests {
 
     #[test]
     fn date_format() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DateCommand.execute(&["+%Y".into()], &c);
         assert_eq!(r.exit_code, 0);
         let year = r.stdout.trim();
@@ -2258,8 +2230,8 @@ mod tests {
 
     #[test]
     fn date_epoch() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DateCommand.execute(&["+%s".into()], &c);
         let epoch = r.stdout.trim().parse::<u64>();
         assert!(epoch.is_ok());
@@ -2268,8 +2240,8 @@ mod tests {
 
     #[test]
     fn date_invalid_operand() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DateCommand.execute(&["%x".into()], &c);
         assert_eq!(r.exit_code, 1);
         assert!(r.stdout.is_empty());
@@ -2279,24 +2251,24 @@ mod tests {
 
     #[test]
     fn sleep_missing_arg() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SleepCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn sleep_invalid_arg() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SleepCommand.execute(&["abc".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn sleep_zero() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SleepCommand.execute(&["0".into()], &c);
         assert_eq!(r.exit_code, 0);
     }
@@ -2305,32 +2277,32 @@ mod tests {
 
     #[test]
     fn seq_single() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SeqCommand.execute(&["5".into()], &c);
         assert_eq!(r.stdout, "1\n2\n3\n4\n5\n");
     }
 
     #[test]
     fn seq_range() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SeqCommand.execute(&["3".into(), "6".into()], &c);
         assert_eq!(r.stdout, "3\n4\n5\n6\n");
     }
 
     #[test]
     fn seq_with_increment() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SeqCommand.execute(&["1".into(), "2".into(), "9".into()], &c);
         assert_eq!(r.stdout, "1\n3\n5\n7\n9\n");
     }
 
     #[test]
     fn seq_empty() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = SeqCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -2339,8 +2311,8 @@ mod tests {
 
     #[test]
     fn env_lists_all() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = EnvCommand.execute(&[], &c);
         assert!(r.stdout.contains("USER=testuser"));
         assert!(r.stdout.contains("HOSTNAME=myhost"));
@@ -2348,7 +2320,7 @@ mod tests {
 
     #[test]
     fn env_executes_subcommand() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         let exec = |command: &str, _env: Option<&std::collections::HashMap<String, String>>| {
             Ok(CommandResult {
                 stdout: format!("{command}\n"),
@@ -2357,7 +2329,7 @@ mod tests {
         };
         let c = CommandContext {
             exec: Some(&exec),
-            ..ctx(&*fs, &env, &limits, &np)
+            ..ctx(&*fs, &env, &limits)
         };
         let r = EnvCommand.execute(&["echo".into(), "2".into()], &c);
         assert_eq!(r.stdout, "echo 2\n");
@@ -2365,8 +2337,8 @@ mod tests {
 
     #[test]
     fn env_assignments_affect_listing() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = EnvCommand.execute(&["USER=override".into(), "NEW_VAR=value".into()], &c);
         assert!(r.stdout.contains("USER=override"));
         assert!(r.stdout.contains("NEW_VAR=value"));
@@ -2377,24 +2349,24 @@ mod tests {
 
     #[test]
     fn printenv_specific() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintenvCommand.execute(&["USER".into()], &c);
         assert_eq!(r.stdout, "testuser\n");
     }
 
     #[test]
     fn printenv_missing() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintenvCommand.execute(&["NOPE".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn printenv_all() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = PrintenvCommand.execute(&[], &c);
         assert!(r.stdout.contains("USER=testuser"));
     }
@@ -2403,48 +2375,48 @@ mod tests {
 
     #[test]
     fn which_builtin() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = WhichCommand.execute(&["cd".into()], &c);
         assert!(r.stdout.contains("shell built-in"));
     }
 
     #[test]
     fn which_registered() {
-        let (fs, mut env, limits, np) = setup();
+        let (fs, mut env, limits) = setup();
         env.insert("PATH".into(), "/usr/bin:/bin".into());
         fs.mkdir_p(Path::new("/bin")).unwrap();
         fs.write_file(Path::new("/bin/echo"), b"#!/bin/bash\n# built-in: echo\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = WhichCommand.execute(&["echo".into()], &c);
         assert!(r.stdout.contains("/bin/echo"));
     }
 
     #[test]
     fn which_not_found() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = WhichCommand.execute(&["nonexistent_cmd".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn which_no_args() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = WhichCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn which_multi_args_mixed() {
-        let (fs, mut env, limits, np) = setup();
+        let (fs, mut env, limits) = setup();
         env.insert("PATH".into(), "/bin".into());
         fs.mkdir_p(Path::new("/bin")).unwrap();
         fs.write_file(Path::new("/bin/echo"), b"#!/bin/bash\n# built-in: echo\n")
             .unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = WhichCommand.execute(&["cd".into(), "echo".into(), "nonexistent".into()], &c);
         assert!(r.stdout.contains("shell built-in"));
         assert!(r.stdout.contains("/bin/echo"));
@@ -2455,25 +2427,25 @@ mod tests {
 
     #[test]
     fn base64_encode_stdin() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello");
         let r = Base64Command.execute(&[], &c);
         assert_eq!(r.stdout.trim(), "aGVsbG8=");
     }
 
     #[test]
     fn base64_decode() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "aGVsbG8=");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "aGVsbG8=");
         let r = Base64Command.execute(&["-d".into()], &c);
         assert_eq!(r.stdout, "hello");
     }
 
     #[test]
     fn base64_encode_file() {
-        let (fs, env, limits, np) = setup();
+        let (fs, env, limits) = setup();
         fs.write_file(Path::new("/test.bin"), b"test").unwrap();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let c = ctx(&*fs, &env, &limits);
         let r = Base64Command.execute(&["test.bin".into()], &c);
         assert_eq!(r.stdout.trim(), "dGVzdA==");
     }
@@ -2482,16 +2454,16 @@ mod tests {
 
     #[test]
     fn md5sum_stdin() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello");
         let r = Md5sumCommand.execute(&[], &c);
         assert!(r.stdout.starts_with("5d41402abc4b2a76b9719d911017c592"));
     }
 
     #[test]
     fn md5sum_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = Md5sumCommand.execute(&["hello.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("hello.txt"));
@@ -2499,8 +2471,8 @@ mod tests {
 
     #[test]
     fn md5sum_nonexistent() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = Md5sumCommand.execute(&["nope.txt".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -2509,8 +2481,8 @@ mod tests {
 
     #[test]
     fn sha256sum_stdin() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx_with_stdin(&*fs, &env, &limits, &np, "hello");
+        let (fs, env, limits) = setup();
+        let c = ctx_with_stdin(&*fs, &env, &limits, "hello");
         let r = Sha256sumCommand.execute(&[], &c);
         assert!(
             r.stdout
@@ -2520,8 +2492,8 @@ mod tests {
 
     #[test]
     fn sha256sum_file() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = Sha256sumCommand.execute(&["hello.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("hello.txt"));
@@ -2531,17 +2503,17 @@ mod tests {
 
     #[test]
     fn whoami_from_env() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = WhoamiCommand.execute(&[], &c);
         assert_eq!(r.stdout, "testuser\n");
     }
 
     #[test]
     fn whoami_default_root() {
-        let (fs, _env, limits, np) = setup();
+        let (fs, _env, limits) = setup();
         let empty_env = HashMap::new();
-        let c = ctx(&*fs, &empty_env, &limits, &np);
+        let c = ctx(&*fs, &empty_env, &limits);
         let r = WhoamiCommand.execute(&[], &c);
         assert_eq!(r.stdout, "root\n");
     }
@@ -2550,17 +2522,17 @@ mod tests {
 
     #[test]
     fn hostname_from_env() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = HostnameCommand.execute(&[], &c);
         assert_eq!(r.stdout, "myhost\n");
     }
 
     #[test]
     fn hostname_default() {
-        let (fs, _env, limits, np) = setup();
+        let (fs, _env, limits) = setup();
         let empty_env = HashMap::new();
-        let c = ctx(&*fs, &empty_env, &limits, &np);
+        let c = ctx(&*fs, &empty_env, &limits);
         let r = HostnameCommand.execute(&[], &c);
         assert_eq!(r.stdout, "localhost\n");
     }
@@ -2569,16 +2541,16 @@ mod tests {
 
     #[test]
     fn uname_default() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = UnameCommand.execute(&[], &c);
         assert_eq!(r.stdout, "Linux\n");
     }
 
     #[test]
     fn uname_all() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = UnameCommand.execute(&["-a".into()], &c);
         assert!(r.stdout.contains("Linux"));
         assert!(r.stdout.contains("rust-bash"));
@@ -2587,8 +2559,8 @@ mod tests {
 
     #[test]
     fn uname_machine() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = UnameCommand.execute(&["-m".into()], &c);
         assert_eq!(r.stdout, "x86_64\n");
     }
@@ -2597,8 +2569,8 @@ mod tests {
 
     #[test]
     fn yes_default() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = YesCommand.execute(&[], &c);
         let lines: Vec<&str> = r.stdout.lines().collect();
         assert_eq!(lines.len(), 10_000);
@@ -2607,8 +2579,8 @@ mod tests {
 
     #[test]
     fn yes_custom_string() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = YesCommand.execute(&["hello".into()], &c);
         let lines: Vec<&str> = r.stdout.lines().collect();
         assert_eq!(lines.len(), 10_000);

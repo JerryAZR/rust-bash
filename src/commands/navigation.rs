@@ -340,36 +340,24 @@ mod tests {
     use super::*;
     use crate::commands::{CommandContext, VirtualCommand};
     use crate::interpreter::ExecutionLimits;
-    use crate::network::NetworkPolicy;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn setup() -> (
-        Arc<InMemoryFs>,
-        HashMap<String, String>,
-        ExecutionLimits,
-        NetworkPolicy,
-    ) {
+    fn setup() -> (Arc<InMemoryFs>, HashMap<String, String>, ExecutionLimits) {
         let fs = Arc::new(InMemoryFs::new());
         fs.mkdir_p(Path::new("/usr/bin")).unwrap();
         fs.write_file(Path::new("/usr/bin/sort"), b"").unwrap();
         fs.mkdir_p(Path::new("/a/b")).unwrap();
         fs.write_file(Path::new("/a/b/c.txt"), b"data").unwrap();
         fs.write_file(Path::new("/a/x.txt"), b"data").unwrap();
-        (
-            fs,
-            HashMap::new(),
-            ExecutionLimits::default(),
-            NetworkPolicy::default(),
-        )
+        (fs, HashMap::new(), ExecutionLimits::default())
     }
 
     fn ctx<'a>(
         fs: &'a dyn crate::vfs::VirtualFs,
         env: &'a HashMap<String, String>,
         limits: &'a ExecutionLimits,
-        network_policy: &'a NetworkPolicy,
     ) -> CommandContext<'a> {
         CommandContext {
             fs,
@@ -379,7 +367,6 @@ mod tests {
             stdin: "",
             stdin_bytes: None,
             limits,
-            network_policy,
             exec: None,
             shell_opts: None,
         }
@@ -389,8 +376,8 @@ mod tests {
 
     #[test]
     fn basename_simple() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = BasenameCommand.execute(&["/usr/bin/sort".into()], &c);
         assert_eq!(r.stdout, "sort\n");
         assert_eq!(r.exit_code, 0);
@@ -398,32 +385,32 @@ mod tests {
 
     #[test]
     fn basename_with_suffix() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = BasenameCommand.execute(&["file.txt".into(), ".txt".into()], &c);
         assert_eq!(r.stdout, "file\n");
     }
 
     #[test]
     fn basename_trailing_slash() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = BasenameCommand.execute(&["/usr/bin/".into()], &c);
         assert_eq!(r.stdout, "bin\n");
     }
 
     #[test]
     fn basename_root() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = BasenameCommand.execute(&["/".into()], &c);
         assert_eq!(r.stdout, "/\n");
     }
 
     #[test]
     fn basename_missing() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = BasenameCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -432,32 +419,32 @@ mod tests {
 
     #[test]
     fn dirname_simple() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DirnameCommand.execute(&["/usr/bin/sort".into()], &c);
         assert_eq!(r.stdout, "/usr/bin\n");
     }
 
     #[test]
     fn dirname_no_dir() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DirnameCommand.execute(&["file.txt".into()], &c);
         assert_eq!(r.stdout, ".\n");
     }
 
     #[test]
     fn dirname_root() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DirnameCommand.execute(&["/".into()], &c);
         assert_eq!(r.stdout, "/\n");
     }
 
     #[test]
     fn dirname_missing() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = DirnameCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -466,8 +453,8 @@ mod tests {
 
     #[test]
     fn realpath_absolute() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RealpathCommand.execute(&["/a/b/c.txt".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("/a/b/c.txt"));
@@ -475,8 +462,8 @@ mod tests {
 
     #[test]
     fn realpath_missing() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = RealpathCommand.execute(&[], &c);
         assert_eq!(r.exit_code, 1);
     }
@@ -485,8 +472,8 @@ mod tests {
 
     #[test]
     fn tree_basic() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TreeCommand.execute(&["/a".into()], &c);
         assert_eq!(r.exit_code, 0);
         assert!(r.stdout.contains("b"));
@@ -497,16 +484,16 @@ mod tests {
 
     #[test]
     fn tree_nonexistent() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TreeCommand.execute(&["/nope".into()], &c);
         assert_eq!(r.exit_code, 1);
     }
 
     #[test]
     fn tree_nested() {
-        let (fs, env, limits, np) = setup();
-        let c = ctx(&*fs, &env, &limits, &np);
+        let (fs, env, limits) = setup();
+        let c = ctx(&*fs, &env, &limits);
         let r = TreeCommand.execute(&["/a".into()], &c);
         assert!(r.stdout.contains("c.txt"));
     }

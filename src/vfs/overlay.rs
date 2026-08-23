@@ -253,7 +253,7 @@ impl OverlayFs {
     /// Discard all pending state: clear the upper layer and the whiteout set
     /// so the overlay re-baselines on current disk state.
     ///
-    /// Unlike [`sync`], which keeps entries that genuinely differ from disk,
+    /// Unlike [`Self::sync`], which keeps entries that genuinely differ from disk,
     /// `reset` deliberately forgets them — e.g. after a native run whose disk
     /// changes should win over the sandbox's pending opinions.
     pub fn reset(&self) {

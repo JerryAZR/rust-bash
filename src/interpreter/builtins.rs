@@ -791,7 +791,7 @@ fn builtin_cd(args: &[String], state: &mut InterpreterState) -> Result<ExecResul
                 let base = if dir.is_empty() { "." } else { dir };
                 let candidate = resolve_path(
                     &state.cwd,
-                    &format!("{}/{}", base.trim_end_matches('/'), &target),
+                    &format!("{}/{}", base.trim_end_matches('/'), target),
                 );
                 let path = Path::new(&candidate);
                 if state.fs.exists(path)
@@ -4694,7 +4694,6 @@ pub(crate) fn execute_registered_command_by_name(
         let fs = std::sync::Arc::clone(&state.fs);
         let cwd = state.cwd.clone();
         let limits = state.limits.clone();
-        let network_policy = state.network_policy.clone();
         let binary_stdin = state.pipe_stdin_bytes.take();
         let exec_callback = crate::interpreter::walker::make_exec_callback(state);
 
@@ -4706,7 +4705,6 @@ pub(crate) fn execute_registered_command_by_name(
             stdin,
             stdin_bytes: binary_stdin.as_deref(),
             limits: &limits,
-            network_policy: &network_policy,
             exec: Some(&exec_callback),
             shell_opts: Some(&state.shell_opts),
         };
@@ -6684,7 +6682,6 @@ fn run_in_subshell(
             substitution_depth: state.counters.substitution_depth,
             call_depth: 0,
         },
-        network_policy: state.network_policy.clone(),
         should_exit: false,
         abort_command_list: false,
         loop_depth: 0,
@@ -6899,7 +6896,6 @@ mod tests {
     use crate::interpreter::{
         ExecutionCounters, ExecutionLimits, ShellOpts, ShoptOpts, new_unresolved_record,
     };
-    use crate::network::NetworkPolicy;
     use crate::platform::Instant;
     use crate::vfs::{InMemoryFs, VirtualFs};
     use std::collections::HashMap;
@@ -6920,7 +6916,6 @@ mod tests {
             shopt_opts: ShoptOpts::default(),
             limits: ExecutionLimits::default(),
             counters: ExecutionCounters::default(),
-            network_policy: NetworkPolicy::default(),
             should_exit: false,
             abort_command_list: false,
             loop_depth: 0,

@@ -7,7 +7,6 @@ use crate::interpreter::{
     self, ExecResult, ExecutionCounters, ExecutionLimits, InterpreterState, ShellOpts, ShoptOpts,
     Variable, VariableAttrs, VariableValue,
 };
-use crate::network::NetworkPolicy;
 use crate::platform::Instant;
 use crate::vfs::{InMemoryFs, VirtualFs};
 use std::collections::HashMap;
@@ -313,7 +312,6 @@ pub struct RustBashBuilder {
     cwd: Option<String>,
     custom_commands: Vec<Arc<dyn VirtualCommand>>,
     limits: Option<ExecutionLimits>,
-    network_policy: Option<NetworkPolicy>,
     fs: Option<Arc<dyn VirtualFs>>,
     abort_on_unresolved_commands: bool,
 }
@@ -334,7 +332,6 @@ impl RustBashBuilder {
             cwd: None,
             custom_commands: Vec::new(),
             limits: None,
-            network_policy: None,
             fs: None,
             abort_on_unresolved_commands: false,
         }
@@ -376,12 +373,6 @@ impl RustBashBuilder {
         let mut limits = self.limits.unwrap_or_default();
         limits.max_array_elements = max;
         self.limits = Some(limits);
-        self
-    }
-
-    /// Override the default network policy.
-    pub fn network_policy(mut self, policy: NetworkPolicy) -> Self {
-        self.network_policy = Some(policy);
         self
     }
 
@@ -489,7 +480,6 @@ impl RustBashBuilder {
             shopt_opts: ShoptOpts::default(),
             limits: self.limits.unwrap_or_default(),
             counters: ExecutionCounters::default(),
-            network_policy: self.network_policy.unwrap_or_default(),
             should_exit: false,
             abort_command_list: false,
             loop_depth: 0,

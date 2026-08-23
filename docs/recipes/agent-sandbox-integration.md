@@ -181,8 +181,8 @@ let r = shell.exec("head -3 /tmp/sorted.txt")?;   // tool call 2: works
 
 The boundary is the **process**, not the `exec()` call:
 
-- A long-lived harness process (one `RustBash` for the session, the way the
-  MCP server mode works) gets this for free.
+- A long-lived harness process (one `RustBash` for the session) gets this
+  for free.
 - A harness that spawns a fresh process per tool call gets a fresh, empty
   overlay each time — unsynced writes from the previous call are gone.
   Either keep the harness process alive, apply diffs between calls, or
@@ -374,7 +374,5 @@ impl Harness {
 - **`analyze_commands` false positives.** Function bodies are scanned even
   if the function is never called, so a never-called helper mentioning `git`
   routes the whole script to native. That is the safe direction.
-- **FFI surface.** The C FFI does not expose `unresolved_commands` (the CLI
-  `--json`, npm, and MCP surfaces do).
 - **Binary content.** `OverlayWrite.content` is raw bytes — safe for
   gzip/tar output produced in the sandbox.

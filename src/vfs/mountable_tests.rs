@@ -259,42 +259,6 @@ fn deep_clone_isolation() {
 }
 
 // -----------------------------------------------------------------------
-// 4i.9 deep_clone with ReadWriteFs mount
-// -----------------------------------------------------------------------
-
-#[cfg(feature = "native-fs")]
-#[test]
-fn deep_clone_with_readwrite_fs_mount() {
-    use crate::vfs::ReadWriteFs;
-    use tempfile::TempDir;
-
-    let tmp = TempDir::new().unwrap();
-    std::fs::write(tmp.path().join("real.txt"), b"real data").unwrap();
-
-    let rw_fs = Arc::new(ReadWriteFs::with_root(tmp.path()).unwrap());
-    let mem_fs = make_memory_fs(&[("/mem.txt", b"memory data")]);
-
-    let mfs = MountableFs::new().mount("/", mem_fs).mount("/real", rw_fs);
-
-    let cloned = mfs.deep_clone();
-
-    // ReadWriteFs deep_clone is a passthrough — both see the same real FS
-    assert_eq!(
-        cloned.read_file(Path::new("/real/real.txt")).unwrap(),
-        b"real data"
-    );
-
-    // InMemoryFs clone is isolated
-    cloned
-        .write_file(Path::new("/mem.txt"), b"changed in clone")
-        .unwrap();
-    assert_eq!(
-        mfs.read_file(Path::new("/mem.txt")).unwrap(),
-        b"memory data"
-    );
-}
-
-// -----------------------------------------------------------------------
 // 4i.10 Glob across mounts
 // -----------------------------------------------------------------------
 
