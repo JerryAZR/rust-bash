@@ -5137,18 +5137,18 @@ fn write_or_append_bytes(
             state
                 .fs
                 .append_file(p, content)
-                .map_err(|e| RustBashError::Execution(e.to_string()))?;
+                .map_err(|e| RustBashError::RedirectFailed(format!("{path}: {e}")))?;
         } else {
             state
                 .fs
                 .write_file(p, content)
-                .map_err(|e| RustBashError::Execution(e.to_string()))?;
+                .map_err(|e| RustBashError::RedirectFailed(format!("{path}: {e}")))?;
         }
     } else {
         state
             .fs
             .write_file(p, content)
-            .map_err(|e| RustBashError::Execution(e.to_string()))?;
+            .map_err(|e| RustBashError::RedirectFailed(format!("{path}: {e}")))?;
     }
     Ok(())
 }

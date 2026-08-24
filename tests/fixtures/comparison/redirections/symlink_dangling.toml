@@ -1,0 +1,81 @@
+# Writes through dangling symlinks: POSIX open(O_CREAT) semantics —
+# the link TARGET is created, the link itself is preserved.
+# (Authored against POSIX spec; symlink creation needs privileges on
+# Windows hosts, so record on Linux.)
+
+[[cases]]
+name = "write_through_dangling_symlink_creates_target"
+script = '''
+ln -s /t1 /dangling
+echo filled > /dangling
+test -L /dangling && echo still-link
+cat /t1
+'''
+stdout = """
+still-link
+filled
+"""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "write_through_dangling_chain_creates_final_target"
+script = '''
+ln -s /t2 /a
+ln -s /t3 /t2
+echo chain > /a
+test -L /a && echo a-is-link
+test -L /t2 && echo t2-is-link
+cat /t3
+'''
+stdout = """
+a-is-link
+t2-is-link
+chain
+"""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "write_through_relative_dangling_symlink"
+script = '''
+mkdir -p /sub
+cd /sub
+ln -s t1 d
+echo rel > d
+cat /sub/t1
+'''
+stdout = """
+rel
+"""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "write_through_symlink_loop_fails"
+script = '''
+ln -s /b /a
+ln -s /a /b
+echo x > /a 2>/dev/null
+echo "rc=$?"
+'''
+stdout = """
+rc=1
+"""
+# Redirect failures report to the shell's stderr (the failed > /a aborts
+# redirect processing, so 2>/dev/null never applies); exact text differs.
+stderr_contains = "Too many levels of symbolic links"
+exit_code = 0
+
+[[cases]]
+name = "write_through_dangling_symlink_missing_target_parent_fails"
+script = '''
+ln -s /no/such/t /d
+echo x > /d 2>/dev/null
+echo "rc=$?"
+'''
+stdout = """
+rc=1
+"""
+stderr_contains = "No such file or directory"
+exit_code = 0

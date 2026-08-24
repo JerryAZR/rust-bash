@@ -674,6 +674,9 @@ impl VirtualFs for OverlayFs {
 
     fn write_file(&self, path: &Path, content: &[u8]) -> Result<(), VfsError> {
         let norm = normalize(path)?;
+        // POSIX open(O_CREAT) semantics: a write through a DANGLING symlink
+        // creates the link's target (link preserved). See InMemoryFs.
+        let norm = super::resolve_through_dangling(self, &norm)?;
         // Ensure parent directories exist in upper
         if let Some(parent) = norm.parent()
             && parent != Path::new("/")

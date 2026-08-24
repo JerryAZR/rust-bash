@@ -288,6 +288,12 @@ VFS paths are Unix-style by construction, on every platform:
   `noacl` semantics; falsely-permissive modes are safe because VFS operations
   are never gated on mode bits. `symlink` uses `symlink_file`/`symlink_dir`
   (may require Developer Mode or admin on Windows).
+- **Symlinks follow POSIX `open` semantics.** Writes through a *dangling*
+  symlink create the link's target (the link is preserved); chains resolve
+  up to a depth of 40, past which the operation fails with `SymlinkLoop`
+  (`ELOOP`). This holds identically for bash and for the Python bridge —
+  both go through the same `VirtualFs::write_file`. (Covered by
+  `comparison/redirections/symlink_dangling.toml`.)
 - **Default features build and test on Windows.** The full suite (including
   `native-fs` backends) is expected green on Windows; a few Unix-only tests
   (symlink escapes to `/etc`, exact mode-bit preservation) are `#[cfg(unix)]`,

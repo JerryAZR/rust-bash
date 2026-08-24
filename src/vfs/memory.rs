@@ -9,7 +9,7 @@ use parking_lot::RwLock;
 use super::{DirEntry, FsNode, GlobOptions, Metadata, NodeType, VirtualFs};
 use crate::error::VfsError;
 
-const MAX_SYMLINK_DEPTH: u32 = 40;
+use super::MAX_SYMLINK_DEPTH;
 
 /// A fully in-memory filesystem implementation.
 ///
@@ -455,6 +455,10 @@ impl VirtualFs for InMemoryFs {
 
     fn write_file(&self, path: &Path, content: &[u8]) -> Result<(), VfsError> {
         let norm = normalize(path)?;
+        // POSIX open(O_CREAT) semantics: a write through a DANGLING symlink
+        // creates the link's target (link preserved), it does not replace
+        // the link node.
+        let norm = super::resolve_through_dangling(self, &norm)?;
 
         // Try to overwrite an existing file first
         {
@@ -485,7 +489,7 @@ impl VirtualFs for InMemoryFs {
 
         // File doesn't exist — create it in the parent directory
         let file_id = self.next_file_id();
-        self.with_parent_mut(path, |parent, child_name| match parent {
+        self.with_parent_mut(&norm, |parent, child_name| match parent {
             FsNode::Directory { children, .. } => {
                 children.insert(
                     child_name.to_string(),

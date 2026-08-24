@@ -93,6 +93,43 @@ pub(crate) fn vfs_normalize_checked(path: &Path) -> Result<PathBuf, VfsError> {
     Ok(PathBuf::from(format!("/{}", parts.join("/"))))
 }
 
+/// Maximum depth for symlink chain resolution.
+pub(crate) const MAX_SYMLINK_DEPTH: u32 = 40;
+
+/// Resolve a path through any trailing chain of **dangling** symlinks.
+///
+/// `path` must be absolute. If its final component is a symlink whose target
+/// does not exist, the link is followed (relative targets resolve against
+/// the link's parent) and the check repeats at the target, up to
+/// [`MAX_SYMLINK_DEPTH`] (past which `SymlinkLoop`). Returns the path to
+/// actually create/write at — `path` itself when the final component is not
+/// a dangling symlink. This gives POSIX `open(O_CREAT)` semantics for writes
+/// through dangling links: the *target* is created, the link is preserved.
+pub(crate) fn resolve_through_dangling(
+    fs: &dyn VirtualFs,
+    path: &Path,
+) -> Result<PathBuf, VfsError> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        let dangling = matches!(fs.lstat(&current), Ok(m) if m.node_type == NodeType::Symlink)
+            && fs.stat(&current).is_err();
+        if !dangling {
+            return Ok(current);
+        }
+        let text = fs.readlink(&current)?;
+        current = if vfs_path_is_absolute(&text) {
+            vfs_normalize(&text)
+        } else {
+            let parent = current.parent().unwrap_or(Path::new("/"));
+            let text_str = text
+                .to_str()
+                .ok_or_else(|| VfsError::InvalidPath(text.display().to_string()))?;
+            vfs_normalize(&vfs_resolve(parent.to_str().unwrap_or("/"), text_str))
+        };
+    }
+    Err(VfsError::SymlinkLoop(path.to_path_buf()))
+}
+
 /// Resolve a possibly-relative VFS path string against a cwd string, using `/`
 /// separators only (never the host separator).
 pub(crate) fn vfs_resolve(cwd: &str, path: &str) -> PathBuf {

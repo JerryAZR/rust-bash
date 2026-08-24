@@ -763,3 +763,37 @@ fn vfs_join_appends_single_component_with_forward_slash() {
     let joined = vfs_join(&PathBuf::from("/a"), "b\\c");
     assert_eq!(joined.to_string_lossy(), "/a/b\\c");
 }
+
+#[test]
+fn resolve_through_dangling_follows_dangling_link() {
+    use super::{InMemoryFs, VirtualFs, resolve_through_dangling};
+    let fs = InMemoryFs::new();
+    fs.symlink(Path::new("/t1"), Path::new("/dangling"))
+        .unwrap();
+    let r = resolve_through_dangling(&fs, Path::new("/dangling"));
+    assert_eq!(r.unwrap(), PathBuf::from("/t1"));
+}
+
+#[test]
+fn resolve_through_dangling_detects_loop() {
+    use super::{InMemoryFs, VirtualFs, resolve_through_dangling};
+    let fs = InMemoryFs::new();
+    fs.symlink(Path::new("/b"), Path::new("/a")).unwrap();
+    fs.symlink(Path::new("/a"), Path::new("/b")).unwrap();
+    assert!(resolve_through_dangling(&fs, Path::new("/a")).is_err());
+}
+
+#[test]
+fn write_file_through_dangling_symlink_creates_target() {
+    use super::{InMemoryFs, VirtualFs};
+    let fs = InMemoryFs::new();
+    fs.symlink(Path::new("/t1"), Path::new("/dangling"))
+        .unwrap();
+    fs.write_file(Path::new("/dangling"), b"filled").unwrap();
+    assert_eq!(fs.read_file(Path::new("/t1")).unwrap(), b"filled");
+    // The link itself is preserved.
+    assert_eq!(
+        fs.readlink(Path::new("/dangling")).unwrap(),
+        PathBuf::from("/t1")
+    );
+}

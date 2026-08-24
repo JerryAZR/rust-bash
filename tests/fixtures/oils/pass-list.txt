@@ -1059,6 +1059,7 @@ empty-bodies.test:Empty case/esac
 empty-bodies.test:Empty do/done
 empty-bodies.test:Empty then/fi
 errexit.test:background processes respect errexit
+errexit.test:bash atoms [[ (( - redir failure checked
 errexit.test:brace group - redir failure checked
 errexit.test:Command sub exit code is lost
 errexit.test:errexit aborts early
