@@ -224,7 +224,10 @@ impl Parser {
         } else {
             None
         };
-        // Validate: at least one of pattern or action must be present
+        // Validate: at least one of pattern or action must be present.
+        // Unreachable by construction: try_parse_pattern returns None only when
+        // peek is LBrace (an action is then parsed above) or Eof (parse()'s
+        // at_eof check prevents parse_rule from being called at all).
         if pattern.is_none() && action.is_none() {
             return Err(format!("expected pattern or action, got {}", self.peek()));
         }
@@ -242,11 +245,13 @@ impl Parser {
                 Ok(Some(AwkPattern::End))
             }
             Token::LBrace => Ok(None),
+            // Unreachable: parse() only calls parse_rule when !at_eof().
             Token::Eof => Ok(None),
             Token::Regex(_) => {
                 let regex = if let Token::Regex(r) = self.advance() {
                     r
                 } else {
+                    // Unreachable: peek() was just matched as Token::Regex above.
                     unreachable!()
                 };
                 // Check for range pattern: /regex1/,/regex2/
@@ -555,6 +560,7 @@ impl Parser {
                     Token::SlashAssign => AssignOp::DivAssign,
                     Token::PercentAssign => AssignOp::ModAssign,
                     Token::CaretAssign => AssignOp::PowAssign,
+                    // Unreachable: peek() matched one of the assign tokens above.
                     _ => unreachable!(),
                 };
                 let value = self.parse_assign()?; // right-associative
@@ -669,6 +675,7 @@ impl Parser {
                 Token::Ge => BinOp::Ge,
                 Token::Eq => BinOp::Eq,
                 Token::Ne => BinOp::Ne,
+                // Unreachable: the while guard only admits comparison tokens.
                 _ => unreachable!(),
             };
             self.skip_newlines();
@@ -737,6 +744,7 @@ impl Parser {
                 Token::Star => BinOp::Mul,
                 Token::Slash => BinOp::Div,
                 Token::Percent => BinOp::Mod,
+                // Unreachable: the while guard only admits *, / and %.
                 _ => unreachable!(),
             };
             self.skip_newlines();
