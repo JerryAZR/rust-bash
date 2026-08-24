@@ -1,0 +1,64 @@
+# fmt / column: flag forms and error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "fmt_dash_dash"
+script = 'printf "a b\n" | fmt --'
+stdout = "a b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "fmt_w_attached"
+script = 'printf "aaa bbb ccc\n" | fmt -w5'
+stdout = "aaa\nbbb\nccc\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "fmt_unknown_option_ignored"
+# GNU fmt errors on unknown options; rust-bash silently ignores them.
+# Suspected divergence.
+script = 'printf "a b\n" | fmt -x'
+stdout = "a b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "fmt_missing_file"
+script = "fmt /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "column_dash_dash"
+script = 'printf "a 1\n" | column -t --'
+stdout = "a  1\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "column_separator_attached"
+script = 'printf "a:1\nb:2\n" | column -t -s:'
+stdout = "a  1\nb  2\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "column_output_separator_attached"
+script = 'printf "a 1\n" | column -t -o"|"'
+stdout = "a|1\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "column_missing_file"
+script = "column /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1

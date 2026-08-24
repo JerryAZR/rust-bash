@@ -1,0 +1,100 @@
+# rev / fold / nl: flag forms, wrapping logic, error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "rev_dash_dash"
+script = 'printf "ab\n" | rev --'
+stdout = "ba\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "rev_file_operand"
+script = "rev /t/r.txt"
+stdout = "cba\n"
+stderr = ""
+exit_code = 0
+files = { "/t/r.txt" = "abc\n" }
+
+[[cases]]
+name = "rev_missing_file"
+script = "rev /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "fold_dash_dash"
+script = 'printf "x\n" | fold --'
+stdout = "x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "fold_w_attached"
+script = 'printf "abcdefghij\n" | fold -w5'
+stdout = "abcde\nfghij\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "fold_file_operand"
+script = "fold -w5 /t/fold.txt"
+stdout = "abcde\nfghij\n"
+stderr = ""
+exit_code = 0
+files = { "/t/fold.txt" = "abcdefghij\n" }
+
+[[cases]]
+name = "fold_missing_file"
+script = "fold /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "fold_break_at_spaces"
+script = 'printf "aa bb cc dd\n" | fold -s -w7'
+stdout = "aa bb \ncc dd\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "fold_break_at_spaces_without_space_in_window"
+script = 'printf "aaaaaaaaaa\n" | fold -s -w4'
+stdout = "aaaa\naaaa\naa\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "nl_dash_dash"
+script = 'printf "a\n" | nl --'
+stdout = "     1\ta\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "nl_flags_ignored"
+script = 'printf "a\n" | nl -b'
+stdout = "     1\ta\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "nl_file_operand"
+script = "nl /t/nl.txt"
+stdout = "     1\ta\n     2\tb\n"
+stderr = ""
+exit_code = 0
+files = { "/t/nl.txt" = "a\nb\n" }
+
+[[cases]]
+name = "nl_missing_file"
+script = "nl /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1

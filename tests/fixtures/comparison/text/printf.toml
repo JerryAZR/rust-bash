@@ -1,0 +1,459 @@
+# printf: backslash escapes, conversions, numeric parsing, %q quoting, %(...)T dates
+
+[[cases]]
+name = "escape_backslash"
+script = "printf 'a\\\\b\\n'"
+stdout = "a\\b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "escape_alarm"
+script = "printf 'x\\ay\\n'"
+stdout = "x\u0007y\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "escape_backspace"
+script = "printf 'x\\by\\n'"
+stdout = "x\u0008y\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "escape_escape"
+script = "printf 'x\\ey\\n'"
+stdout = "x\u001By\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "escape_formfeed"
+script = "printf 'x\\fy\\n'"
+stdout = "x\u000Cy\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "escape_vtab"
+script = "printf 'x\\vy\\n'"
+stdout = "x\u000By\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "escape_dquote"
+script = "printf 'a\\\"b\\n'"
+stdout = "a\"b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "escape_squote"
+script = "printf \"a\\'b\\n\""
+stdout = "a'b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "hex_escape_without_digits_is_literal"
+script = "printf 'a\\xz\\n'"
+stdout = "a\\xz\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "u_escape_without_digits_is_literal"
+script = "printf 'a\\uz\\n'"
+stdout = "a\\uz\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "U_escape_without_digits_is_literal"
+script = "printf 'a\\Uz\\n'"
+stdout = "a\\Uz\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "trailing_backslash"
+# GNU bash printf prints a lone trailing backslash literally ("a\\");
+# rust-bash drops it. Suspected divergence.
+script = "printf 'a\\'"
+stdout = "a"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "trailing_percent"
+script = "printf 'a%'"
+stdout = "a%"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "dangling_width_specifier"
+script = "printf '%5'"
+stdout = "%5"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "dangling_precision_specifier"
+script = "printf '%.3'"
+stdout = "%.3"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "d_no_arg"
+script = "printf '%d\\n'"
+stdout = "0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "u_no_arg"
+script = "printf '%u\\n'"
+stdout = "0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "u_invalid_number"
+script = "printf '%u\\n' xyz"
+stdout = "0\n"
+stderr = "printf: xyz: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "u_empty_arg_is_zero_without_error"
+# GNU bash reports "printf: '': invalid number" for an empty argument; rust-bash
+# silently treats it as 0. Suspected divergence.
+script = "printf '%u\\n' ''"
+stdout = "0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "u_base_hash_notation_rejected"
+script = "printf '%u\\n' '64#a'"
+stdout = "64\n"
+stderr = "printf: 64#a: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "u_trailing_space_is_invalid"
+script = "printf '%u\\n' '5 '"
+stdout = "5\n"
+stderr = "printf: 5: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "u_partial_digits"
+script = "printf '%u\\n' '12x'"
+stdout = "12\n"
+stderr = "printf: 12x: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "u_fully_invalid"
+script = "printf '%u\\n' 'x'"
+stdout = "0\n"
+stderr = "printf: x: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "o_no_arg"
+script = "printf '%o\\n'"
+stdout = "0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "o_invalid_number"
+script = "printf '%o\\n' zz"
+stdout = "0\n"
+stderr = "printf: zz: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "x_no_arg"
+script = "printf '%x\\n'"
+stdout = "0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "x_invalid_number"
+script = "printf '%x\\n' zz"
+stdout = "0\n"
+stderr = "printf: zz: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "f_no_arg"
+script = "printf '%f\\n'"
+stdout = "0.000000\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "e_zero"
+script = "printf '%e\\n' 0"
+stdout = "0.000000e+00\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "e_zero_zero_precision"
+script = "printf '%.0e\\n' 0"
+stdout = "0e+00\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "e_exponent_over_99"
+script = "printf '%e\\n' 1e100"
+stdout = "1.000000e+100\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "g_zero"
+script = "printf '%g\\n' 0"
+stdout = "0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "g_zero_alt_form"
+script = "printf '%#g\\n' 0"
+stdout = "0.00000\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "g_scientific_strips_zeros"
+script = "printf '%g\\n' 100000000000000000000"
+stdout = "1e+20\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "g_scientific_alt_form_keeps_zeros"
+script = "printf '%#g\\n' 1e20"
+stdout = "1.00000e+20\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "g_precision_one_integer_has_no_dot"
+script = "printf '%.1g\\n' 5"
+stdout = "5\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "f_plus_sign"
+script = "printf '%+f\\n' 3"
+stdout = "+3.000000\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "f_space_sign"
+script = "printf '% f\\n' 3"
+stdout = " 3.000000\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "g_negative_zero_gets_sign"
+script = "printf '%g\\n' '-0'"
+stdout = "-0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "f_zero_padded_negative"
+script = "printf '%08.2f\\n' -3.5"
+stdout = "-0003.50\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "f_zero_padded_negative_narrow_width"
+script = "printf '%01.1f\\n' -3.5"
+stdout = "-3.5\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "strftime_year"
+script = "printf '%(%Y)T\\n' 1000000"
+stdout = "1970\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "strftime_invalid_number"
+script = "printf '%(%Y)T\\n' zz"
+stdout = "1970\n"
+stderr = "printf: zz: invalid number\n"
+exit_code = 1
+
+[[cases]]
+name = "strftime_left_aligned"
+script = "printf '%-8(%Y)T|\\n' 1000000"
+stdout = "1970    |\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "c_no_arg"
+script = "printf '%c\\n'"
+stdout = "\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "b_no_arg"
+script = "printf '%b\\n'"
+stdout = "\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "b_escapes"
+script = "printf '%b' '\\r\\\\\\a\\b\\f\\v'"
+stdout = "\r\\\u0007\u0008\u000C\u000B"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "b_hex_escape_without_digits"
+script = "printf '%b' '\\xz'"
+stdout = "\\xz"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "b_u_escape_without_digits"
+script = "printf '%b' '\\uz'"
+stdout = "\\uz"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "b_U_escape"
+script = "printf '%b' '\\U0001F600'"
+stdout = "\U0001F600"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "b_U_escape_without_digits"
+script = "printf '%b' '\\Uz'"
+stdout = "\\Uz"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "b_lone_zero_octal"
+script = "printf '%b' 'a\\0z'"
+stdout = "a\u0000z"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_no_arg_quotes_empty_string"
+script = "printf '%q\\n'"
+stdout = "''\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_left_aligned"
+script = "printf '%-6q|\\n' ab"
+stdout = "ab    |\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_control_char_uses_ansi_c_quoting"
+script = "printf '%q\\n' $'x\\ny'"
+stdout = "$'x\\ny'\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_escape_letters"
+script = "printf '%q\\n' $'\\t\\r\\a\\b\\f\\v\\e\\\\'"
+stdout = "$'\\t\\r\\a\\b\\f\\v\\E\\\\'\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_generic_control_char_octal"
+script = "printf '%q\\n' $'\\x01'"
+stdout = "$'\\001'\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "d_zero_precision_zero_value_is_empty"
+script = "printf '%.0d|\\n' 0"
+stdout = "|\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "octal_escape_above_0xff_decodes_as_codepoint"
+# GNU bash masks octal escapes to a byte (\\777 -> byte 0xFF); rust-bash
+# decodes the value as a Unicode codepoint (U+01FF). Suspected divergence.
+script = "printf '\\777\\n'"
+stdout = "ǿ\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_arg_with_valid_utf8_bytes_unquoted"
+# In the C locale (harness default LANG=C) GNU bash %q quotes non-ASCII bytes
+# ($'\303\251'); rust-bash emits é literally. Suspected divergence.
+script = "printf '%q\\n' \"$(printf '\\xc3\\xa9')\""
+stdout = "é\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_arg_with_invalid_byte_uses_octal"
+script = "printf '%q\\n' \"$(printf '\\xff')\""
+stdout = "$'\\377'\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "char_constant_with_truncated_utf8_uses_first_byte"
+script = "printf '%d\\n' \"'$(printf '\\xc3')\""
+stdout = "195\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "g_precision_one_scientific_mantissa_has_no_dot"
+script = "printf '%.1g\\n' 100"
+stdout = "1e+02\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "q_arg_with_utf8_bytes_and_space_stays_quoted"
+# Same locale caveat as q_arg_with_valid_utf8_bytes_unquoted: GNU bash in the
+# C locale would quote the é bytes as octal escapes.
+script = "printf '%q\\n' $'\\xc3\\xa9 x'"
+stdout = "$'é x'\n"
+stderr = ""
+exit_code = 0

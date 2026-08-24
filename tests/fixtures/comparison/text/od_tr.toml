@@ -1,0 +1,134 @@
+# od / tr: formats, operands, escapes, error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "od_default_format_is_octal_bytes"
+# GNU od defaults to 2-byte octal units ("-t o2"); rust-bash dumps per-byte octal.
+script = 'printf "AB" | od'
+stdout = "0000000 101 102\n0000002\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "od_hex_no_address"
+script = 'printf "AB" | od -An -tx1'
+stdout = " 41 42\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "od_c_format_control_bytes"
+script = 'printf "\a\b\f" | od -An -c'
+stdout = "  \\a  \\b  \\f\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "od_file_operand"
+script = "od -An -tx1 /t/od.bin"
+stdout = " 41 42\n"
+stderr = ""
+exit_code = 0
+files = { "/t/od.bin" = "AB" }
+
+[[cases]]
+name = "od_dash_reads_stdin"
+script = 'printf "AB" | od -An -tx1 -'
+stdout = " 41 42\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "od_dev_stdin_operand"
+script = 'printf "AB" | od -An -tx1 /dev/stdin'
+stdout = " 41 42\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "od_dev_zero_uses_empty_stdin"
+# Real od /dev/zero dumps an endless stream of NUL bytes; rust-bash models
+# /dev/zero as empty stdin here. Suspected divergence (deliberate VFS fiction).
+script = "od -An -tx1 /dev/zero"
+stdout = ""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "od_missing_file"
+script = "od /nope"
+stdout = ""
+stderr = "od: /nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "od_herestring_with_raw_byte"
+script = 'od -An -tx1 <<< "$(printf "\xff")"'
+stdout = " ff 0a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_dash_dash"
+script = 'printf "ab\n" | tr -- a x'
+stdout = "xb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_unknown_flag_ignored"
+# GNU tr rejects -z as an invalid option; rust-bash silently ignores unknown flags.
+script = 'printf "ab\n" | tr -z a x'
+stdout = "xb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_single_set_maps_chars_to_themselves"
+# GNU tr errors with "missing operand" for a single set without -d/-s;
+# rust-bash treats it as an identity translation. Suspected divergence.
+script = 'printf "aaa\n" | tr a'
+stdout = "aaa\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_squeeze_after_translation"
+script = 'printf "aabb\n" | tr -s a b'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_reversed_range_is_literal"
+# GNU tr errors on a reversed range ("invalid range end"); rust-bash treats
+# the range literally. Suspected divergence.
+script = 'printf "z-a\n" | tr "z-a" x'
+stdout = "xxx\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_tab_escape"
+script = 'printf "a\tb\n" | tr "\t" X'
+stdout = "aXb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_cr_escape"
+script = 'printf "a\rb\n" | tr "\r" X'
+stdout = "aXb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tr_backslash_escape"
+script = "printf 'a\\\\b\\n' | tr '\\\\' X"
+stdout = "aXb\n"
+stderr = ""
+exit_code = 0

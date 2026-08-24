@@ -1,0 +1,61 @@
+# strings: flag forms, input sources, run flushing, error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "strings_n_separate"
+script = "strings -n 2 /t/s.bin"
+stdout = "ab\ncd\n"
+stderr = ""
+exit_code = 0
+files = { "/t/s.bin" = "ab\u0000cd" }
+
+[[cases]]
+name = "strings_n_attached"
+script = "strings -n2 /t/s.bin"
+stdout = "ab\ncd\n"
+stderr = ""
+exit_code = 0
+files = { "/t/s.bin" = "ab\u0000cd" }
+
+[[cases]]
+name = "strings_a_flag_is_noop"
+script = "strings -a -n2 /t/s.bin"
+stdout = "ab\ncd\n"
+stderr = ""
+exit_code = 0
+files = { "/t/s.bin" = "ab\u0000cd" }
+
+[[cases]]
+name = "strings_stdin_default"
+script = "strings -n2"
+stdout = "ab\ncd\n"
+stderr = ""
+exit_code = 0
+stdin = "ab\u0000cd"
+
+[[cases]]
+name = "strings_dash_reads_stdin"
+script = "strings -n2 -"
+stdout = "ab\ncd\n"
+stderr = ""
+exit_code = 0
+stdin = "ab\u0000cd"
+
+[[cases]]
+name = "strings_trailing_run_flushed_at_eof"
+script = "strings /t/s.bin"
+stdout = "abcd\n"
+stderr = ""
+exit_code = 0
+files = { "/t/s.bin" = "abcd" }
+
+[[cases]]
+name = "strings_missing_file"
+script = "strings /nope"
+stdout = ""
+stderr = "strings: /nope: No such file or directory: /nope\n"
+exit_code = 1

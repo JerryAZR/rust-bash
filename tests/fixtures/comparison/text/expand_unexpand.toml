@@ -1,0 +1,132 @@
+# expand / unexpand: tab-stop specs, conversion paths, error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "expand_dash_dash"
+script = 'printf "a\tb\n" | expand --'
+stdout = "a       b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "expand_t_attached"
+script = 'printf "\tx\n" | expand -t4'
+stdout = "    x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "expand_missing_file"
+script = "expand /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "expand_empty_tab_list_falls_back_to_8"
+# GNU expand errors on an empty -t list; rust-bash falls back to tab width 8.
+# Suspected divergence.
+script = 'printf "\tx\n" | expand -t ,'
+stdout = "        x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "expand_nonnumeric_tab_falls_back_to_8"
+# GNU expand errors on a non-numeric -t value; rust-bash falls back to 8.
+# Suspected divergence.
+script = 'printf "\tx\n" | expand -t abc'
+stdout = "        x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "expand_zero_tab_falls_back_to_8"
+# GNU expand errors on -t 0; rust-bash falls back to 8. Suspected divergence.
+script = 'printf "\tx\n" | expand -t 0'
+stdout = "        x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "expand_past_last_explicit_stop_repeats_interval"
+script = 'printf "12345678901\tx\n" | expand -t 4,8'
+stdout = "12345678901 x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "expand_single_stop_list_past_stop"
+script = 'printf "1234567\tx\n" | expand -t 5,'
+stdout = "1234567   x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unexpand_dash_dash"
+script = 'printf "        x\n" | unexpand --'
+stdout = "\tx\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unexpand_t_attached_implies_all"
+script = 'printf "    x\n" | unexpand -t4'
+stdout = "\tx\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unexpand_file_operand"
+script = "unexpand /t/u.txt"
+stdout = "\tx\n"
+stderr = ""
+exit_code = 0
+files = { "/t/u.txt" = "        x\n" }
+
+[[cases]]
+name = "unexpand_zero_tab_width_falls_back_to_8"
+# GNU unexpand errors on -t 0; rust-bash falls back to 8. Suspected divergence.
+script = 'printf "        x\n" | unexpand -t 0'
+stdout = "\tx\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unexpand_missing_file"
+script = "unexpand /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "unexpand_partial_leading_spaces_kept"
+script = 'printf "  x\n" | unexpand'
+stdout = "  x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unexpand_line_of_only_spaces_kept"
+script = 'printf "   \n" | unexpand'
+stdout = "   \n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unexpand_all_mid_line_spaces_not_on_tab_stop"
+script = 'printf "ab  cd\n" | unexpand -a'
+stdout = "ab  cd\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unexpand_all_trailing_spaces_kept"
+script = 'printf "ab   \n" | unexpand -a'
+stdout = "ab   \n"
+stderr = ""
+exit_code = 0

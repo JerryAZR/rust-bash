@@ -1,0 +1,190 @@
+# grep: long-option forms, combined-flag values, error paths, recursion edge cases
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "long_after_context_equals"
+script = 'printf "l1\nm\nl3\nl4\nl5\n" | grep --after-context=2 m'
+stdout = "m\nl3\nl4\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "long_before_context_equals"
+script = 'printf "l1\nm\nl3\nl4\nl5\n" | grep --before-context=2 m'
+stdout = "l1\nm\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "long_max_count_equals"
+script = 'printf "a\na\na\n" | grep --max-count=1 a'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "long_file_equals"
+script = "grep --file=/t/pats.txt /t/data.txt"
+stdout = "apple\ncherry\n"
+stderr = ""
+exit_code = 0
+files = { "/t/pats.txt" = "apple\ncherry\n", "/t/data.txt" = "apple\nbanana\ncherry\n" }
+
+[[cases]]
+name = "long_basic_regexp"
+script = 'printf "aab\nab\nb\n" | grep --basic-regexp "a\\+b"'
+stdout = "aab\nab\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "long_perl_regexp_warns"
+script = 'printf "hello\nworld\n" | grep --perl-regexp hello'
+stdout = "hello\n"
+stderr = "grep: warning: -P is not fully supported, using extended regex\n"
+exit_code = 0
+
+[[cases]]
+name = "combined_A_attached"
+script = 'printf "x\nm\ny\n" | grep -A1 m'
+stdout = "m\ny\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "combined_B_attached"
+script = 'printf "x\nm\ny\n" | grep -B1 m'
+stdout = "x\nm\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "combined_C_attached"
+script = 'printf "x\nm\ny\n" | grep -C1 m'
+stdout = "x\nm\ny\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "combined_m_attached"
+script = 'printf "a\na\n" | grep -m1 a'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "combined_f_attached"
+script = "grep -f/t/pats.txt /t/data.txt"
+stdout = "apple\ncherry\n"
+stderr = ""
+exit_code = 0
+files = { "/t/pats.txt" = "apple\ncherry\n", "/t/data.txt" = "apple\nbanana\ncherry\n" }
+
+[[cases]]
+name = "invalid_short_option"
+script = "grep -Z foo /t/data.txt"
+stdout = ""
+stderr = "grep: invalid option -- 'Z'\n"
+exit_code = 2
+files = { "/t/data.txt" = "foo\n" }
+
+[[cases]]
+name = "missing_flag_argument"
+script = 'printf "x\n" | grep -A'
+stdout = ""
+# GNU grep prints "option requires an argument -- 'A'" (no dash); rust-bash includes the dash.
+stderr = "grep: option requires an argument -- '-A'\n"
+exit_code = 2
+
+[[cases]]
+name = "invalid_num_argument"
+script = 'printf "x\n" | grep -A xyz foo'
+stdout = ""
+stderr = "grep: invalid argument 'xyz' for '-A'\n"
+exit_code = 2
+
+[[cases]]
+name = "recursive_deleted_cwd"
+script = 'mkdir -p /t/gone; cd /t/gone; rmdir /t/gone; grep -r foo'
+stdout = ""
+stderr = "grep: /t/gone: No such file or directory: /t/gone\n"
+exit_code = 2
+
+[[cases]]
+name = "recursive_no_files_searches_cwd"
+script = "grep -rl needlexyzabc"
+stdout = "/t/unique.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/t/unique.txt" = "needlexyzabc\n" }
+
+[[cases]]
+name = "dash_file_reads_stdin"
+script = 'printf "foo\nbar\n" | grep foo -'
+stdout = "foo\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "recursive_nonexistent_path"
+script = "grep -r foo /nope"
+stdout = ""
+stderr = "grep: /nope: No such file or directory: /nope\n"
+exit_code = 2
+
+[[cases]]
+name = "recursive_include_skips_explicit_file"
+script = "grep -r --include=*.md foo /t/data.txt"
+stdout = ""
+stderr = ""
+exit_code = 1
+files = { "/t/data.txt" = "foo\n" }
+
+[[cases]]
+name = "recursive_skips_symlinks"
+script = 'ln -s /t/sym/data.txt /t/sym/link.txt; grep -r apple /t/sym'
+stdout = "/t/sym/data.txt:apple\n"
+stderr = ""
+exit_code = 0
+files = { "/t/sym/data.txt" = "apple\n" }
+
+[[cases]]
+name = "pattern_file_missing"
+script = "grep -f /nope foo /t/data.txt"
+stdout = ""
+stderr = "grep: /nope: No such file or directory: /nope\n"
+exit_code = 2
+files = { "/t/data.txt" = "foo\n" }
+
+[[cases]]
+name = "invalid_regex"
+script = 'printf "x\n" | grep -E "("'
+stdout = ""
+stderr_contains = "grep: invalid regex:"
+exit_code = 2
+
+[[cases]]
+name = "only_matching_with_invert_prints_nothing"
+script = 'printf "abc\nxyz\n" | grep -ov b'
+stdout = ""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "only_matching_with_line_numbers"
+script = 'printf "abc123\n" | grep -onE "[0-9]+"'
+stdout = "1:123\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "count_multiple_files_shows_filenames"
+script = "grep -c apple /t/d1.txt /t/d2.txt"
+stdout = "/t/d1.txt:1\n/t/d2.txt:2\n"
+stderr = ""
+exit_code = 0
+files = { "/t/d1.txt" = "apple\nx\n", "/t/d2.txt" = "apple\napple\n" }

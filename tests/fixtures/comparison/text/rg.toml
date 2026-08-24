@@ -1,0 +1,213 @@
+# rg: type filters, globs, gitignore, hidden/binary/symlink skipping, output modes, error paths
+
+[[cases]]
+name = "type_filter_py"
+script = "rg foo -t py /t/rg"
+stdout = "/t/rg/a.py:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rg/a.py" = "foo\n", "/t/rg/q.txt" = "foo\n" }
+
+[[cases]]
+name = "type_filter_all_arms"
+script = '''
+rg -t js foo /t/rg
+rg -t ts foo /t/rg
+rg -t rs foo /t/rg
+rg -t go foo /t/rg
+rg -t c foo /t/rg
+rg -t cpp foo /t/rg
+rg -t java foo /t/rg
+rg -t rb foo /t/rg
+rg -t sh foo /t/rg
+rg -t html foo /t/rg
+rg -t css foo /t/rg
+rg -t json foo /t/rg
+rg -t yaml foo /t/rg
+rg -t xml foo /t/rg
+rg -t md foo /t/rg
+rg -t txt foo /t/rg
+rg -t toml foo /t/rg
+'''
+stdout = "/t/rg/b.js:1:foo\n/t/rg/c.ts:1:foo\n/t/rg/d.rs:1:foo\n/t/rg/e.go:1:foo\n/t/rg/f.c:1:foo\n/t/rg/g.cpp:1:foo\n/t/rg/h.java:1:foo\n/t/rg/i.rb:1:foo\n/t/rg/j.sh:1:foo\n/t/rg/k.html:1:foo\n/t/rg/l.css:1:foo\n/t/rg/m.json:1:foo\n/t/rg/n.yaml:1:foo\n/t/rg/o.xml:1:foo\n/t/rg/p.md:1:foo\n/t/rg/q.txt:1:foo\n/t/rg/r.toml:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rg/b.js" = "foo\n", "/t/rg/c.ts" = "foo\n", "/t/rg/d.rs" = "foo\n", "/t/rg/e.go" = "foo\n", "/t/rg/f.c" = "foo\n", "/t/rg/g.cpp" = "foo\n", "/t/rg/h.java" = "foo\n", "/t/rg/i.rb" = "foo\n", "/t/rg/j.sh" = "foo\n", "/t/rg/k.html" = "foo\n", "/t/rg/l.css" = "foo\n", "/t/rg/m.json" = "foo\n", "/t/rg/n.yaml" = "foo\n", "/t/rg/o.xml" = "foo\n", "/t/rg/p.md" = "foo\n", "/t/rg/q.txt" = "foo\n", "/t/rg/r.toml" = "foo\n" }
+
+[[cases]]
+name = "type_filter_unknown_type_matches_nothing"
+script = "rg -t zz foo /t/rg"
+stdout = ""
+stderr = ""
+exit_code = 1
+files = { "/t/rg/q.txt" = "foo\n" }
+
+[[cases]]
+name = "type_exclude"
+script = "rg -T py foo /t/rgx"
+stdout = "/t/rgx/a.txt:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "type_equals_long_form"
+script = "rg --type=py foo /t/rgx"
+stdout = "/t/rgx/b.py:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "glob_include"
+script = "rg -g '*.py' foo /t/rgx"
+stdout = "/t/rgx/b.py:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "glob_attached"
+script = "rg -g'*.py' foo /t/rgx"
+stdout = "/t/rgx/b.py:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "glob_negation"
+script = "rg -g '!*.py' foo /t/rgx"
+stdout = "/t/rgx/a.txt:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "combined_short_flags"
+script = "rg -in FOO /t/rgx"
+stdout = "/t/rgx/a.txt:1:foo\n/t/rgx/b.py:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "no_pattern_is_error"
+script = "rg"
+stdout = ""
+stderr = "rg: no pattern given\n"
+exit_code = 2
+
+[[cases]]
+name = "word_regexp"
+script = "rg -w foo /t/rgw"
+stdout = "/t/rgw/w.txt:1:foo bar\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgw/w.txt" = "foo bar\nfoobar\n" }
+
+[[cases]]
+name = "invalid_regex"
+script = "rg '(' /t/rgx"
+stdout = ""
+stderr_contains = "rg: regex error:"
+exit_code = 2
+files = { "/t/rgx/a.txt" = "foo\n" }
+
+[[cases]]
+name = "default_path_is_cwd"
+# GNU rg prints paths relative to the search root ("./t/..."); rust-bash keeps
+# the resolved absolute prefix ("/./t/..."). Suspected divergence.
+script = "rg foo"
+stdout = "/./t/rgx/a.txt:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n" }
+
+[[cases]]
+name = "nonexistent_path_ignored"
+# Real rg reports an error and exits 2 for a nonexistent path; rust-bash
+# silently skips it and exits 1 (no matches). Suspected divergence.
+script = "rg foo /nope"
+stdout = ""
+stderr = ""
+exit_code = 1
+
+[[cases]]
+name = "vimgrep_format"
+script = "rg --vimgrep foo /t/rgx/a.txt"
+stdout = "/t/rgx/a.txt:1:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n" }
+
+[[cases]]
+name = "no_line_numbers"
+script = "rg -N foo /t/rgx/a.txt"
+stdout = "/t/rgx/a.txt:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n" }
+
+[[cases]]
+name = "count_mode"
+script = "rg -c foo /t/rgx"
+stdout = "/t/rgx/a.txt:2\n/t/rgx/b.py:1\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\nfoo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "files_only"
+script = "rg -l foo /t/rgx"
+stdout = "/t/rgx/a.txt\n/t/rgx/b.py\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n", "/t/rgx/b.py" = "foo\n" }
+
+[[cases]]
+name = "gitignore_and_hidden_and_dir_patterns"
+script = "rg foo /t/rgi"
+stdout = "/t/rgi/a.txt:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/.gitignore" = "# comment\n\n*.log\nskipdir/\n", "/t/rgi/a.txt" = "foo\n", "/t/rgi/app.log" = "foo\n", "/t/rgi/.secret" = "foo\n", "/t/rgi/skipdir/f.txt" = "foo\n" }
+
+[[cases]]
+name = "binary_files_skipped"
+script = "rg foo /t/rgb"
+stdout = ""
+stderr = ""
+exit_code = 1
+files = { "/t/rgb/bin.dat" = "foo\u0000bar" }
+
+[[cases]]
+name = "symlinks_skipped"
+script = 'ln -s /t/rgs/real.txt /t/rgs/link.txt; rg foo /t/rgs'
+stdout = "/t/rgs/real.txt:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgs/real.txt" = "foo\n" }
+
+[[cases]]
+name = "combined_short_flags_lw"
+script = "rg -lw foo /t/rgw"
+stdout = "/t/rgw/w.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgw/w.txt" = "foo bar\nfoobar\n" }
+
+[[cases]]
+name = "combined_short_flags_cw"
+script = "rg -cw foo /t/rgw"
+stdout = "/t/rgw/w.txt:1\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgw/w.txt" = "foo bar\nfoobar\n" }
+
+[[cases]]
+name = "combined_short_flags_unknown_letter_ignored"
+script = "rg -z foo /t/rgx"
+stdout = "/t/rgx/a.txt:1:foo\n"
+stderr = ""
+exit_code = 0
+files = { "/t/rgx/a.txt" = "foo\n" }
