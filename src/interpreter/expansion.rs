@@ -396,6 +396,8 @@ fn push_segment(words: &mut Vec<WordInProgress>, text: &str, quoted: bool, glob_
         return;
     }
     if words.is_empty() {
+        // Defensive: every caller seeds `words` with one empty word and only
+        // ever appends (start_new_word), so this cannot actually happen.
         words.push(Vec::new());
     }
     let word = words.last_mut().unwrap();
@@ -417,6 +419,7 @@ fn push_segment(words: &mut Vec<WordInProgress>, text: &str, quoted: bool, glob_
 
 fn push_synthetic_empty_segment(words: &mut Vec<WordInProgress>) {
     if words.is_empty() {
+        // Defensive: see push_segment — `words` is always non-empty here.
         words.push(Vec::new());
     }
     words.last_mut().unwrap().push(Segment {
@@ -623,6 +626,9 @@ fn execute_command_substitution(
     // substitution still preserves the visible text portion instead of
     // collapsing to the empty string.
     let mut output = if let Some(bytes) = result.stdout_bytes.take() {
+        // Defensive: execute_pipeline always converts binary output to a
+        // lossy string at the pipeline boundary (stdout_bytes: None in the
+        // returned ExecResult), so a program result never carries bytes.
         crate::shell_bytes::decode_shell_bytes(&bytes)
     } else {
         result.stdout
@@ -635,6 +641,8 @@ fn execute_command_substitution(
 
 fn validate_unparsed_dollar_brace_word(word: &str) -> Result<(), RustBashError> {
     if !(word.starts_with("${") && word.ends_with('}')) {
+        // Unreachable: both callers (expand_word_segments and its _mut
+        // variant) gate the call on exactly this condition.
         return Ok(());
     }
 
@@ -723,6 +731,9 @@ fn expand_word_piece(
                     push_segment(words, c, true, true);
                 }
             } else {
+                // brush-parser's escape_sequence rules always capture the
+                // leading backslash, so an EscapeSequence piece without one
+                // cannot be produced.
                 push_segment(words, s, true, true);
             }
         }
@@ -916,6 +927,8 @@ fn expand_parameter(
                 if let Some(dv) = default_value {
                     expand_raw_into_words(dv, words, state, in_dq)?;
                 }
+                // No else: brush's parameter_expression_word rule matches
+                // empty text, so default_value is always Some (possibly "").
             } else {
                 push_expanded_parameter_value(parameter, *indirect, &val, words, state, in_dq);
             }
@@ -938,6 +951,8 @@ fn expand_parameter(
                     let expanded = expand_raw_string_ctx(dv, state, in_dq)?;
                     push_segment(words, &expanded, in_dq, in_dq);
                 }
+                // No else: the parser always yields Some (possibly empty)
+                // for the default word.
             } else {
                 push_expanded_parameter_value(parameter, *indirect, &val, words, state, in_dq);
             }
@@ -957,6 +972,9 @@ fn expand_parameter(
                 let msg = if let Some(raw) = error_message {
                     expand_raw_string_ctx(raw, state, in_dq)?
                 } else {
+                    // Unreachable: brush's parameter_expression_word rule
+                    // matches empty text, so `${x:?}` yields Some(""),
+                    // never None.
                     "parameter null or not set".to_string()
                 };
                 return Err(RustBashError::ExpansionError {
@@ -1021,6 +1039,8 @@ fn expand_parameter(
                         val
                     }
                 } else {
+                    // brush yields Some (possibly empty) for the `${v%}`
+                    // empty-pattern form, so `pattern` is never None.
                     val
                 };
                 push_segment(words, &result, in_dq, in_dq);
@@ -1060,6 +1080,7 @@ fn expand_parameter(
                         val
                     }
                 } else {
+                    // Never None: see RemoveSmallestSuffixPattern above.
                     val
                 };
                 push_segment(words, &result, in_dq, in_dq);
@@ -1099,6 +1120,7 @@ fn expand_parameter(
                         val
                     }
                 } else {
+                    // Never None: see RemoveSmallestSuffixPattern above.
                     val
                 };
                 push_segment(words, &result, in_dq, in_dq);
@@ -1138,6 +1160,7 @@ fn expand_parameter(
                         val
                     }
                 } else {
+                    // Never None: see RemoveSmallestSuffixPattern above.
                     val
                 };
                 push_segment(words, &result, in_dq, in_dq);
@@ -1516,6 +1539,10 @@ fn expand_parameter_mut(
             default_value,
         } => {
             let val = resolve_parameter_maybe_mut(parameter, state, *indirect)?;
+            // The `?` on the call below cannot fire: the only fallible
+            // resolution is for NamedWithIndex parameters, which the resolve
+            // call above already performed (and propagated) for the same
+            // parameter.
             let use_default = should_use_default_for_parameter_mut(
                 parameter, *indirect, &val, test_type, state, in_dq,
             )?;
@@ -1523,6 +1550,8 @@ fn expand_parameter_mut(
                 if let Some(raw) = default_value {
                     expand_raw_into_words_mut(raw, words, state, in_dq)?;
                 }
+                // No else: brush's parameter_expression_word rule matches
+                // empty text, so default_value is always Some (possibly "").
             } else {
                 push_expanded_parameter_value(parameter, *indirect, &val, words, state, in_dq);
             }
@@ -1535,6 +1564,8 @@ fn expand_parameter_mut(
             default_value,
         } => {
             let val = resolve_parameter_maybe_mut(parameter, state, *indirect)?;
+            // The `?` on the call below cannot fire: see the UseDefaultValues
+            // arm above.
             let use_default = should_use_default_for_parameter_mut(
                 parameter, *indirect, &val, test_type, state, in_dq,
             )?;
@@ -1543,6 +1574,8 @@ fn expand_parameter_mut(
                 let dv = if let Some(raw) = default_value {
                     expand_raw_string_mut_ctx(raw, state, in_dq)?
                 } else {
+                    // Unreachable: the parser always yields Some (possibly
+                    // empty) for the default word.
                     String::new()
                 };
                 assign_default_to_parameter(parameter, *indirect, &dv, state)?;
@@ -1559,6 +1592,8 @@ fn expand_parameter_mut(
             error_message,
         } => {
             let val = resolve_parameter_maybe_mut(parameter, state, *indirect)?;
+            // The `?` on the call below cannot fire: see the UseDefaultValues
+            // arm above.
             let use_default = should_use_default_for_parameter_mut(
                 parameter, *indirect, &val, test_type, state, in_dq,
             )?;
@@ -1567,6 +1602,8 @@ fn expand_parameter_mut(
                 let msg = if let Some(raw) = error_message {
                     expand_raw_string_mut_ctx(raw, state, in_dq)?
                 } else {
+                    // Unreachable: see the immutable IndicateErrorIfNullOrUnset
+                    // arm — the parser never yields a None error message.
                     "parameter null or not set".to_string()
                 };
                 return Err(RustBashError::ExpansionError {
@@ -1585,6 +1622,8 @@ fn expand_parameter_mut(
             alternative_value,
         } => {
             let val = resolve_parameter_maybe_mut(parameter, state, *indirect)?;
+            // The `?` on the call below cannot fire: see the UseDefaultValues
+            // arm above.
             let use_default = should_use_default_for_parameter_mut(
                 parameter, *indirect, &val, test_type, state, in_dq,
             )?;
@@ -2460,8 +2499,10 @@ fn expand_escape_sequences(val: &str) -> String {
                         if let Some(c) = shell_char_from_byte_escape(byte) {
                             result.push(c);
                         }
+                        // No else: the byte is masked to 0xff above, and
+                        // every value <= 0xff decodes to Some char, so the
+                        // None case cannot occur.
                     }
-                    // Invalid codepoints (e.g. surrogates \uD800) silently produce nothing, matching bash.
                 }
                 'u' => {
                     // \uHHHH — unicode escape (up to 4 hex digits)
@@ -2550,6 +2591,7 @@ fn shell_char_from_byte_escape(value: u32) -> Option<char> {
             .chars()
             .next()
     } else {
+        // Unreachable: both callers mask the value with `& 0xff`.
         None
     }
 }
@@ -2655,6 +2697,8 @@ fn format_assignment(name: &str, state: &InterpreterState) -> String {
     let resolved = crate::interpreter::resolve_nameref_or_self(name, state);
     let var = match state.env.get(&resolved) {
         Some(v) => v,
+        // Unreachable: callers gate @A on parameter_variable_exists, which
+        // checks this same resolved env entry.
         None => return String::new(),
     };
 
@@ -2723,6 +2767,7 @@ fn format_attribute_flags(name: &str, state: &InterpreterState) -> String {
     let resolved = crate::interpreter::resolve_nameref_or_self(name, state);
     let var = match state.env.get(&resolved) {
         Some(v) => v,
+        // Unreachable: same gating as format_assignment above.
         None => return String::new(),
     };
     let mut flags = String::new();
@@ -2872,6 +2917,10 @@ fn validate_parameter_name(parameter: &Parameter) -> Result<(), RustBashError> {
             || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             || name.starts_with(|c: char| c.is_ascii_digit()))
     {
+        // Defensive: brush-parser only builds Parameter::Named from valid
+        // identifier text (malformed `${...}` falls back to literal Text),
+        // and parse_indirect_target_parameter builds Named only from
+        // targets already checked by is_valid_indirect_target.
         return Err(RustBashError::Execution(format!(
             "${{{name}}}: bad substitution"
         )));
@@ -2926,6 +2975,9 @@ fn validate_length_transform_syntax(word: &str) -> Result<(), RustBashError> {
                 i = j + 1;
                 continue;
             }
+            // Falling through here means the `${#` had no closing `}`; the
+            // command parser rejects unterminated `${...` before word
+            // expansion ever runs, so shell input cannot reach this path.
         }
         i += 1;
     }
@@ -3117,6 +3169,8 @@ fn validate_indirect_reference(
 /// Valid: empty, simple var name, arr[idx], numeric (positional), @, *, #, ?, -, $, !
 fn is_valid_indirect_target(target: &str) -> bool {
     if target.is_empty() {
+        // The only caller (validate_indirect_reference) guards on
+        // `!val.is_empty()` before calling, so this arm is defensive.
         return true;
     }
     // Special params
@@ -3219,7 +3273,9 @@ fn resolve_indirect_value(target: &str, state: &InterpreterState) -> String {
         "$" => "1".to_string(),
         "!" => String::new(),
         _ => {
-            // Validate that the target is a valid variable name.
+            // Defensive: validate_indirect_reference already rejected every
+            // invalid indirect target before resolution, so a target that
+            // reaches here is always a valid variable name.
             if !target
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -3237,6 +3293,10 @@ fn resolve_parameter_direct(parameter: &Parameter, state: &InterpreterState) -> 
         Parameter::Named(name) => resolve_named_var(name, state),
         Parameter::Positional(n) => {
             if *n == 0 {
+                // Unreachable: brush parses `$0`/`${0}` as
+                // SpecialParameter::ShellName (Positional starts at 1), and
+                // parse_indirect_target_parameter's Positional(0) is never
+                // fed back into this function.
                 state.shell_name.clone()
             } else {
                 state
@@ -3350,6 +3410,10 @@ fn resolve_array_element_mut(
                 if let VariableValue::AssociativeArray(map) = &v.value {
                     map.get(&key).cloned()
                 } else {
+                    // Unreachable: `is_assoc` was computed from this same env
+                    // entry, and the intervening index expansion cannot
+                    // change a variable's type (command substitution runs on
+                    // a cloned sub-state, string expansion cannot assign).
                     None
                 }
             })
@@ -3389,6 +3453,8 @@ fn resolve_array_element_mut(
                     String::new()
                 }
             }
+            // Unreachable: associative arrays take the `is_assoc` early
+            // return above, and VariableValue has no other variants.
             _ => String::new(),
         })
         .unwrap_or_default();
@@ -3441,6 +3507,8 @@ fn resolve_call_stack_element(name: &str, index: &str, state: &InterpreterState)
             "FUNCNAME" => frame.func_name.clone(),
             "BASH_SOURCE" => frame.source.clone(),
             "BASH_LINENO" => frame.lineno.to_string(),
+            // Unreachable: `name` is restricted to these three call-stack
+            // arrays at function entry.
             _ => String::new(),
         })
     } else {
@@ -3449,6 +3517,7 @@ fn resolve_call_stack_element(name: &str, index: &str, state: &InterpreterState)
             "FUNCNAME" => "main".to_string(),
             "BASH_SOURCE" => state.script_source.clone().unwrap_or_default(),
             "BASH_LINENO" => "0".to_string(),
+            // Unreachable: same `name` restriction as above.
             _ => String::new(),
         })
     }
@@ -3701,6 +3770,10 @@ fn get_array_kv_pairs(parameter: &Parameter, state: &InterpreterState) -> Vec<(u
                 }
             }
         }
+        // This positional arm (and the fallback below) is unreachable: the
+        // sole caller (expand_parameter_mut's Substring arm) handles
+        // positional parameters in an earlier branch and only calls here
+        // for NamedWithAllIndices parameters.
         Parameter::Special(SpecialParameter::AllPositionalParameters { .. }) => state
             .positional_params
             .iter()
@@ -3812,6 +3885,9 @@ fn compute_shellopts(state: &InterpreterState) -> String {
         opts.push("noclobber");
     }
     if state.shell_opts.noexec {
+        // Unreachable in practice: once `set -n` takes effect the walker
+        // skips every subsequent command, so no expansion can observe
+        // SHELLOPTS with noexec set.
         opts.push("noexec");
     }
     if state.shell_opts.noglob {
@@ -4006,6 +4082,9 @@ pub(crate) fn resolve_call_stack_scalar(name: &str, state: &InterpreterState) ->
         "FUNCNAME" => frame.func_name.clone(),
         "BASH_SOURCE" => frame.source.clone(),
         "BASH_LINENO" => frame.lineno.to_string(),
+        // Unreachable: both callers (resolve_named_var and arithmetic's
+        // resolve_var_recursive) restrict `name` to the three call-stack
+        // arrays.
         _ => String::new(),
     }
 }
@@ -4047,6 +4126,9 @@ fn resolve_special(sp: &SpecialParameter, state: &InterpreterState) -> String {
                 flags.push('i');
             }
             if state.shell_opts.noexec {
+                // Unreachable in practice: same reasoning as the noexec arm
+                // of compute_shellopts — `$-` cannot be expanded after
+                // `set -n` takes effect.
                 flags.push('n');
             }
             if state.shell_opts.nounset {
@@ -4306,6 +4388,9 @@ fn resolve_array_assignment_index(
     let max_key = state.env.get(&resolved_name).and_then(|v| match &v.value {
         crate::interpreter::VariableValue::IndexedArray(map) => map.keys().next_back().copied(),
         crate::interpreter::VariableValue::Scalar(_) => Some(0),
+        // Unreachable: the caller (assign_default_to_parameter) routes
+        // associative arrays to the set_assoc_element branch, so the value
+        // here is never an associative array.
         _ => None,
     });
 
@@ -4595,6 +4680,14 @@ fn parameter_name(parameter: &Parameter) -> String {
         Parameter::Named(name) => name.clone(),
         Parameter::Positional(n) => n.to_string(),
         Parameter::Special(sp) => match sp {
+            // parameter_name is only used in error messages (IndicateError,
+            // nounset, invalid-indirect-expansion). These special arms are
+            // unreachable: their values are always non-empty (exit status,
+            // parameter count, shell pid, shell name, option flags), so
+            // neither IndicateError nor nounset can fire for them; `$!`
+            // additionally can never form an IndicateError expression
+            // because the parser's parameter_indirection greedily consumes
+            // the `!`.
             SpecialParameter::LastExitStatus => "?".to_string(),
             SpecialParameter::PositionalParameterCount => "#".to_string(),
             SpecialParameter::AllPositionalParameters { concatenate } => {
@@ -4962,6 +5055,9 @@ fn expand_replacement_string(
                                 }
                             }
                         }
+                        // No else for a trailing backslash: brush rejects
+                        // unterminated ANSI-C quotes before expansion, so a
+                        // `$'` escape never ends the replacement text.
                     } else {
                         result.push(ch);
                     }
@@ -5224,6 +5320,8 @@ mod tests {
                 pattern: Some(pattern),
                 ..
             }) => pattern,
+            // Only fires if brush-parser changes how `${foo%c  d}` parses —
+            // i.e. the test itself is failing.
             other => panic!("unexpected parse result: {other:?}"),
         };
         assert_eq!(pattern, "c  d");
@@ -5254,18 +5352,22 @@ mod tests {
         let pipeline = &program.complete_commands[0].0[0].0.first;
         let cmd = match &pipeline.seq[0] {
             ast::Command::Simple(simple) => simple,
+            // Only fires on a parser regression (the input is a simple
+            // command); the test would fail anyway.
             other => panic!("unexpected command: {other:?}"),
         };
 
         let suffix = cmd.suffix.as_ref().unwrap();
         let second = match &suffix.0[0] {
             ast::CommandPrefixOrSuffixItem::Word(word) => word,
+            // Only fires on a parser regression; see above.
             other => panic!("unexpected suffix item: {other:?}"),
         };
         assert_eq!(second.value, "\"${foo%c d}\"");
 
         let third = match &suffix.0[1] {
             ast::CommandPrefixOrSuffixItem::Word(word) => word,
+            // Only fires on a parser regression; see above.
             other => panic!("unexpected suffix item: {other:?}"),
         };
         assert_eq!(third.value, "\"${foo%c  d}\"");
