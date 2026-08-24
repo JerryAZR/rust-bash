@@ -26,7 +26,6 @@ use super::vfs_dir::{map_err, map_metadata, resolve_time_spec};
 pub(crate) struct VfsFile {
     fs: Arc<dyn VirtualFs>,
     path: PathBuf,
-    readable: bool,
     writable: bool,
     append: bool,
     cursor: Mutex<u64>,
@@ -36,10 +35,9 @@ pub(crate) struct VfsFile {
 }
 
 impl VfsFile {
-    pub fn new(
+    pub(crate) fn new(
         fs: Arc<dyn VirtualFs>,
         path: PathBuf,
-        readable: bool,
         writable: bool,
         append: bool,
         cursor: u64,
@@ -48,7 +46,6 @@ impl VfsFile {
         Self {
             fs,
             path,
-            readable,
             writable,
             append,
             cursor: Mutex::new(cursor),
@@ -57,33 +54,21 @@ impl VfsFile {
     }
 
     fn read_all(&self) -> Result<Vec<u8>, Error> {
-        if !self.readable {
-            return Err(Error::badf().context("file not opened for reading"));
-        }
         self.fs.read_file(&self.path).map_err(map_err)
     }
 
-    /// Copy `src` into `bufs`, returning the number of bytes copied.
+    /// Copy `src` from `offset` into `bufs` (std `Read::read_vectored` on
+    /// the remaining slice: fills buffers sequentially until exhausted).
     fn fill_bufs(src: &[u8], offset: u64, bufs: &mut [IoSliceMut<'_>]) -> u64 {
-        let available = src.len().saturating_sub(offset as usize);
-        let mut copied = 0u64;
-        for buf in bufs.iter_mut() {
-            if copied as usize >= available {
-                break;
-            }
-            let n = (available - copied as usize).min(buf.len());
-            buf[..n].copy_from_slice(&src[offset as usize + copied as usize..][..n]);
-            copied += n as u64;
-        }
-        copied
+        use std::io::Read;
+        let mut rest = src.get(offset as usize..).unwrap_or(&[]);
+        rest.read_vectored(bufs)
+            .expect("slice reads are infallible") as u64
     }
 
     /// Splice `bufs` into the file at `offset`, extending with zeros if the
     /// offset is past EOF (POSIX semantics), then write back.
     fn splice(&self, offset: u64, bufs: &[IoSlice<'_>]) -> Result<u64, Error> {
-        if !self.writable {
-            return Err(Error::badf().context("file not opened for writing"));
-        }
         let total: u64 = bufs.iter().map(|b| b.len() as u64).sum();
         let end = offset
             .checked_add(total)
@@ -237,24 +222,6 @@ impl WasiFile for VfsFile {
         }
         *cursor = new as u64;
         Ok(*cursor)
-    }
-
-    async fn peek(&self, buf: &mut [u8]) -> Result<u64, Error> {
-        let content = self.read_all()?;
-        let cursor = *self.cursor.lock();
-        Ok(Self::fill_bufs(
-            &content,
-            cursor,
-            &mut [IoSliceMut::new(buf)],
-        ))
-    }
-
-    async fn datasync(&self) -> Result<(), Error> {
-        Ok(())
-    }
-
-    async fn sync(&self) -> Result<(), Error> {
-        Ok(())
     }
 
     fn num_ready_bytes(&self) -> Result<u64, Error> {

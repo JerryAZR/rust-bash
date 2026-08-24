@@ -83,7 +83,7 @@ pub(crate) struct VfsDir {
 impl VfsDir {
     /// A directory handle at `path` (absolute VFS path, typically `/` for the
     /// workspace preopen).
-    pub fn new(fs: Arc<dyn VirtualFs>, path: &Path, max_file_size: Option<u64>) -> Self {
+    pub(crate) fn new(fs: Arc<dyn VirtualFs>, path: &Path, max_file_size: Option<u64>) -> Self {
         Self {
             fs,
             path: path.to_path_buf(),
@@ -123,6 +123,9 @@ impl WasiDir for VfsDir {
         write: bool,
         fdflags: FdFlags,
     ) -> Result<OpenResult, Error> {
+        // `read` is unused: wasi-common enforces the READ access mode before
+        // dispatching reads (preview_1.rs:333,404).
+        let _ = read;
         if oflags.contains(OFlags::DIRECTORY)
             && oflags.intersects(OFlags::CREATE | OFlags::EXCLUSIVE | OFlags::TRUNCATE)
         {
@@ -141,10 +144,10 @@ impl WasiDir for VfsDir {
                 // symlink with O_NOFOLLOW must fail, never open the target.
                 Err(Error::from(Errno::Loop).context(full.display().to_string()))
             }
+            Ok(_) if oflags.contains(OFlags::EXCLUSIVE) => {
+                Err(Error::exist().context(full.display().to_string()))
+            }
             Ok(m) if m.node_type == NodeType::Directory => {
-                if oflags.contains(OFlags::EXCLUSIVE) {
-                    return Err(Error::exist().context(full.display().to_string()));
-                }
                 if write {
                     return Err(Error::from(Errno::Isdir).context(full.display().to_string()));
                 }
@@ -158,9 +161,6 @@ impl WasiDir for VfsDir {
                 if oflags.contains(OFlags::DIRECTORY) {
                     return Err(Error::not_dir().context(full.display().to_string()));
                 }
-                if oflags.contains(OFlags::EXCLUSIVE) {
-                    return Err(Error::exist().context(full.display().to_string()));
-                }
                 let mut cursor = 0;
                 if oflags.contains(OFlags::TRUNCATE) && write {
                     self.fs.write_file(&full, b"").map_err(map_err)?;
@@ -170,22 +170,20 @@ impl WasiDir for VfsDir {
                 Ok(OpenResult::File(Box::new(VfsFile::new(
                     self.fs.clone(),
                     full,
-                    read,
                     write,
                     fdflags.contains(FdFlags::APPEND),
                     cursor,
                     self.max_file_size,
                 ))))
             }
-            Err(VfsError::NotFound(_)) => {
+            Err(e @ VfsError::NotFound(_)) => {
                 if !oflags.contains(OFlags::CREATE) {
-                    return Err(map_err(VfsError::NotFound(full)));
+                    return Err(map_err(e));
                 }
                 self.fs.write_file(&full, b"").map_err(map_err)?;
                 Ok(OpenResult::File(Box::new(VfsFile::new(
                     self.fs.clone(),
                     full,
-                    read,
                     write,
                     fdflags.contains(FdFlags::APPEND),
                     0,
@@ -210,34 +208,32 @@ impl WasiDir for VfsDir {
         // wasi-common's reference impl includes "." and ".."; wasi-libc's
         // readdir(3) expects them. Cookies are indices into this ordering.
         let parent = self.path.parent().unwrap_or(&self.path).to_path_buf();
-        let mut all: Vec<(String, FileType, u64)> = Vec::with_capacity(entries.len() + 2);
-        for (name, dir) in [(".".to_string(), &self.path), ("..".to_string(), &parent)] {
-            // inode 0 is the getdents "deleted entry" convention; wasi-libc
-            // tolerates it, and CPython never reads d_ino. Only hit if stat
-            // of an entry that readdir just listed fails (shouldn't happen).
-            let inode = self.fs.stat(dir).map(|m| m.file_id).unwrap_or(0);
-            all.push((name, FileType::Directory, inode));
-        }
-        for e in entries {
-            let child = crate::vfs::vfs_join(&self.path, &e.name);
-            let inode = self.fs.stat(&child).map(|m| m.file_id).unwrap_or(0); // see note above
-            all.push((e.name, map_filetype(e.node_type), inode));
-        }
+        // inode 0 is the getdents "deleted entry" convention; wasi-libc
+        // tolerates it, and CPython never reads d_ino. Only hit if stat of
+        // an entry that readdir just listed fails (TOCTOU; shouldn't happen).
+        let inode_of = |path: &Path| self.fs.stat(path).map(|m| m.file_id).unwrap_or(0);
 
-        let entities: Vec<Result<ReaddirEntity, Error>> = all
-            .into_iter()
-            .enumerate()
-            .skip(start as usize)
-            .map(|(i, (name, filetype, inode))| {
-                Ok(ReaddirEntity {
-                    next: ReaddirCursor::from(i as u64 + 1),
-                    inode,
-                    name,
-                    filetype,
-                })
-            })
-            .collect();
-        Ok(Box::new(entities.into_iter()))
+        let mut all: Vec<(String, FileType, u64)> = Vec::with_capacity(entries.len() + 2);
+        all.push((".".to_string(), FileType::Directory, inode_of(&self.path)));
+        all.push(("..".to_string(), FileType::Directory, inode_of(&parent)));
+        all.extend(entries.into_iter().map(|e| {
+            let child = crate::vfs::vfs_join(&self.path, &e.name);
+            (e.name, map_filetype(e.node_type), inode_of(&child))
+        }));
+
+        let entities =
+            all.into_iter()
+                .enumerate()
+                .skip(start as usize)
+                .map(|(i, (name, filetype, inode))| {
+                    Ok(ReaddirEntity {
+                        next: ReaddirCursor::from(i as u64 + 1),
+                        inode,
+                        name,
+                        filetype,
+                    })
+                });
+        Ok(Box::new(entities))
     }
 
     async fn symlink(&self, old_path: &str, new_path: &str) -> Result<(), Error> {

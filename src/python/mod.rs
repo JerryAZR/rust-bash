@@ -47,7 +47,7 @@ use crate::vfs::VirtualFs;
 use vfs_dir::VfsDir;
 
 /// Result of one Python invocation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PythonOutput {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
@@ -58,7 +58,7 @@ pub struct PythonOutput {
 /// field left `None`) means unbounded — the library makes no policy
 /// decision about how much work a script may do; that belongs to the
 /// harness / tool wrapper, which also communicates the bounds to the model.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct PythonLimits {
     /// Fuel budget (roughly "wasm instructions"). `Some(n)` caps guest CPU;
     /// exhaustion traps the run and surfaces as [`PythonError::Trap`] with
@@ -158,21 +158,21 @@ impl PythonInterpreter {
         ctx.set_stdin(Box::new(ReadPipe::from(stdin.to_vec())));
         ctx.set_stdout(Box::new(stdout.clone()));
         ctx.set_stderr(Box::new(stderr.clone()));
+        let (fuel, max_file_size) = limits
+            .map(|l| (l.fuel, l.max_file_size))
+            .unwrap_or((None, None));
         ctx.push_preopened_dir(
-            Box::new(VfsDir::new(
-                fs,
-                Path::new("/"),
-                limits.and_then(|l| l.max_file_size),
-            )),
+            Box::new(VfsDir::new(fs, Path::new("/"), max_file_size)),
             Path::new("/"),
         )
         .map_err(|e| PythonError::Setup(wasmtime::Error::msg(e.to_string())))?;
 
         let (exit_code, trap) = {
             let mut store = Store::new(&self.engine, ctx);
+            // Infallible here: the engine is always built with fuel enabled.
             store
-                .set_fuel(limits.and_then(|l| l.fuel).unwrap_or(u64::MAX))
-                .map_err(PythonError::Setup)?;
+                .set_fuel(fuel.unwrap_or(u64::MAX))
+                .expect("engine always has fuel metering enabled");
             let mut linker = Linker::new(&self.engine);
             add_to_linker(&mut linker, |cx| cx).map_err(PythonError::Setup)?;
             let instance = linker
