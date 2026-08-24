@@ -218,6 +218,8 @@ impl WasiFile for VfsFile {
             }
         };
         if new < 0 || new > i64::MAX as i128 {
+            // POSIX `off_t` and WASI `Filedelta` are signed; offsets beyond
+            // i64::MAX have no meaningful representation for seek results.
             return Err(Error::invalid_argument().context("seek offset out of range"));
         }
         *cursor = new as u64;

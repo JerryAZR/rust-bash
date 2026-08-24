@@ -177,6 +177,11 @@ impl WasiDir for VfsDir {
                 ))))
             }
             Err(e @ VfsError::NotFound(_)) => {
+                // Also reached for a DANGLING symlink when following: VFS
+                // semantics replace the link node with a regular file rather
+                // than creating the link target (POSIX would). Consistent
+                // with bash through the same VFS; pinned by
+                // python_write_through_dangling_symlink_replaces_link.
                 if !oflags.contains(OFlags::CREATE) {
                     return Err(map_err(e));
                 }

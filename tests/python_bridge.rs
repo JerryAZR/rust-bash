@@ -331,7 +331,10 @@ fn python_huge_offset_write_fails_without_host_abort() {
     let f = fixture(&[("/small.bin", b"x")]);
     // A guest-controlled offset must hit the bridge's EFBIG guard, not a
     // host allocation. If the host survives to assert, the guard worked.
-    // (Relies on try_reserve(1 PiB) failing on 47-bit-VA hosts; a 5-level-
+    // (Relies on try_reserve(1 PiB) failing on 47-bit-VA hosts; a host with
+    // 5-level paging could theoretically satisfy the reservation — the guard
+    // then degrades to real memory pressure, still without a clean abort
+    // guarantee. Practically fine on every CI/host target today.)
     let out = run_python(
         f.overlay.clone(),
         r#"import os
@@ -630,4 +633,32 @@ fn python_runs_are_state_isolated() {
     // GLOBAL_X from the first run must not exist.
     let out2 = run_python(f.overlay, "print('GLOBAL_X' in dir())");
     assert_eq!(out2.stdout, b"False\n");
+}
+
+#[test]
+fn python_write_through_dangling_symlink_replaces_link() {
+    // VFS semantics (shared with bash): writing through a DANGLING symlink
+    // replaces the link node with a regular file — it does NOT create the
+    // link target as POSIX would. InMemoryFs::write_file resolves
+    // canonically; when that fails (dangling), it creates in the parent,
+    // overwriting the link. The bridge inherits this from the VFS, so bash
+    // and Python behave identically.
+    let mut f = fixture(&[]);
+    f.shell.exec("ln -s /no/such/target /dangling").unwrap();
+    let out = run_python(f.overlay.clone(), "open('/dangling', 'w').write('filled')");
+    assert_eq!(
+        out.exit_code,
+        0,
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The link is replaced by a regular file holding the content; the
+    // target still does not exist.
+    let r = f
+        .shell
+        .exec("test -L /dangling && echo is-link || echo not-link")
+        .unwrap();
+    assert_eq!(r.stdout, "not-link\n");
+    let r = f.shell.exec("cat /dangling").unwrap();
+    assert_eq!(r.stdout, "filled");
 }
