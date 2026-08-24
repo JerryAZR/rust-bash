@@ -29,6 +29,11 @@ pub(crate) fn map_err(e: VfsError) -> Error {
     let errno = match &e {
         VfsError::NotFound(_) => Errno::Noent,
         VfsError::AlreadyExists(_) => Errno::Exist,
+        // Unreachable in practice: the VFS is more permissive than POSIX on
+        // these paths (mkdir-through-file and rename-onto-dir succeed, never
+        // producing Notdir/Isdir), operations are never gated on mode bits
+        // (documented Windows-mode semantics), and InvalidPath/IoError only
+        // arise host-side. Arms kept so the mapping stays total.
         VfsError::NotADirectory(_) | VfsError::NotAFile(_) => Errno::Notdir,
         VfsError::IsADirectory(_) => Errno::Isdir,
         VfsError::PermissionDenied(_) => Errno::Acces,

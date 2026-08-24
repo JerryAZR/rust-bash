@@ -142,6 +142,9 @@ impl PythonInterpreter {
         limits: Option<&PythonLimits>,
     ) -> Result<PythonOutput, PythonError> {
         let mut ctx = WasiCtx::new(random_ctx(), clocks_ctx(), sched_ctx(), Table::new());
+        // The error arms here are only reachable past 2^32 elements/bytes
+        // of argv/env (StringArrayError) — defensive plumbing, not reachable
+        // from realistic harness input.
         for arg in args {
             ctx.push_arg(arg).map_err(|e| {
                 PythonError::Setup(wasmtime::Error::msg(format!("invalid arg: {e}")))

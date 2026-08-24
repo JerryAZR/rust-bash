@@ -656,3 +656,180 @@ fn python_write_through_dangling_symlink_creates_target() {
     let r = f.shell.exec("cat /target.txt").unwrap();
     assert_eq!(r.stdout, "filled");
 }
+
+// ── Coverage fills: error display, setup, non-fuel trap ────────────
+
+#[test]
+fn python_error_display_variants() {
+    use rust_bash::python::{PythonError, PythonOutput};
+    let compile = match PythonInterpreter::new(b"junk") {
+        Err(e) => e,
+        Ok(_) => panic!("expected compile error"),
+    };
+    assert!(format!("{compile}").starts_with("failed to compile CPython module"));
+    let setup = PythonError::Setup(wasmtime::Error::msg("boom"));
+    assert!(format!("{setup}").starts_with("failed to set up WASI context"));
+    let trap = PythonError::Trap(
+        wasmtime::Error::msg("boom"),
+        PythonOutput {
+            stdout: vec![],
+            stderr: vec![],
+            exit_code: 0,
+        },
+    );
+    assert!(format!("{trap}").contains("python execution trapped"));
+}
+
+#[test]
+fn python_non_fuel_trap_preserves_stderr() {
+    let f = fixture(&[]);
+    let result = interpreter().run(
+        &[
+            "python".into(),
+            "-c".into(),
+            "import sys, os; sys.stderr.write('B4'); sys.stderr.flush(); os.abort()".into(),
+        ],
+        &[],
+        f.overlay,
+        b"",
+        None,
+    );
+    match result {
+        Err(rust_bash::python::PythonError::Trap(e, out)) => {
+            assert!(
+                !format!("{e:#}").contains("fuel exhausted"),
+                "non-fuel trap must not be mislabeled: {e:#}"
+            );
+            assert_eq!(out.stderr, b"B4");
+        }
+        other => panic!("expected Trap, got: {other:?}"),
+    }
+}
+
+// ── Coverage fills: map_err arms ───────────────────────────────────
+
+#[test]
+fn python_mkdir_existing_raises_file_exists() {
+    let f = fixture(&[("/dir/child.txt", b"x")]);
+    let out = run_python(f.overlay, "import os; os.mkdir('/dir')");
+    assert_eq!(out.exit_code, 1);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("FileExistsError"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn python_open_through_symlink_loop_raises_eloop() {
+    let mut f = fixture(&[]);
+    f.shell.exec("ln -s /b /a; ln -s /a /b").unwrap();
+    let out = run_python(
+        f.overlay,
+        "import os, errno\ntry:\n    open('/a')\n    print('OPEN SUCCEEDED')\nexcept OSError as e:\n    print('open raised ELOOP:', e.errno == errno.ELOOP)\n",
+    );
+    assert_eq!(out.stdout, b"open raised ELOOP: True\n");
+}
+
+#[test]
+fn python_scandir_reports_symlink_filetype() {
+    let mut f = fixture(&[("/real.txt", b"x")]);
+    f.shell.exec("ln -s /real.txt /link.txt").unwrap();
+    let out = run_python(
+        f.overlay,
+        "import os\nfor e in os.scandir('/'):\n    if e.name == 'link.txt':\n        print('is_symlink:', e.is_symlink())\n        print('not file:', not e.is_file(follow_symlinks=False))\n",
+    );
+    assert_eq!(out.stdout, b"is_symlink: True\nnot file: True\n");
+}
+
+// ── Coverage fills: timestamps ─────────────────────────────────────
+
+#[test]
+fn python_utime_updates_mtime() {
+    let f = fixture(&[("/f.txt", b"x")]);
+    let out = run_python(
+        f.overlay,
+        "import os\nos.utime('/f.txt', (1_000_000_000, 1_000_000_000))\nprint('explicit:', os.stat('/f.txt').st_mtime == 1_000_000_000)\nos.utime('/f.txt', None)\nprint('now-works:', os.stat('/f.txt').st_mtime > 1_000_000_000)\n",
+    );
+    assert_eq!(out.stdout, b"explicit: True\nnow-works: True\n");
+}
+
+// ── Coverage fills: fd-level paths ─────────────────────────────────
+
+#[test]
+fn python_pread_pwrite_are_positional() {
+    let f = fixture(&[("/data.bin", b"aaaaaaaaaa")]);
+    let out = run_python(
+        f.overlay.clone(),
+        "import os\nfd = os.open('/data.bin', os.O_RDWR)\nos.pwrite(fd, b'BB', 3)\nprint('pread:', os.pread(fd, 3, 3))\nprint('cursor unmoved:', os.lseek(fd, 0, os.SEEK_CUR) == 0)\nos.close(fd)\n",
+    );
+    assert_eq!(out.stdout, b"pread: b'BBa'\ncursor unmoved: True\n");
+    let r = rust_bash::VirtualFs::read_file(&*f.overlay, Path::new("/data.bin")).unwrap();
+    assert_eq!(r, b"aaaBBaaaaa");
+}
+
+#[test]
+fn python_select_on_bridge_file_fails_visibly() {
+    // Known limitation (documented in vfs_file.rs): bridge files have no OS
+    // fd, so wasi-common's poll requires `pollable()` and select/poll fails
+    // with EINVAL — visible, never silently wrong.
+    let f = fixture(&[("/f.txt", b"content")]);
+    let out = run_python(
+        f.overlay,
+        "import os, select, errno\nfd = os.open('/f.txt', os.O_RDONLY)\ntry:\n    select.select([fd], [], [], 0)\n    print('SELECT SUCCEEDED')\nexcept OSError as e:\n    print('select raised EINVAL:', e.errno == errno.EINVAL)\n",
+    );
+    assert_eq!(out.stdout, b"select raised EINVAL: True\n");
+}
+
+#[test]
+fn python_write_after_unlink_recreates_path() {
+    // Bridge semantics: the fd's path is re-created (our VFS is
+    // path-addressed, not inode-addressed like POSIX unlink-write).
+    let f = fixture(&[("/victim.txt", b"old")]);
+    let out = run_python(
+        f.overlay.clone(),
+        "import os\nfd = os.open('/victim.txt', os.O_RDWR)\nos.remove('/victim.txt')\nos.write(fd, b'new')\nos.close(fd)\nprint('recreated:', os.path.exists('/victim.txt'))\nprint('content:', open('/victim.txt').read())\n",
+    );
+    assert_eq!(out.stdout, b"recreated: True\ncontent: new\n");
+}
+
+#[test]
+fn python_mkdir_through_file_succeeds_like_bash() {
+    // VFS-level POSIX divergence (shared with bash, pinned here): mkdir
+    // through a file component SUCCEEDS where POSIX gives ENOTDIR. The VFS
+    // simply creates the node; bash sees the same behavior. Candidate for
+    // a future VFS fidelity fix.
+    let f = fixture(&[("/file.txt", b"x")]);
+    let out = run_python(
+        f.overlay,
+        "import os; os.mkdir('/file.txt/sub'); print('mkdir succeeded')",
+    );
+    assert_eq!(
+        out.stdout,
+        b"mkdir succeeded
+"
+    );
+}
+
+#[test]
+fn python_rename_file_onto_directory_succeeds_like_bash() {
+    // VFS-level POSIX divergence (shared with bash, pinned here): rename
+    // file-onto-directory SUCCEEDS where POSIX gives EISDIR. Candidate for
+    // a future VFS fidelity fix.
+    let f = fixture(&[("/f.txt", b"x"), ("/dir/keep.txt", b"k")]);
+    let out = run_python(
+        f.overlay,
+        "import os\ntry:\n    os.rename('/f.txt', '/dir')\n    print('RENAME SUCCEEDED')\nexcept OSError as e:\n    print('rename raised', type(e).__name__)\n",
+    );
+    assert_eq!(out.stdout, b"RENAME SUCCEEDED\n");
+}
+
+#[test]
+fn python_utime_on_fd_updates_mtime() {
+    let f = fixture(&[("/f.txt", b"x")]);
+    let out = run_python(
+        f.overlay,
+        "import os\nfd = os.open('/f.txt', os.O_RDONLY)\nos.utime(fd, (1_000_000_000, 1_000_000_000))\nos.close(fd)\nprint('fd-utime:', os.stat('/f.txt').st_mtime == 1_000_000_000)\n",
+    );
+    assert_eq!(out.stdout, b"fd-utime: True\n");
+}

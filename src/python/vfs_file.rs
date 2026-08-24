@@ -75,7 +75,9 @@ impl VfsFile {
             .filter(|end| self.max_file_size.is_none_or(|cap| *end <= cap))
             .ok_or_else(|| Error::from(Errno::Fbig).context("write beyond maximum file size"))?;
         // A missing file reads as empty; every other read error must
-        // propagate (treating it as empty would silently truncate).
+        // propagate (treating it as empty would silently truncate). The
+        // error arm is unreachable with InMemoryFs/OverlayFs backends (only
+        // host-FS failures produce it) — defensive, kept for correctness.
         let mut content = match self.fs.read_file(&self.path) {
             Ok(c) => c,
             Err(VfsError::NotFound(_)) => Vec::new(),
@@ -104,6 +106,8 @@ impl VfsFile {
 #[async_trait::async_trait]
 impl WasiFile for VfsFile {
     fn as_any(&self) -> &dyn Any {
+        // Required by the trait; only WasiDir::as_any is used (rename/link
+        // downcasts). No call site for files today.
         self
     }
 
@@ -119,6 +123,9 @@ impl WasiFile for VfsFile {
         Ok(flags)
     }
 
+    // Unreachable in practice: WASI CPython has no `fcntl` module, so the
+    // guest can never invoke fd_fdstat_set_flags. Kept for trait completeness
+    // (and policy parity with open_file's SYNC rejection).
     async fn set_fdflags(&mut self, flags: FdFlags) -> Result<(), Error> {
         if flags.intersects(FdFlags::DSYNC | FdFlags::SYNC | FdFlags::RSYNC) {
             // Same policy as open_file: never silently ignore a
@@ -159,6 +166,8 @@ impl WasiFile for VfsFile {
         _len: u64,
         _advice: wasi_common::file::Advice,
     ) -> Result<(), Error> {
+        // Unreachable in practice: wasi-libc exposes no posix_fadvise to the
+        // guest, so CPython never calls this. Returns Ok per convention.
         Ok(())
     }
 
@@ -226,6 +235,10 @@ impl WasiFile for VfsFile {
         Ok(*cursor)
     }
 
+    // Poll-based methods are effectively unreachable: bridge files have no
+    // OS fd, so wasi-common's poll rejects them via `pollable()` (EINVAL)
+    // before consulting these. Pinned by
+    // python_select_on_bridge_file_fails_visibly.
     fn num_ready_bytes(&self) -> Result<u64, Error> {
         let size = self.fs.stat(&self.path).map_err(map_err)?.size;
         Ok(size.saturating_sub(*self.cursor.lock()))
