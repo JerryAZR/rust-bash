@@ -175,6 +175,8 @@ impl VirtualCommand for EchoCommand {
                         'n' => no_newline = true,
                         'e' => interpret_escapes = true,
                         'E' => interpret_escapes = false,
+                        // Unreachable: the guard above only admits args whose
+                        // characters are all n/e/E, so no other char gets here.
                         _ => unreachable!(),
                     }
                 }
@@ -557,7 +559,9 @@ impl VirtualCommand for TouchCommand {
             };
 
             if ctx.fs.exists(&path) {
-                // Update mtime
+                // Update mtime. The bundled VirtualFs implementations never
+                // fail utimes on a node that exists (checked above); this
+                // branch only fires for foreign implementations.
                 if let Err(e) = ctx.fs.utimes(&path, crate::platform::SystemTime::now()) {
                     stderr.push_str(&format!("touch: cannot touch '{}': {}\n", file, e));
                     exit_code = 1;
@@ -815,7 +819,13 @@ fn ls_dir(
             {
                 if opts.long_format {
                     let type_char = match meta.node_type {
+                        // Unreachable: this branch is guarded by
+                        // `meta.node_type != NodeType::Directory` above.
                         crate::vfs::NodeType::Directory => 'd',
+                        // Unreachable with the bundled VirtualFs
+                        // implementations: stat() follows symlinks, so a
+                        // symlink target's type is returned instead. Kept
+                        // for foreign implementations whose stat may not.
                         crate::vfs::NodeType::Symlink => 'l',
                         crate::vfs::NodeType::File => '-',
                     };
@@ -855,6 +865,9 @@ fn ls_dir(
             let meta = ctx.fs.stat(&child_path);
             let mode = match meta {
                 Ok(m) => m.mode,
+                // Entries returned by readdir are always stat-able in the
+                // bundled VirtualFs implementations; this fallback guards
+                // foreign implementations.
                 Err(_) => 0o644,
             };
             let type_char = match node_type {

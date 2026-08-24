@@ -134,6 +134,8 @@ fn parse_comparison(tokens: &[String], pos: &mut usize) -> Result<String, String
                         ">" => l > r,
                         "<=" => l <= r,
                         ">=" => l >= r,
+                        // Unreachable: the enclosing match arm admits only
+                        // the seven comparison operators above.
                         _ => false,
                     }
                 } else {
@@ -144,6 +146,8 @@ fn parse_comparison(tokens: &[String], pos: &mut usize) -> Result<String, String
                         ">" => left > right,
                         "<=" => left <= right,
                         ">=" => left >= right,
+                        // Unreachable: the enclosing match arm admits only
+                        // the seven comparison operators above.
                         _ => false,
                     }
                 };
@@ -174,6 +178,7 @@ fn parse_add(tokens: &[String], pos: &mut usize) -> Result<String, String> {
         left = match op.as_str() {
             "+" => (l + r).to_string(),
             "-" => (l - r).to_string(),
+            // Unreachable: the while-loop condition restricts op to + and -.
             _ => unreachable!(),
         };
     }
@@ -200,6 +205,7 @@ fn parse_mul(tokens: &[String], pos: &mut usize) -> Result<String, String> {
             "*" => (l * r).to_string(),
             "/" => (l / r).to_string(),
             "%" => (l % r).to_string(),
+            // Unreachable: the while-loop condition restricts op to *, /, %.
             _ => unreachable!(),
         };
     }
@@ -634,6 +640,9 @@ impl super::VirtualCommand for EnvCommand {
             };
         }
 
+        // The interpreter always supplies an exec callback
+        // (execute_registered_command_by_name sets `exec: Some(..)`), so this
+        // is only reachable when the command is driven directly without one.
         let Some(exec) = ctx.exec else {
             return CommandResult {
                 stderr: "env: command execution unavailable\n".into(),
@@ -746,6 +755,10 @@ impl super::VirtualCommand for WhichCommand {
 
         for arg in args {
             if arg.contains('/') {
+                // On Unix the is_absolute branch is taken for absolute paths.
+                // On Windows, std::path::Path::is_absolute requires a drive
+                // prefix, so VFS-absolute paths fall through to vfs_resolve,
+                // which resolves them to the same location.
                 let full = if std::path::Path::new(arg).is_absolute() {
                     std::path::PathBuf::from(arg)
                 } else {
@@ -856,12 +869,6 @@ impl super::VirtualCommand for Base64Command {
                 };
                 let w: usize = val.parse().unwrap_or(76);
                 wrap_width = if w == 0 { None } else { Some(w) };
-            } else if !opts_done && arg == "-w" {
-                i += 1;
-                if i < args.len() {
-                    let w: usize = args[i].parse().unwrap_or(76);
-                    wrap_width = if w == 0 { None } else { Some(w) };
-                }
             } else {
                 files.push(arg);
             }
@@ -1434,6 +1441,9 @@ impl super::VirtualCommand for TimeoutCommand {
             };
         }
 
+        // The interpreter always supplies an exec callback (see env above),
+        // so the None case is only reachable when the command is driven
+        // directly without one.
         let exec = match ctx.exec {
             Some(cb) => cb,
             None => {
@@ -1540,9 +1550,15 @@ impl super::VirtualCommand for FileCommand {
             use crate::vfs::NodeType;
             let file_type = match meta.node_type {
                 NodeType::Directory => "directory".to_string(),
+                // Unreachable with the bundled VirtualFs implementations:
+                // stat() follows symlinks and returns the target's type.
+                // Kept for foreign implementations whose stat may not.
                 NodeType::Symlink => "symbolic link".to_string(),
                 NodeType::File => match ctx.fs.read_file(&path) {
                     Ok(data) => detect_file_type(&data, arg),
+                    // A node that stat'd as a regular file is always readable
+                    // in the bundled VirtualFs implementations; this fallback
+                    // guards foreign implementations.
                     Err(_) => "regular file".to_string(),
                 },
             };
@@ -1823,6 +1839,8 @@ impl<'a> BcParser<'a> {
     }
 
     fn advance(&mut self) {
+        // Callers only advance after peek/peek_two confirmed a character (or
+        // operator) exists at pos, so the pos >= len case never occurs.
         if self.pos < self.input.len() {
             self.pos += self.input[self.pos..]
                 .chars()
@@ -1934,6 +1952,8 @@ fn bc_parse_expr(parser: &mut BcParser, env: &BcEnv, min_prec: u8) -> Result<f64
                     0.0
                 }
             }
+            // Unreachable: the operator match above only produces the
+            // operators handled by the arms above.
             _ => unreachable!(),
         };
     }
