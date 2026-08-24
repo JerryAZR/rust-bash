@@ -1,0 +1,149 @@
+# head / tail: flag forms, multi-file headers, device files, error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "head_dash_dash"
+script = 'printf "x\n" | head --'
+stdout = "x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "head_n_attached"
+script = 'printf "a\nb\nc\n" | head -n2'
+stdout = "a\nb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "head_c_attached"
+script = 'printf "abcdef" | head -c3'
+stdout = "abc"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "head_c_missing_file"
+script = "head -c3 /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "head_c_multiple_files"
+script = "head -c2 /t/h1.txt /t/h2.txt"
+stdout = "==> /t/h1.txt <==\nab\n==> /t/h2.txt <==\nde"
+stderr = ""
+exit_code = 0
+files = { "/t/h1.txt" = "abc", "/t/h2.txt" = "def" }
+
+[[cases]]
+name = "head_multiple_files_with_stdin"
+script = 'printf "S1\nS2\n" | head -n1 /t/h1.txt -'
+stdout = "==> /t/h1.txt <==\nabc\n\n==> (standard input) <==\nS1\n"
+stderr = ""
+exit_code = 0
+files = { "/t/h1.txt" = "abc" }
+
+[[cases]]
+name = "head_multiple_files_with_dev_null"
+script = "head -n1 /t/h1.txt /dev/null"
+stdout = "==> /t/h1.txt <==\nabc\n\n==> /dev/null <==\n"
+stderr = ""
+exit_code = 0
+files = { "/t/h1.txt" = "abc" }
+
+[[cases]]
+name = "head_single_dev_null_no_header"
+script = "head /dev/null"
+stdout = ""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tail_dash_dash"
+script = 'printf "x\n" | tail --'
+stdout = "x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tail_n_without_value_keeps_default"
+# GNU tail errors on -n without a value; rust-bash keeps the 10-line default.
+# Suspected divergence.
+script = 'printf "a\nb\n" | tail -n'
+stdout = "a\nb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tail_n_plus_is_treated_as_last_n"
+# GNU tail -n +2 prints starting FROM line 2 ("l2..l5"); rust-bash parses +2 but
+# then applies "last N lines" semantics, printing only "l4\nl5\n". Suspected divergence.
+script = 'printf "l1\nl2\nl3\nl4\nl5\n" | tail -n +2'
+stdout = "l4\nl5\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tail_n_attached"
+script = 'printf "a\nb\nc\n" | tail -n2'
+stdout = "b\nc\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tail_dash_num"
+script = 'printf "a\nb\nc\n" | tail -2'
+stdout = "b\nc\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tail_multiple_files"
+script = "tail -n1 /t/h1.txt /t/h2.txt"
+stdout = "==> /t/h1.txt <==\nabc\n\n==> /t/h2.txt <==\ndef\n"
+stderr = ""
+exit_code = 0
+files = { "/t/h1.txt" = "abc", "/t/h2.txt" = "def" }
+
+[[cases]]
+name = "tail_missing_file"
+script = "tail /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "wc_dev_null_reads_as_empty"
+script = "wc /dev/null"
+stdout = "0 0 0 /dev/null\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "wc_missing_file"
+script = "wc /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "wc_words_multiple_files"
+script = "wc -w /t/w1.txt /t/w2.txt"
+stdout = " 3 /t/w1.txt\n 2 /t/w2.txt\n 5 total\n"
+stderr = ""
+exit_code = 0
+files = { "/t/w1.txt" = "a b c\n", "/t/w2.txt" = "d e\n" }
+
+[[cases]]
+name = "wc_bytes_multiple_files"
+script = "wc -c /t/w1.txt /t/w2.txt"
+stdout = " 6 /t/w1.txt\n 4 /t/w2.txt\n10 total\n"
+stderr = ""
+exit_code = 0
+files = { "/t/w1.txt" = "a b c\n", "/t/w2.txt" = "d e\n" }

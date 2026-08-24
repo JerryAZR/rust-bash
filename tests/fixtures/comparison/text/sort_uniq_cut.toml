@@ -1,0 +1,141 @@
+# sort / uniq / cut: option parsing forms and error paths; shared read_all_input device handling
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "sort_dash_dash"
+script = 'printf "b\na\n" | sort --'
+stdout = "a\nb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "sort_dash_file_reads_stdin"
+script = 'printf "b\na\n" | sort -'
+stdout = "a\nb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "sort_dev_null_empty"
+script = "sort /dev/null"
+stdout = ""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "sort_dev_stdout_empty"
+script = "sort /dev/stdout"
+stdout = ""
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "sort_missing_file"
+script = "sort /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "sort_key_attached"
+script = 'printf "b:2\na:1\n" | sort -t: -k2'
+stdout = "a:1\nb:2\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "sort_key_and_separator_separate"
+script = 'printf "b:2\na:1\n" | sort -t : -k 2'
+stdout = "a:1\nb:2\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "sort_f_s_flags_silently_ignored"
+# GNU sort -f folds case (output would be "a\nB\n"); rust-bash accepts but
+# ignores -f/-s, so byte order is kept. Suspected divergence.
+script = 'printf "B\na\n" | sort -fs'
+stdout = "B\na\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "sort_long_option_rejected"
+script = 'printf "x\n" | sort --bogus'
+stdout = ""
+stderr = "sort: unrecognized option '--bogus'\n"
+exit_code = 2
+
+[[cases]]
+name = "sort_key_flag_without_value_ignored"
+# GNU sort errors on -k without a value; rust-bash silently falls back to
+# whole-line sorting. Suspected divergence.
+script = 'printf "b\na\n" | sort -k'
+stdout = "a\nb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "uniq_dash_dash"
+script = 'printf "a\na\n" | uniq --'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "uniq_unknown_flag_ignored"
+# GNU uniq has no -z equivalent here and errors on unknown flags; rust-bash
+# silently ignores them. Suspected divergence.
+script = 'printf "a\na\n" | uniq -z'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "uniq_file_operand"
+script = "uniq /t/u.txt"
+stdout = "a\nb\n"
+stderr = ""
+exit_code = 0
+files = { "/t/u.txt" = "a\na\nb\n" }
+
+[[cases]]
+name = "uniq_missing_file"
+script = "uniq /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "cut_dash_dash"
+script = 'printf "ab\n" | cut -c1 --'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "cut_chars_attached"
+script = 'printf "hello\n" | cut -c1-3'
+stdout = "hel\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "cut_unknown_flag_ignored"
+# GNU cut -z means NUL-delimited lines (different output); rust-bash silently
+# ignores unknown flags. Suspected divergence.
+script = 'printf "a:b\n" | cut -z -d: -f1'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "cut_missing_file"
+script = "cut -f1 /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1

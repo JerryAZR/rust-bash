@@ -1,0 +1,147 @@
+# comm / join: flag forms, suppression combos, unpairable lines, error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "comm_dash_dash"
+script = "comm -- /t/c1.txt /t/c2.txt"
+stdout = "a\n\t\tb\n\tc\n\t\td\n"
+stderr = ""
+exit_code = 0
+files = { "/t/c1.txt" = "a\nb\nd\n", "/t/c2.txt" = "b\nc\nd\n" }
+
+[[cases]]
+name = "comm_check_order_noop"
+script = "comm --check-order /t/c1.txt /t/c2.txt"
+stdout = "a\n\t\tb\n\tc\n\t\td\n"
+stderr = ""
+exit_code = 0
+files = { "/t/c1.txt" = "a\nb\nd\n", "/t/c2.txt" = "b\nc\nd\n" }
+
+[[cases]]
+name = "comm_invalid_option"
+script = "comm -x /t/c1.txt /t/c2.txt"
+stdout = ""
+stderr = "comm: invalid option -- 'x'\n"
+exit_code = 1
+files = { "/t/c1.txt" = "a\n", "/t/c2.txt" = "b\n" }
+
+[[cases]]
+name = "comm_wrong_file_count"
+script = "comm /t/c1.txt"
+stdout = ""
+stderr = "comm: requires exactly two file arguments\n"
+exit_code = 1
+files = { "/t/c1.txt" = "a\n" }
+
+[[cases]]
+name = "comm_missing_file"
+script = "comm /nope /t/c2.txt"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+files = { "/t/c2.txt" = "b\n" }
+
+[[cases]]
+name = "comm_remaining_file2_lines_indented"
+script = "comm /t/ce.txt /t/c2.txt"
+stdout = "\tb\n\tc\n\td\n"
+stderr = ""
+exit_code = 0
+files = { "/t/ce.txt" = "", "/t/c2.txt" = "b\nc\nd\n" }
+
+[[cases]]
+name = "join_dash_dash"
+script = "join -- /t/j1.txt /t/j2.txt"
+stdout = "1 Alice NY\n2 Bob LA\n"
+stderr = ""
+exit_code = 0
+files = { "/t/j1.txt" = "1 Alice\n2 Bob\n3 Carol\n", "/t/j2.txt" = "1 NY\n2 LA\n4 SF\n" }
+
+[[cases]]
+name = "join_separator_attached"
+script = "join -t: /t/jc1.txt /t/jc2.txt"
+stdout = "1:Alice:NY\n2:Bob:LA\n"
+stderr = ""
+exit_code = 0
+files = { "/t/jc1.txt" = "1:Alice\n2:Bob\n", "/t/jc2.txt" = "1:NY\n2:LA\n" }
+
+[[cases]]
+name = "join_j_flag"
+script = "join -j 2 /t/jf1.txt /t/jf2.txt"
+stdout = "1 a x\n2 b y\n"
+stderr = ""
+exit_code = 0
+files = { "/t/jf1.txt" = "a 1\nb 2\n", "/t/jf2.txt" = "x 1\ny 2\n" }
+
+[[cases]]
+name = "join_field_flags"
+script = "join -1 2 -2 1 /t/jf1.txt /t/jg2.txt"
+stdout = "1 a x\n2 b y\n"
+stderr = ""
+exit_code = 0
+files = { "/t/jf1.txt" = "a 1\nb 2\n", "/t/jg2.txt" = "1 x\n2 y\n" }
+
+[[cases]]
+name = "join_wrong_file_count"
+script = "join /t/j1.txt"
+stdout = ""
+stderr = "join: requires exactly two file arguments\n"
+exit_code = 1
+files = { "/t/j1.txt" = "1 Alice\n" }
+
+[[cases]]
+name = "join_missing_file"
+script = "join /nope /t/j2.txt"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+files = { "/t/j2.txt" = "1 NY\n" }
+
+[[cases]]
+name = "join_join_field_out_of_range_gives_empty_keys"
+# GNU join treats missing join fields as empty strings and joins all pairs
+# (every line has the same empty key); rust-bash produces no output.
+# Suspected divergence.
+script = "join -1 5 /t/j1.txt /t/j2.txt"
+stdout = ""
+stderr = ""
+exit_code = 0
+files = { "/t/j1.txt" = "1 Alice\n2 Bob\n", "/t/j2.txt" = "1 NY\n2 LA\n" }
+
+[[cases]]
+name = "join_output_format_file1_index_out_of_range"
+script = "join -o 1.9 /t/j1.txt /t/j2.txt"
+stdout = "\n\n"
+stderr = ""
+exit_code = 0
+files = { "/t/j1.txt" = "1 Alice\n2 Bob\n", "/t/j2.txt" = "1 NY\n2 LA\n" }
+
+[[cases]]
+name = "join_output_format_file2_index_out_of_range"
+script = "join -o 2.9 /t/j1.txt /t/j2.txt"
+stdout = "\n\n"
+stderr = ""
+exit_code = 0
+files = { "/t/j1.txt" = "1 Alice\n2 Bob\n", "/t/j2.txt" = "1 NY\n2 LA\n" }
+
+[[cases]]
+name = "join_output_format_ignores_garbage_spec"
+# GNU join errors with "invalid field specification" for -o 0,xyz; rust-bash
+# silently skips the bad spec. Suspected divergence.
+script = "join -o 0,xyz /t/j1.txt /t/j2.txt"
+stdout = "1\n2\n"
+stderr = ""
+exit_code = 0
+files = { "/t/j1.txt" = "1 Alice\n2 Bob\n", "/t/j2.txt" = "1 NY\n2 LA\n" }
+
+[[cases]]
+name = "join_unpairable_file2_lines_between_file1_keys"
+script = "join -a 2 /t/jm1.txt /t/jm2.txt"
+stdout = "1 x\n3 y\n4 d z\n"
+stderr = ""
+exit_code = 0
+files = { "/t/jm1.txt" = "2 b\n4 d\n", "/t/jm2.txt" = "1 x\n3 y\n4 z\n" }

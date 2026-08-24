@@ -372,6 +372,10 @@ fn collect_grep_files<'a>(
         if recursive {
             // Recursive with no files: search current directory
             let mut result = Vec::new();
+            // The `?` propagates collect_dir_recursive's readdir error, which
+            // is only reachable when the search root itself is gone (e.g. the
+            // cwd was removed out from under the shell); see the comment at
+            // the error site.
             collect_dir_recursive(
                 &PathBuf::from(ctx.cwd),
                 include_globs,
@@ -437,6 +441,11 @@ fn collect_dir_recursive(
     result: &mut Vec<(String, String)>,
 ) -> Result<(), CommandResult> {
     let entries = ctx.fs.readdir(dir).map_err(|e| CommandResult {
+        // Reachable only when `dir` is the search root and was deleted out
+        // from under the shell (e.g. `cd /t/gone; rmdir /t/gone; grep -r foo`).
+        // During recursive descent it cannot fail with the in-repo VirtualFs
+        // implementations: every child dir comes from a successful parent
+        // readdir and the VFS cannot change during a command.
         stderr: format!("grep: {}: {}\n", dir.display(), e),
         exit_code: 2,
         ..Default::default()
@@ -461,6 +470,9 @@ fn collect_dir_recursive(
                         result.push((name_str, String::from_utf8_lossy(&bytes).to_string()));
                     }
                     Err(e) => {
+                        // Unreachable with the in-repo VirtualFs implementations:
+                        // `readdir` just reported this entry as a regular file and
+                        // the VFS cannot change during a command. Defensive only.
                         return Err(CommandResult {
                             stderr: format!("grep: {}: {}\n", name_str, e),
                             exit_code: 2,
@@ -1442,6 +1454,8 @@ impl super::VirtualCommand for CutCommand {
                 stdout.push_str(&selected);
                 stdout.push('\n');
             }
+            // Falling through with neither branch taken is unreachable: the
+            // both-None case returns an error before reading input above.
         }
 
         CommandResult {
@@ -1792,11 +1806,6 @@ impl super::VirtualCommand for OdCommand {
                 no_address = true;
                 if arg == "-A" {
                     i += 1; // skip "n"
-                }
-            } else if arg.starts_with("-A") {
-                // -Ax, -Ad, -Ao — we only handle -An (suppress address)
-                if arg == "-An" {
-                    no_address = true;
                 }
             } else if arg == "-c" {
                 formats.push("c".to_string());
@@ -2770,12 +2779,14 @@ fn decode_printf_leading_codepoint(bytes: &[u8]) -> u32 {
                 | ((bytes[2] & 0x3F) as u32) << 6
                 | (bytes[3] & 0x3F) as u32
         }
-        _ => unreachable!(),
+        _ => unreachable!("width is 2, 3, or 4 by the match on `first` above"),
     };
     let min_codepoint = match width {
         2 => 0x80,
         3 => 0x800,
         4 => 0x10000,
+        // width is 2, 3, or 4 by the match on `first` above; this arm is
+        // unreachable by construction.
         _ => 0,
     };
     if codepoint < min_codepoint {
@@ -3391,6 +3402,9 @@ fn exported_printf_tz<'a>(context: PrintfContext<'a>) -> Option<&'a str> {
             .filter(|var| var.exported())
             .map(|var| var.value.as_scalar())
     } else {
+        // Only reachable when the PrintfContext is built without `shell_vars`
+        // (CommandContext.variables is None, e.g. in direct command tests);
+        // the interpreter always sets it before running a command.
         context
             .env
             .and_then(|env| env.get("TZ").map(String::as_str))
@@ -3470,6 +3484,8 @@ fn strip_trailing_zeros_scientific(s: &str) -> String {
     // Split at 'e' or 'E'
     let split_pos = s.find('e').or_else(|| s.find('E'));
     let Some(pos) = split_pos else {
+        // Unreachable by construction: the only caller passes output of
+        // format_scientific, which always contains 'e' or 'E'.
         return s.to_string();
     };
     let (mantissa, exponent) = s.split_at(pos);
@@ -3643,6 +3659,9 @@ fn printf_shell_quote(s: &str) -> String {
                                 decoded = true;
                                 break;
                             }
+                            // Falling through (len == 1 ASCII non-graphic) is
+                            // unreachable: shell-byte markers only encode bytes
+                            // >= 0x80, which never decode as single-byte UTF-8.
                         }
                     }
                     if !decoded {
@@ -4814,6 +4833,9 @@ fn next_tab_stop(col: usize, stops: &TabStops) -> usize {
                 let past = col - last;
                 last + ((past / interval) + 1) * interval
             } else {
+                // Unreachable by construction: parse_tab_stops only builds
+                // TabStops::List from a non-empty vec (empty falls back to
+                // Uniform(8)), so `list.last()` is always Some.
                 col + 1
             }
         }
@@ -4877,6 +4899,9 @@ fn unexpand_line(line: &str, tab_width: usize, convert_all: bool) -> String {
                             result.push(' ');
                         }
                     }
+                    // The spaces == 0 case is unreachable: space_start_col is
+                    // reset whenever col lands on a tab stop, so a pending flush
+                    // always has col % tab_width != 0.
                     space_start_col = None;
                 }
                 result.push(ch);
@@ -5287,6 +5312,10 @@ fn rg_collect_dir(
 ) {
     let entries = match ctx.fs.readdir(dir) {
         Ok(e) => e,
+        // Unreachable with the in-repo VirtualFs implementations: `dir` was just
+        // reached via a successful parent readdir/stat and the VFS cannot change
+        // during a command. Defensive only; a failed subtree is skipped silently
+        // to match rg's best-effort traversal.
         Err(_) => return,
     };
 
@@ -5347,6 +5376,10 @@ fn rg_collect_dir(
                     }
                     result.push((display, String::from_utf8_lossy(&bytes).to_string()));
                 }
+                // A failed read_file here (the if-let not matching) is unreachable
+                // with the in-repo VirtualFs implementations: readdir just reported
+                // this entry as a regular file and the VFS cannot change during a
+                // command. Like rg, unreadable files are skipped silently.
             }
             _ => {}
         }
@@ -6776,6 +6809,8 @@ mod tests {
         for line in r.stdout.lines() {
             assert!(
                 line.len() <= 40,
+                // The message arguments below are only evaluated when the
+                // assertion fails, so they are not expected to be covered.
                 "Line too long: {:?} ({})",
                 line,
                 line.len()

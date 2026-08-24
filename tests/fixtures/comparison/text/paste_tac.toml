@@ -1,0 +1,58 @@
+# paste / tac: flag forms and error paths
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+# Missing-file errors are pinned in rust-bash's actual form
+#   "PATH: No such file or directory: PATH" (path doubled, no command prefix);
+# GNU prints "CMD: PATH: No such file or directory".
+
+
+[[cases]]
+name = "paste_dash_dash"
+script = "paste -- /t/p1.txt /t/p2.txt"
+stdout = "a\t1\nb\t2\n"
+stderr = ""
+exit_code = 0
+files = { "/t/p1.txt" = "a\nb\n", "/t/p2.txt" = "1\n2\n" }
+
+[[cases]]
+name = "paste_delimiter_attached"
+script = "paste -d, /t/p1.txt /t/p2.txt"
+stdout = "a,1\nb,2\n"
+stderr = ""
+exit_code = 0
+files = { "/t/p1.txt" = "a\nb\n", "/t/p2.txt" = "1\n2\n" }
+
+[[cases]]
+name = "paste_empty_delimiter_means_tab"
+script = "paste -d '' /t/p1.txt /t/p2.txt"
+stdout = "a\t1\nb\t2\n"
+stderr = ""
+exit_code = 0
+files = { "/t/p1.txt" = "a\nb\n", "/t/p2.txt" = "1\n2\n" }
+
+[[cases]]
+name = "paste_missing_file"
+script = "paste /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
+
+[[cases]]
+name = "tac_dash_dash"
+script = 'printf "a\nb\n" | tac --'
+stdout = "b\na\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tac_separator_attached"
+script = 'printf "a:b:c" | tac -s:'
+stdout = "c:b:a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tac_missing_file"
+script = "tac /nope"
+stdout = ""
+stderr = "/nope: No such file or directory: /nope\n"
+exit_code = 1
