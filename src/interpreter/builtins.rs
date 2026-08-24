@@ -1098,6 +1098,9 @@ fn builtin_unset(
                         if let VariableValue::IndexedArray(map) = &v.value {
                             map.keys().next_back().copied()
                         } else {
+                            // Unreachable: `is_indexed` was computed from
+                            // the same env above and subscript arithmetic
+                            // cannot change a variable's value type.
                             None
                         }
                     });
@@ -1974,6 +1977,9 @@ fn builtin_declare(
                     result_stderr.push_str(&format!("rust-bash: {msg}\n"));
                     exit_code = 1;
                 }
+                // declare_without_value only ever returns Execution errors
+                // (nameref validation / array-conversion rejections), so no
+                // other variant can arrive here; kept for exhaustiveness.
                 Err(other) => return Err(other),
             }
         }
@@ -2227,6 +2233,14 @@ fn format_declare_line(name: &str, var: &Variable) -> String {
                 if var.attrs.contains(VariableAttrs::ASSOC_REVERSE_PRINT) {
                     entries.sort_by(|(a, _), (b, _)| {
                         match (a.as_str() == "0", b.as_str() == "0") {
+                            // The (true, *) arms are not exercisable in
+                            // practice: entries iterate from a BTreeMap in
+                            // ascending order, so "0" is always the first
+                            // element the sort sees, and std's sort (an
+                            // implementation detail, not a contract) does
+                            // not pass that first element as the left
+                            // operand — not exercised even with 31-entry
+                            // maps. Kept so the comparator stays total.
                             (true, true) => std::cmp::Ordering::Equal,
                             (true, false) => std::cmp::Ordering::Less,
                             (false, true) => std::cmp::Ordering::Greater,
@@ -2319,6 +2333,9 @@ fn declare_append_value(
                     }
                     VariableValue::Scalar(s) if s.is_empty() => 0,
                     VariableValue::Scalar(_) => 1,
+                    // This else branch only runs when `is_assoc` is false,
+                    // which means the existing value is never an assoc
+                    // array; the arm is kept for match exhaustiveness.
                     VariableValue::AssociativeArray(_) => 0,
                 },
                 None => 0,
@@ -2666,6 +2683,8 @@ fn parse_and_set_assoc_array(
 ) -> Result<(), RustBashError> {
     let words = shell_split_array_body(body);
     // Reset the array to empty.
+    // The sole caller (declare_with_value) inserts `name` into env before
+    // calling, so `get_mut` always succeeds; the `if let` is defensive.
     if let Some(var) = state.env.get_mut(name) {
         var.value = VariableValue::AssociativeArray(std::collections::BTreeMap::new());
         if assoc_body_uses_unquoted_keys(&words) {
@@ -3392,6 +3411,10 @@ fn assign_read_fields_to_vars(
             }
 
             let remainder = &units[pos..end];
+            // Note: a remainder consisting of a single unescaped IFS
+            // non-whitespace char cannot occur here — the
+            // `trailing_non_ws == 1` trim above removes exactly that shape
+            // unless a preceding unescaped IFS whitespace forces len >= 2.
             let value = if remainder.len() == 1 && is_read_ifs_non_ws(remainder[0], ifs) {
                 String::new()
             } else if remainder.len() >= 3
@@ -3492,6 +3515,8 @@ fn builtin_eval(
             state.counters.call_depth -= 1;
             let msg = format!("{e}");
             return Ok(ExecResult {
+                // brush-parser error messages are not expected to be
+                // empty, so the `is_empty` arm is a defensive fallback.
                 stderr: if msg.is_empty() {
                     String::new()
                 } else {
@@ -3990,6 +4015,9 @@ fn builtin_shopt(
         });
     }
 
+    // Unreachable: every flag combination returns above — set/unset/query
+    // each have their own return, and the no-flag case enters the listing
+    // block. Kept as a defensive tail.
     Ok(ExecResult::default())
 }
 
@@ -4238,6 +4266,8 @@ fn builtin_source(
             state.counters.call_depth -= 1;
             let msg = format!("{e}");
             return Ok(ExecResult {
+                // brush-parser error messages are not expected to be
+                // empty, so the `is_empty` arm is a defensive fallback.
                 stderr: if msg.is_empty() {
                     String::new()
                 } else {
@@ -4681,6 +4711,8 @@ pub(crate) fn execute_registered_command_by_name(
             .filter(|(_, v)| v.exported() && matches!(v.value, VariableValue::Scalar(_)))
             .map(|(k, v)| (k.clone(), v.value.as_scalar().to_string()))
             .collect();
+        // All call sites (walker dispatch, path-command stubs, `builtin`)
+        // pass `Some(..)`, so the `None` case never occurs in practice.
         if let Some(extra_fds) = extra_input_fds {
             for (fd, contents) in extra_fds {
                 if *fd == 0 {
@@ -4781,6 +4813,9 @@ pub(crate) fn execute_path_command(
 
     let bytes = match state.fs.read_file(Path::new(&resolved)) {
         Ok(bytes) => bytes,
+        // Unreachable by construction: stat succeeded, the node is not a
+        // directory and has an exec bit set, and execution is
+        // single-threaded, so the read cannot fail. Defensive fallback.
         Err(_) => {
             return Ok(ExecResult {
                 stderr: format!("{invocation_name}: command not found\n"),
@@ -6630,6 +6665,11 @@ struct SubshellConfig<'a> {
     source_override: Option<String>,
     source_text_override: Option<String>,
     invoked_with_c: bool,
+    // All current call sites (execute_path_command, builtin_sh) pass `true`:
+    // this function only ever runs independent shell processes. The `false`
+    // arms below (inherit env/functions/aliases/etc. from the parent) are
+    // therefore unreachable in practice but kept so the subshell semantics
+    // stay explicit.
     shell_process: bool,
 }
 
@@ -6659,6 +6699,7 @@ fn run_in_subshell(
             .map(|(name, var)| (name.clone(), var.clone()))
             .collect()
     } else {
+        // Unreachable: all call sites pass shell_process=true (see field note).
         state.env.clone()
     };
     let mut sub_state = InterpreterState {
@@ -6668,6 +6709,7 @@ fn run_in_subshell(
         functions: if config.shell_process {
             HashMap::new()
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.functions.clone()
         },
         last_exit_code: state.last_exit_code,
@@ -6710,16 +6752,19 @@ fn run_in_subshell(
         source_depth: if config.shell_process {
             0
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.source_depth
         },
         getopts_subpos: if config.shell_process {
             0
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.getopts_subpos
         },
         getopts_args_signature: if config.shell_process {
             String::new()
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.getopts_args_signature.clone()
         },
         traps: state.traps.clone(),
@@ -6727,11 +6772,13 @@ fn run_in_subshell(
         errexit_suppressed: if config.shell_process {
             0
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.errexit_suppressed
         },
         errexit_bang_suppressed: if config.shell_process {
             0
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.errexit_bang_suppressed
         },
         stdin_offset: 0,
@@ -6741,6 +6788,7 @@ fn run_in_subshell(
         aliases: if config.shell_process {
             HashMap::new()
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.aliases.clone()
         },
         current_lineno: state.current_lineno,
@@ -6755,6 +6803,7 @@ fn run_in_subshell(
         last_verbose_line: if config.shell_process {
             0
         } else {
+            // Unreachable: all call sites pass shell_process=true.
             state.last_verbose_line
         },
         shell_start_time: state.shell_start_time,
@@ -6813,6 +6862,9 @@ fn builtin_help(args: &[String], state: &InterpreterState) -> Result<ExecResult,
             if let Some(meta) = builtin_meta(name) {
                 stdout.push_str(&format!("  {:<16} {}\n", name, meta.description));
             } else {
+                // builtin_meta() has an arm for every name in
+                // builtin_names(), so this fallback never runs; kept so the
+                // listing stays total if a name is ever added without meta.
                 stdout.push_str(&format!("  {}\n", name));
             }
         }
@@ -7185,6 +7237,8 @@ mod tests {
                 assert_eq!(map.get(&2).unwrap(), "c");
                 assert_eq!(map.len(), 3);
             }
+            // Defensive failure path: only reached if the code under test
+            // stops producing an indexed array (i.e. the test itself fails).
             _ => panic!("expected indexed array"),
         }
     }
@@ -7316,6 +7370,8 @@ mod tests {
                 assert_eq!(map.get(&1).unwrap(), "y");
                 assert_eq!(map.get(&2).unwrap(), "z");
             }
+            // Defensive failure path: only reached if the code under test
+            // stops producing an indexed array (i.e. the test itself fails).
             _ => panic!("expected indexed array"),
         }
     }
