@@ -141,15 +141,6 @@ impl VariableValue {
             VariableValue::AssociativeArray(map) => map.get("0").map(|s| s.as_str()).unwrap_or(""),
         }
     }
-
-    /// Return element count for arrays, or 1 for non-empty scalars.
-    pub fn count(&self) -> usize {
-        match self {
-            VariableValue::Scalar(s) => usize::from(!s.is_empty()),
-            VariableValue::IndexedArray(map) => map.len(),
-            VariableValue::AssociativeArray(map) => map.len(),
-        }
-    }
 }
 
 bitflags! {
@@ -778,6 +769,9 @@ fn rewrite_legacy_ksh_command_substitutions(input: &str) -> Option<String> {
 }
 
 fn rewrite_single_legacy_ksh_token(token: &str) -> Option<String> {
+    // Unreachable by construction: `token` comes from
+    // `take_heredoc_delimiter_token`, which is only invoked at a `${` the
+    // caller located and returns through the matching `}`.
     if !(token.starts_with("${") && token.ends_with('}')) {
         return None;
     }
@@ -884,6 +878,8 @@ fn rewrite_expansion_like_heredoc_delimiters(input: &str) -> Option<String> {
 }
 
 fn take_heredoc_delimiter_token(chars: &[char], start: usize) -> Option<(String, usize)> {
+    // Unreachable by construction: both callers only invoke this after
+    // checking `chars[start] == '$'` and that `chars[start + 1]` exists.
     if start + 1 >= chars.len() || chars[start] != '$' {
         return None;
     }
@@ -891,6 +887,7 @@ fn take_heredoc_delimiter_token(chars: &[char], start: usize) -> Option<(String,
     let closing = match chars[start + 1] {
         '{' => '}',
         '(' => ')',
+        // Unreachable by construction: callers guarantee '{' or '('.
         _ => return None,
     };
 
@@ -954,11 +951,14 @@ fn collapse_space_runs(s: &str) -> String {
 }
 
 fn slice_source_by_char_range(input: &str, start: usize, end: usize) -> Option<String> {
+    // Unreachable by construction: `start`/`end` are token location indices
+    // produced by tokenizing this same `input`, so start <= end <= char count.
     if start > end {
         return None;
     }
 
     let total_chars = input.chars().count();
+    // Unreachable by construction: see above.
     if end > total_chars {
         return None;
     }
@@ -1157,6 +1157,8 @@ fn find_extended_test_end(chars: &[char], start: usize) -> Option<usize> {
 }
 
 fn rewrite_single_extended_test_segment(segment: &str) -> Option<String> {
+    // Unreachable by construction: the caller builds `segment` from the `[[`
+    // it found through the matching `]]` (inclusive).
     if !segment.starts_with("[[") || !segment.ends_with("]]") {
         return None;
     }
@@ -1535,6 +1537,12 @@ pub(crate) fn set_assoc_element(
                     }
                     map.insert(key, value);
                 }
+                // Defensive: callers route here only for variables that are
+                // associative arrays, but a nameref could in principle
+                // redirect to a non-associative variable. No known script
+                // produces that state (a variable cannot be both NAMEREF and
+                // associative-valued via `declare`), so this arm is currently
+                // unreachable; the reachable error case is the `None` arm.
                 _ => {
                     return Err(RustBashError::Execution(format!(
                         "{target}: not an associative array"
@@ -1543,6 +1551,10 @@ pub(crate) fn set_assoc_element(
             }
             var.attrs.remove(VariableAttrs::DECLARED_ONLY);
         }
+        // Reachable when a NAMEREF variable is given an associative value
+        // (e.g. `declare -n x=t; declare -A x=([k]=v)`): the nameref resolves
+        // through the (empty) assoc value to an empty target name, which is
+        // not in the environment.
         None => {
             return Err(RustBashError::Execution(format!(
                 "{target}: not an associative array"

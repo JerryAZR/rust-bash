@@ -137,6 +137,8 @@ fn collect_compound_command(compound: &ast::CompoundCommand, out: &mut Collected
         }
         // Arithmetic commands evaluate expressions; they dispatch no commands.
         ast::CompoundCommand::Arithmetic(_) => {}
+        // Unreachable: the pinned brush-parser revision parses `coproc` as a
+        // simple command, so no Coprocess AST node is ever produced.
         ast::CompoundCommand::Coprocess(coproc) => collect_command(&coproc.body, out),
     }
 }

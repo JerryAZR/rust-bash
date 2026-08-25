@@ -166,6 +166,8 @@ fn bytes_eq(a: u8, b: u8, nocase: bool) -> bool {
 /// Returns `(matched, bytes_consumed)` or `None` if not a valid class.
 /// Supports POSIX named classes like `[:alpha:]`, `[:digit:]`, etc.
 fn match_char_class(pat: &[u8], ch: u8, nocase: bool) -> Option<(bool, usize)> {
+    // Unreachable by construction: both callers only invoke this after
+    // confirming the pattern byte at the current position is '['.
     if pat.is_empty() || pat[0] != b'[' {
         return None;
     }
@@ -491,6 +493,9 @@ fn ext_match_group(
     alts: &[&[u8]],
     depth: usize,
 ) -> bool {
+    // Unreachable by construction: the only caller (`ext_match`) already
+    // returns false for depth > MAX_EXTGLOB_DEPTH before dispatching here,
+    // and passes its own (bounded) depth through unchanged.
     if depth > MAX_EXTGLOB_DEPTH {
         return false;
     }
@@ -542,6 +547,8 @@ fn ext_match_group(
             }
             false
         }
+        // Unreachable by construction: `op` comes from `try_extglob_at`,
+        // which only returns one of the five operator bytes handled above.
         _ => false,
     }
 }
@@ -556,6 +563,9 @@ fn ext_match_repeat(
     depth: usize,
     min_count: usize,
 ) -> bool {
+    // Unreachable by construction: deeper recursion into this function only
+    // happens after `ext_match` succeeds at depth + 1, and `ext_match` itself
+    // rejects depth > MAX_EXTGLOB_DEPTH, so the depth here never exceeds MAX.
     if depth > MAX_EXTGLOB_DEPTH {
         return false;
     }
@@ -794,6 +804,9 @@ pub(crate) fn replace_all_ext_with_mode(
             }
         }
         if !found {
+            // Unreachable by construction: the loop condition is
+            // `i < text.len()` and `i` always sits on a char boundary, so a
+            // character always remains at `i`.
             if let Some(ch) = text[i..].chars().next() {
                 result.push(ch);
                 i += ch.len_utf8();
