@@ -326,6 +326,10 @@ impl super::VirtualCommand for RmCommand {
                     }
                 }
                 Ok(_) => {
+                    // COVERAGE: the Err arm is unreachable on InMemoryFs — the
+                    // stat above proved the path is an existing regular file,
+                    // and remove_file cannot fail for one there. Kept as
+                    // defensive error propagation for other VirtualFs backends.
                     if let Err(e) = ctx.fs.remove_file(&path) {
                         stderr.push_str(&format!("rm: cannot remove '{}': {}\n", op, e));
                         exit_code = 1;
@@ -478,6 +482,9 @@ impl super::VirtualCommand for StatCommand {
                     let type_str = match meta.node_type {
                         NodeType::File => "regular file",
                         NodeType::Directory => "directory",
+                        // COVERAGE: unreachable on InMemoryFs — stat() follows
+                        // symlinks (a dangling symlink errors out above), so
+                        // resolved metadata is never NodeType::Symlink.
                         NodeType::Symlink => "symbolic link",
                     };
                     stdout.push_str(&format!("  File: {}\n", op));
@@ -731,6 +738,9 @@ impl super::VirtualCommand for MkfifoCommand {
                 exit_code = 1;
                 continue;
             }
+            // COVERAGE: the Err arm is unreachable on InMemoryFs — write_file
+            // above just created a regular file, and chmod on a regular file
+            // cannot fail there. Defensive for other VirtualFs backends.
             if let Err(e) = ctx.fs.chmod(&path, 0o10644) {
                 stderr.push_str(&format!("mkfifo: cannot set mode for '{}': {}\n", name, e));
                 exit_code = 1;
@@ -883,6 +893,11 @@ impl super::VirtualCommand for ReadlinkCommand {
             match mode {
                 'f' | 'e' => match ctx.fs.canonicalize(&path) {
                     Ok(resolved) => {
+                        // COVERAGE: the !exists branch is unreachable on
+                        // InMemoryFs — canonicalize() (resolve_canonical)
+                        // errors unless every component exists, so a
+                        // successful resolution implies exists(). Defensive
+                        // for other VirtualFs backends.
                         if mode == 'e' && !ctx.fs.exists(&resolved) {
                             stderr.push_str(&format!(
                                 "readlink: {}: No such file or directory\n",
@@ -1287,6 +1302,8 @@ impl super::VirtualCommand for SplitCommand {
                 }
             } else if arg.starts_with('-') && arg.len() > 1 {
                 // Try combined: -l5, etc.
+                // NOTE: "--" also matches this arm; none of the -l/-b/-a
+                // prefixes strip from it, so it is silently ignored here.
                 if let Some(v) = arg.strip_prefix("-l") {
                     lines_per_file = v.parse().ok();
                 } else if let Some(v) = arg.strip_prefix("-b") {
@@ -1294,8 +1311,6 @@ impl super::VirtualCommand for SplitCommand {
                 } else if let Some(v) = arg.strip_prefix("-a") {
                     suffix_len = v.parse().unwrap_or(2);
                 }
-            } else if arg == "--" {
-                // skip
             } else if input_file.is_none() {
                 input_file = Some(arg.as_str());
             } else {

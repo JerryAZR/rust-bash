@@ -128,6 +128,10 @@ impl super::VirtualCommand for XargsCommand {
 
         let exec = match ctx.exec {
             Some(exec) => exec,
+            // COVERAGE: unreachable through the interpreter — the dispatch
+            // layer always sets exec (`exec: Some(&exec_callback)` in
+            // builtins.rs). Only direct VirtualCommand::execute callers can
+            // omit the callback.
             None => {
                 return CommandResult {
                     stderr: "xargs: exec callback not available\n".into(),
@@ -522,6 +526,9 @@ fn parse_unary_expr(args: &[String], pos: usize) -> Result<(FindExpr, usize), St
 
 /// Parse a single predicate or action.
 fn parse_primary(args: &[String], pos: usize) -> Result<(FindExpr, usize), String> {
+    // COVERAGE: this guard is unreachable — the only caller
+    // (parse_unary_expr) already returned an error for pos >= args.len()
+    // before delegating here. Kept as defense in depth.
     if pos >= args.len() {
         return Err("expected expression".into());
     }
@@ -587,7 +594,10 @@ fn walk_find(
     opts: &FindOpts,
     out: &mut FindOutput,
 ) {
-    // Check max_depth before doing anything
+    // Check max_depth before doing anything.
+    // COVERAGE: this guard is unreachable — walk_find is only ever invoked
+    // with depth <= max_depth because the recursion guard below returns
+    // before descending once depth >= max_depth. Kept as defense in depth.
     if opts.max_depth.is_some_and(|max| depth > max) {
         return;
     }
@@ -621,6 +631,9 @@ fn walk_find(
 
         let mut entries = match ctx.fs.readdir(abs_path) {
             Ok(e) => e,
+            // COVERAGE: unreachable on InMemoryFs — stat above proved this is
+            // a directory, and readdir on a directory cannot fail there.
+            // Defensive for other VirtualFs backends.
             Err(e) => {
                 out.stderr
                     .push_str(&format!("find: '{}': {}\n", display_path, e));
@@ -691,6 +704,9 @@ fn eval_find(
                 'd' => meta.node_type == NodeType::Directory,
                 'l' => match ctx.fs.lstat(abs_path) {
                     Ok(m) => m.node_type == NodeType::Symlink,
+                    // COVERAGE: unreachable on InMemoryFs — the walk only
+                    // visits paths produced by readdir/stat, so lstat cannot
+                    // fail here. Defensive for other VirtualFs backends.
                     Err(_) => false,
                 },
                 _ => false,
@@ -705,8 +721,13 @@ fn eval_find(
                 NodeType::File => meta.size == 0,
                 NodeType::Directory => match ctx.fs.readdir(abs_path) {
                     Ok(entries) => entries.is_empty(),
+                    // COVERAGE: unreachable on InMemoryFs — stat above proved
+                    // this is a directory, and readdir on a directory cannot
+                    // fail there. Defensive for other VirtualFs backends.
                     Err(_) => false,
                 },
+                // COVERAGE: unreachable — stat() follows symlinks, so
+                // node_type here is always File or Directory.
                 _ => false,
             }
         }
@@ -761,6 +782,10 @@ fn eval_find(
                     }
                 }
             } else {
+                // COVERAGE: unreachable through the interpreter — the dispatch
+                // layer always sets exec (`exec: Some(&exec_callback)` in
+                // builtins.rs). Only direct VirtualCommand::execute callers
+                // can omit the callback.
                 out.stderr.push_str("find: exec callback not available\n");
                 out.exit_code = 1;
                 false
@@ -806,6 +831,11 @@ fn collect_batch_cmds(
 ) {
     match expr {
         FindExpr::ExecBatch(cmd_parts) => {
+            // COVERAGE: the ctx.exec == None case (an implicit no-op
+            // fall-through here) is unreachable through the interpreter —
+            // the dispatch layer always sets exec
+            // (`exec: Some(&exec_callback)` in builtins.rs). Only direct
+            // VirtualCommand::execute callers can omit the callback.
             if let Some(exec) = ctx.exec {
                 let has_placeholder = cmd_parts.iter().any(|p| p == "{}");
                 let cmd_str = if has_placeholder {
@@ -912,6 +942,9 @@ mod tests {
         // Understands single-quoted arguments for proper shell_join handling.
         let parts = parse_simple_args(cmd);
         if parts.is_empty() {
+            // COVERAGE: only reachable if a module-local test execs an empty
+            // command line; the current suite never does (xargs defaults to
+            // "echo", and find -exec parsing requires non-empty cmd parts).
             return Ok(CommandResult::default());
         }
         match parts[0].as_str() {
@@ -929,6 +962,9 @@ mod tests {
                     ..Default::default()
                 })
             }
+            // COVERAGE: fallback for commands other than echo/cat — not
+            // exercised by the current module-local tests (integration tests
+            // use the interpreter's real exec callback, not this helper).
             _ => Ok(CommandResult {
                 stdout: format!("[{}]\n", cmd),
                 ..Default::default()
