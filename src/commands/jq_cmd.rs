@@ -209,6 +209,8 @@ fn parse_args(args: &[String]) -> Result<(JqOptions, String, Vec<String>), Comma
                                 'n' => opts.null_input = true,
                                 'R' => opts.raw_input = true,
                                 's' => opts.slurp = true,
+                                // Guarded by the validation loop above, which
+                                // rejects any other character before we get here.
                                 _ => unreachable!(),
                             }
                         }
@@ -364,6 +366,9 @@ fn get_inputs(
                 })?;
 
             if vals.is_empty() && !raw_text.trim().is_empty() {
+                // Defensive: jaq's `parse_many` yields either a value or an
+                // error for any non-whitespace input, so an empty value list
+                // is only possible for blank input (handled by the trim check).
                 return Err(CommandResult {
                     stderr: "jq: parse error (Invalid JSON)\n".to_string(),
                     exit_code: 2,
@@ -425,6 +430,10 @@ fn val_to_serde(val: &Val, sort_keys: bool) -> serde_json::Value {
                         serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)
                     })
             } else {
+                // Unreachable: every jaq `Num` Display string (machine int,
+                // bigint, finite float, decimal, NaN, Infinity) parses as i64
+                // or f64 — even huge bigints/decimals become f64 infinity —
+                // so this fallback never runs. Kept defensively.
                 // BigInt/Dec: try serde_json's own parser to preserve precision
                 serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)
             }

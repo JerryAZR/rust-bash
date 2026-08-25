@@ -112,6 +112,9 @@ fn eval_primary(
     prefer_parenthesized: bool,
 ) -> Result<(bool, usize), String> {
     if args.is_empty() {
+        // Unreachable by construction: the only caller (`eval_not`) returns
+        // early on empty args before dispatching here. Kept as a defensive
+        // guard for the recursive-descent invariant.
         return Err("argument expected".to_string());
     }
 
@@ -487,6 +490,9 @@ fn file_same_device_and_inode(left: &str, right: &str, ctx: &CommandContext) -> 
         return true;
     }
     if !ctx.fs.exists(Path::new(&l)) || !ctx.fs.exists(Path::new(&r)) {
+        // Unreachable by construction: both `stat` calls above succeeded, and
+        // every VirtualFs backend reports a path as existing once `stat`
+        // succeeds. Kept as a defensive guard.
         return false;
     }
     // Canonicalize both paths through the VFS
@@ -581,6 +587,9 @@ pub(crate) fn eval_unary_predicate(
             .unwrap_or(false),
         StringHasZeroLength => operand.is_empty(),
         StringHasNonZeroLength => !operand.is_empty(),
+        // Unreachable: walker.rs handles `[[ -v ]]` itself (it needs full
+        // interpreter state for array-element checks) and never delegates
+        // this predicate here.
         ShellVariableIsSetAndAssigned => env.contains_key(operand),
         ShellOptionEnabled => {
             if let Some(opts) = shell_opts {
@@ -600,6 +609,7 @@ pub(crate) fn eval_unary_predicate(
                     _ => false,
                 }
             } else {
+                // Unreachable: walker.rs always passes `Some(&state.shell_opts)`.
                 false
             }
         }
@@ -642,8 +652,15 @@ pub(crate) fn eval_binary_predicate(
     };
 
     match pred {
+        // Unreachable via `[[ ]]`: brush-parser emits StringExactlyMatchesPattern
+        // for both `=` and `==` (and StringDoesNotExactlyMatchPattern for `!=`);
+        // these exact-string variants only appear in the `test`-command grammar,
+        // which rust-bash evaluates separately in `evaluate_test_args`.
         StringExactlyMatchesString => left == right,
         StringDoesNotExactlyMatchString => left != right,
+        // Unreachable: walker.rs evaluates pattern predicates itself (with
+        // extglob/nocasematch support) and never delegates them here, so
+        // `pattern_match` is effectively always true at every call site.
         StringExactlyMatchesPattern => {
             if pattern_match {
                 glob_match(right, left)
@@ -660,13 +677,18 @@ pub(crate) fn eval_binary_predicate(
         }
         LeftSortsBeforeRight => left < right,
         LeftSortsAfterRight => left > right,
+        // Unreachable: walker.rs evaluates arithmetic predicates itself via
+        // `parse_bash_int_pub`/`eval_arithmetic` before delegating, so these
+        // arms (and the `parse_nums` helper below) never run from `[[ ]]`.
         ArithmeticEqualTo => parse_nums(left, right).is_some_and(|(a, b)| a == b),
         ArithmeticNotEqualTo => parse_nums(left, right).is_some_and(|(a, b)| a != b),
         ArithmeticLessThan => parse_nums(left, right).is_some_and(|(a, b)| a < b),
         ArithmeticLessThanOrEqualTo => parse_nums(left, right).is_some_and(|(a, b)| a <= b),
         ArithmeticGreaterThan => parse_nums(left, right).is_some_and(|(a, b)| a > b),
         ArithmeticGreaterThanOrEqualTo => parse_nums(left, right).is_some_and(|(a, b)| a >= b),
-        // Regex matching handled separately in extended test
+        // Regex matching handled separately in extended test.
+        // Unreachable: walker.rs special-cases regex/substring predicates
+        // (quoted-pattern literal matching) before delegating.
         StringMatchesRegex | StringContainsSubstring => false,
         // File comparisons using VFS metadata
         FilesReferToSameDeviceAndInodeNumbers => {
@@ -704,6 +726,9 @@ pub(crate) fn eval_binary_predicate(
     }
 }
 
+/// Only used by the arithmetic arms of `eval_binary_predicate`, which
+/// walker.rs never delegates (it handles `[[ -eq ]]` etc. itself); kept for
+/// completeness of the predicate mapping.
 fn parse_nums(a: &str, b: &str) -> Option<(i64, i64)> {
     Some((parse_bash_int(a)?, parse_bash_int(b)?))
 }
