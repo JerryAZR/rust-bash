@@ -59,6 +59,8 @@ pub(crate) fn resolve_time_spec(spec: Option<SystemTimeSpec>) -> Option<std::tim
     match spec {
         Some(SystemTimeSpec::SymbolicNow) => Some(std::time::SystemTime::now()),
         Some(SystemTimeSpec::Absolute(t)) => Some(t.into_std()),
+        // Unreachable from CPython: os.utime always sets both timestamps
+        // (or neither), so a single-None filestat_set_times never arrives.
         None => None,
     }
 }
@@ -287,6 +289,9 @@ impl WasiDir for VfsDir {
         dest_dir: &dyn WasiDir,
         dest_path: &str,
     ) -> Result<(), Error> {
+        // The Xdev arm is unreachable in this embedding: the guest only ever
+        // sees one preopened VfsDir root, so the destination is always a
+        // VfsDir over the same fs. Kept for trait completeness.
         let dest = dest_dir
             .as_any()
             .downcast_ref::<VfsDir>()
@@ -303,6 +308,7 @@ impl WasiDir for VfsDir {
         target_dir: &dyn WasiDir,
         target_path: &str,
     ) -> Result<(), Error> {
+        // Same Xdev invariant as rename above.
         let dest = target_dir
             .as_any()
             .downcast_ref::<VfsDir>()

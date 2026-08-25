@@ -833,3 +833,14 @@ fn python_utime_on_fd_updates_mtime() {
     );
     assert_eq!(out.stdout, b"fd-utime: True\n");
 }
+
+#[test]
+fn python_fstat_on_directory_fd_succeeds() {
+    // Covers VfsDir::get_filestat (fd-level stat of an open directory).
+    let f = fixture(&[("/dir/keep.txt", b"k")]);
+    let out = run_python(
+        f.overlay,
+        "import os, stat\nfd = os.open('/dir', os.O_RDONLY)\nst = os.fstat(fd)\nprint('is-dir:', stat.S_ISDIR(st.st_mode))\nos.close(fd)\n",
+    );
+    assert_eq!(out.stdout, b"is-dir: True\n");
+}
