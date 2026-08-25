@@ -1,0 +1,373 @@
+# sed: argument-parsing forms, script parse errors, and less-traveled commands.
+# NOTE (pinned divergences from GNU sed, documented per coverage-triage policy):
+#  - A lone "!" script is a silent no-op here (GNU: "missing command", exit 1).
+#  - "s/a/b/q" parses q as a separate Quit command instead of rejecting the
+#    unknown s-flag (GNU: "unknown option to `s'", exit 1).
+#  - "\q" in an s-replacement stays literal "\q" (GNU collapses it to "q").
+#  - Branching to an undefined label silently ends the script (GNU: "can't
+#    find label for jump to `nope'", exit 4).
+#  - Error messages use rust-bash's own phrasing (e.g. "sed: unknown command:
+#    'Z'") rather than GNU's "-e expression #1, char N: ..." form.
+
+# ── argument parsing ────────────────────────────────────────────────
+
+[[cases]]
+name = "script_file_combined_with_e"
+# -e text is joined with the -f file contents (script_text newline branch).
+script = 'printf "a\n" | sed -e "s/a/b/" -f /s.sed'
+stdout = "c\n"
+stderr = ""
+exit_code = 0
+files = { "/s.sed" = "s/b/c/\n" }
+
+[[cases]]
+name = "script_file_missing"
+script = 'printf "a\n" | sed -f /nope.sed'
+stdout = ""
+stderr = "sed: /nope.sed: No such file or directory: /nope.sed\n"
+exit_code = 2
+
+[[cases]]
+name = "in_place_without_files"
+script = 'printf "a\n" | sed -i "s/a/b/"'
+stdout = ""
+stderr = "sed: no input files for in-place editing\n"
+exit_code = 2
+
+[[cases]]
+name = "in_place_missing_file"
+script = 'sed -i "s/a/b/" /nope.txt'
+stdout = ""
+stderr = "sed: /nope.txt: No such file or directory: /nope.txt\n"
+exit_code = 2
+
+[[cases]]
+name = "missing_input_file"
+script = 'sed "s/a/b/" /nope.txt'
+stdout = ""
+stderr = "sed: /nope.txt: No such file or directory: /nope.txt\n"
+exit_code = 2
+
+[[cases]]
+name = "dash_dash_before_script"
+script = 'printf "a\n" | sed -- "s/a/b/"'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "e_missing_argument"
+script = 'sed -e'
+stdout = ""
+stderr = "sed: option -e requires an argument\n"
+exit_code = 2
+
+[[cases]]
+name = "f_missing_argument"
+script = 'sed -f'
+stdout = ""
+stderr = "sed: option -f requires an argument\n"
+exit_code = 2
+
+[[cases]]
+name = "combined_ni_in_place"
+# -n with in-place: only p-flag output is written back (same as GNU).
+script = 'sed -ni "s/a/b/p" /f.txt && cat /f.txt'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "a\n" }
+
+[[cases]]
+name = "combined_nE_extended_regex"
+script = 'printf "ab\n" | sed -nE "s/(a)(b)/\2\1/p"'
+stdout = "ba\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "combined_e_with_attached_script"
+# "-neSCRIPT": the rest of the same arg becomes the script.
+script = 'printf "a\n" | sed "-nes/a/b/p"'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "combined_e_missing_argument"
+script = 'sed -ne'
+stdout = ""
+stderr = "sed: option -e requires an argument\n"
+exit_code = 2
+
+[[cases]]
+name = "combined_f_script_file"
+script = 'printf "a\n" | sed -nf /s.sed'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+files = { "/s.sed" = "s/a/b/p\n" }
+
+[[cases]]
+name = "combined_f_missing_argument"
+script = 'sed -nf'
+stdout = ""
+stderr = "sed: option -f requires an argument\n"
+exit_code = 2
+
+[[cases]]
+name = "combined_unknown_option"
+script = 'printf "a\n" | sed -nz "s/a/b/"'
+stdout = ""
+stderr = "sed: unknown option -- 'z'\n"
+exit_code = 2
+
+# ── script parse errors ─────────────────────────────────────────────
+
+[[cases]]
+name = "address_without_command"
+script = 'printf "a\nb\n" | sed "2"'
+stdout = ""
+stderr = "sed: unexpected end of script after address\n"
+exit_code = 2
+
+[[cases]]
+name = "lone_negation_is_noop"
+# PINNED DIVERGENCE: GNU sed errors with "missing command" (exit 1).
+script = 'printf "a\n" | sed "!"'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unterminated_group"
+script = 'printf "a\n" | sed "{d"'
+stdout = ""
+stderr = "sed: unterminated `{`\n"
+exit_code = 2
+
+[[cases]]
+name = "range_missing_second_address"
+script = 'printf "a\n" | sed "1,"'
+stdout = ""
+stderr = "sed: expected address after ','\n"
+exit_code = 2
+
+[[cases]]
+name = "alternate_regex_delimiter_address"
+script = 'printf "xa\nb\n" | sed "\%a%d"'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "backslash_without_delimiter"
+script = "printf 'a\\n' | sed '\\'"
+stdout = ""
+stderr = "sed: expected delimiter after '\\'\n"
+exit_code = 2
+
+[[cases]]
+name = "extended_regex_address"
+# -E takes the pattern.clone() branch when compiling address regexes.
+script = 'printf "aab\nb\n" | sed -E "/a+/d"'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "step_address_missing_number"
+script = 'printf "a\n" | sed "1~d"'
+stdout = ""
+stderr = "sed: expected step number after '~'\n"
+exit_code = 2
+
+[[cases]]
+name = "escaped_delimiter_in_pattern"
+script = 'printf "x/y\n" | sed "s/x\/y/Q/"'
+stdout = "Q\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "missing_label_after_colon"
+script = 'printf "a\n" | sed ":"'
+stdout = ""
+stderr = "sed: missing label after ':'\n"
+exit_code = 2
+
+[[cases]]
+name = "unknown_command_character"
+script = 'printf "a\n" | sed "Z"'
+stdout = ""
+stderr = "sed: unknown command: 'Z'\n"
+exit_code = 2
+
+[[cases]]
+name = "unterminated_s_command"
+script = 'printf "a\n" | sed "s"'
+stdout = ""
+stderr = "sed: unterminated `s` command\n"
+exit_code = 2
+
+[[cases]]
+name = "unterminated_y_command"
+script = 'printf "a\n" | sed "y"'
+stdout = ""
+stderr = "sed: unterminated `y` command\n"
+exit_code = 2
+
+[[cases]]
+name = "y_command_length_mismatch"
+script = 'printf "ab\n" | sed "y/ab/a/"'
+stdout = ""
+stderr = "sed: `y` command strings have different lengths (2 vs 1)\n"
+exit_code = 2
+
+[[cases]]
+name = "unknown_s_flag_becomes_command"
+# PINNED DIVERGENCE: q is not a valid s-flag; the flag loop breaks and q is
+# parsed as a Quit command (GNU errors "unknown option to `s'", exit 1).
+script = 'printf "a\n" | sed "s/a/b/q"'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+# ── text commands (a/i/c parsing forms) ──────────────────────────────
+
+[[cases]]
+name = "append_text_after_space"
+script = 'printf "x\n" | sed "1a hello"'
+stdout = "x\nhello\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "append_text_after_backslash_newline"
+# GNU-style: backslash immediately followed by a newline before the text.
+script = "printf 'x\\n' | sed '1a\\\nhello'"
+stdout = "x\nhello\n"
+stderr = ""
+exit_code = 0
+
+# ── replacement translation ─────────────────────────────────────────
+
+[[cases]]
+name = "literal_ampersand_in_replacement"
+script = 'printf "a\n" | sed "s/a/\&/"'
+stdout = "&\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "unknown_escape_kept_in_replacement"
+# PINNED DIVERGENCE: "\q" stays two characters (GNU collapses to "q").
+script = 'printf "a\n" | sed "s/a/\q/"'
+stdout = "\\q\n"
+stderr = ""
+exit_code = 0
+
+# ── execution engine paths ──────────────────────────────────────────
+
+[[cases]]
+name = "input_without_trailing_newline"
+script = 'printf "a" | sed "s/a/b/"'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "append_queue_drained_on_quit"
+script = 'printf "l1\nl2\n" | sed -e "1a\\APP" -e "1q"'
+stdout = "l1\nAPP\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "branch_without_label_ends_script"
+script = 'printf "a\n" | sed "b;s/a/X/"'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "branch_to_undefined_label_ends_script"
+# PINNED DIVERGENCE: GNU sed errors "can't find label for jump to `nope'".
+script = 'printf "a\n" | sed "bnope;s/a/b/"'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "t_branches_while_substitutions_succeed"
+script = 'printf "aa\n" | sed ":x;s/a/b/;tx"'
+stdout = "bb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "t_without_label_ends_script"
+script = 'printf "a\n" | sed "s/a/b/;t;s/b/c/"'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "T_without_label_ends_script"
+# s fails, so T (branch if NOT substituted) jumps to end, skipping s/x/y/.
+script = 'printf "x\n" | sed "s/a/b/;T;s/x/y/"'
+stdout = "x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "comment_command_is_noop"
+script = 'printf "a\n" | sed "# just a comment"'
+stdout = "a\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "substitute_nth_occurrence"
+script = 'printf "aa\n" | sed "s/a/b/2"'
+stdout = "ab\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "substitute_nth_occurrence_with_print"
+script = 'printf "aa\n" | sed -n "s/a/b/2p"'
+stdout = "ab\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "substitute_nth_occurrence_not_found"
+script = 'printf "aa\n" | sed "s/a/b/5"'
+stdout = "aa\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "pattern_get_from_hold"
+script = 'printf "a\nb\n" | sed "1h;2g"'
+stdout = "a\na\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "hold_append_reverses_lines"
+# Classic tac: G appends hold to pattern; 1!G skips the first line.
+# ($p must be single-quoted so the shell does not expand $p.)
+script = "printf \"1\\n2\\n3\\n\" | sed -n '1!G;h;$p'"
+stdout = "3\n2\n1\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "next_append_at_end_of_input"
+# N on the last line prints the pattern space and stops.
+script = 'printf "a\n" | sed "N"'
+stdout = "a\n"
+stderr = ""
+exit_code = 0

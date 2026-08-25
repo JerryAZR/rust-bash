@@ -1,0 +1,369 @@
+# gzip / gunzip / zcat / tar: flag forms, error paths, and pipeline plumbing.
+# NOTE (pinned divergences from GNU, documented per coverage-triage policy):
+#  - "gzip: <f>.gz: already exists; not overwriting" exits 1 (GNU: exit 2,
+#    message "already exists;<TAB>not overwritten").
+#  - "gzip: <f>: unknown suffix -- ignored" exits 1 (GNU: exit 2).
+#  - "tar: option requires an argument -- 'f'" / "-- 'C'" (GNU: "Old option
+#    'f' requires an argument."); exit code 2 matches GNU.
+#  - "tar: unknown option -- 'w'" (GNU tar accepts -w; rust-bash does not).
+#  - tar create with a missing input exits 1 with "tar: <f>: No such file or
+#    directory" (GNU: "Cannot stat: ..." plus "Exiting with failure status",
+#    exit 2).
+#  - tar create rejects absolute and ".." member names outright
+#    ("tar: error writing <name>", exit 1); GNU strips the leading "/" or
+#    "../" and archives anyway. The extraction-time path-traversal guard
+#    therefore only fires for host-supplied archives (see
+#    tar_extract_path_traversal_skipped).
+
+[[cases]]
+name = "gzip_dash_dash_separator"
+script = 'gzip -- /f.txt && ls /f.txt.gz'
+stdout = "/f.txt.gz\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "gzip_stdin_binary_chain"
+# Second gzip receives binary stdin_bytes from the first (compress-stdin
+# stdin_bytes branch).
+script = 'printf "x\n" | gzip | gzip | gunzip | gunzip'
+stdout = "x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "gunzip_invalid_data_on_text_stdin"
+# Text (non-bytes) stdin that is not gzip data: decompress error path.
+script = 'printf "not gzip\n" | gunzip'
+stdout = ""
+stderr_contains = "gzip:"
+exit_code = 1
+
+[[cases]]
+name = "gzip_existing_output_refused_without_force"
+script = 'gzip /f.txt'
+stdout = ""
+stderr = "gzip: /f.txt.gz: already exists; not overwriting\n"
+exit_code = 1
+files = { "/f.txt" = "data\n", "/f.txt.gz" = "old\n" }
+
+[[cases]]
+name = "gzip_force_overwrites_existing_output"
+script = 'gzip -f /f.txt && zcat /f.txt.gz'
+stdout = "new\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "new\n", "/f.txt.gz" = "old\n" }
+
+[[cases]]
+name = "gunzip_tgz_suffix_maps_to_tar"
+script = 'gzip -c /f.txt > /f.tgz && gunzip /f.tgz && cat /f.tar'
+stdout = "content\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "content\n" }
+
+[[cases]]
+name = "gunzip_unknown_suffix_ignored"
+# Decompression succeeds but the name has no .gz/.tgz suffix.
+script = 'gzip -c /f.txt > /f.comp; gunzip /f.comp'
+stdout = ""
+stderr = "gzip: /f.comp: unknown suffix -- ignored\n"
+exit_code = 1
+files = { "/f.txt" = "content\n" }
+
+[[cases]]
+name = "gzip_decompress_keep_original"
+script = 'gzip -k /f.txt && rm /f.txt && gzip -dk /f.txt.gz && ls /f.txt && ls /f.txt.gz'
+stdout = "/f.txt\n/f.txt.gz\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+# -- tar argument parsing ---------------------------------------------
+
+[[cases]]
+name = "tar_bundled_f_attached_name"
+# Old-style bundled flags: in "cfx" the f takes the rest ("x") as archive name.
+script = 'tar cfx f.txt && tar tf x'
+stdout = "f.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_bundled_C_with_directory"
+# Old-style bundled flags: "cC" changes directory before archiving.
+script = 'tar cC /d -f /a.tar f.txt && tar tf /a.tar'
+stdout = "f.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/d/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_bundled_f_missing_argument"
+script = 'tar cf'
+stdout = ""
+stderr = "tar: option requires an argument -- 'f'\n"
+exit_code = 2
+
+[[cases]]
+name = "tar_bundled_C_missing_argument"
+script = 'tar cC'
+stdout = ""
+stderr = "tar: option requires an argument -- 'C'\n"
+exit_code = 2
+
+[[cases]]
+name = "tar_dashed_f_attached_name_and_verbose_list"
+# "-cfa.tar": f takes the rest ("a.tar"); "tar -tvf" exercises verbose list.
+script = 'tar -cfa.tar f.txt && tar -tvf a.tar'
+stdout = "644        5 f.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_dashed_f_missing_argument"
+script = 'tar -cf'
+stdout = ""
+stderr = "tar: option requires an argument -- 'f'\n"
+exit_code = 2
+
+[[cases]]
+name = "tar_dashed_C_missing_argument"
+script = 'tar -cC'
+stdout = ""
+stderr = "tar: option requires an argument -- 'C'\n"
+exit_code = 2
+
+[[cases]]
+name = "tar_unknown_option"
+script = 'tar -w'
+stdout = ""
+stderr = "tar: unknown option -- 'w'\n"
+exit_code = 2
+
+# -- tar create -------------------------------------------------------
+
+[[cases]]
+name = "tar_create_missing_input_file"
+script = 'tar cf /a.tar /missing.txt f.txt'
+stdout = ""
+stderr = "tar: /missing.txt: No such file or directory\n"
+exit_code = 1
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_create_absolute_member_rejected"
+# PINNED DIVERGENCE: the tar crate rejects absolute member names (GNU strips
+# the leading "/" and archives anyway).
+script = 'tar cf /a.tar /f.txt'
+stdout = ""
+stderr = "tar: error writing /f.txt\n"
+exit_code = 1
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_create_absolute_directory_rejected"
+script = 'tar cf /a.tar /d'
+stdout = ""
+stderr = "tar: error writing /d/\n"
+exit_code = 1
+files = { "/d/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_create_nested_directories_verbose"
+# Directory sentinels + recursion into subdirectories + verbose names.
+script = 'tar cvf /a.tar d && tar tf /a.tar'
+stdout = "d/\nd/sub/\nd/sub/f.txt\nd/top.txt\nd/\nd/sub/\nd/sub/f.txt\nd/top.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/d/top.txt" = "top\n", "/d/sub/f.txt" = "sub\n" }
+
+[[cases]]
+name = "tar_create_stores_symlink_as_regular_file"
+script = 'ln -s /dir/real.txt /dir/link && tar cf /a.tar dir && mkdir /dest && tar -C /dest -xf /a.tar && cat /dest/dir/link'
+stdout = "real content\n"
+stderr = ""
+exit_code = 0
+files = { "/dir/real.txt" = "real content\n" }
+
+[[cases]]
+name = "tar_create_to_stdout_piped_to_list"
+# "tar cf -" emits binary stdout_bytes; "tar tf -" reads them from stdin.
+script = 'tar cf - f.txt | tar tf -'
+stdout = "f.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_extract_from_stdin"
+script = 'mkdir /dest && tar cf - f.txt | tar -C /dest -xf - && cat /dest/f.txt'
+stdout = "data\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_create_write_failure"
+script = 'tar cf /nodir/a.tar f.txt'
+stdout = ""
+stderr = "tar: /nodir/a.tar: No such file or directory: /nodir\n"
+exit_code = 1
+files = { "/f.txt" = "data\n" }
+
+# -- tar extract ------------------------------------------------------
+
+[[cases]]
+name = "tar_extract_missing_archive"
+script = 'tar xf /missing.tar'
+stdout = ""
+stderr = "tar: /missing.tar: No such file or directory: /missing.tar\n"
+exit_code = 1
+
+[[cases]]
+name = "tar_extract_bad_gzip_data"
+script = 'tar xzf /bad.tgz'
+stdout = ""
+stderr_contains = "tar: gzip decompression failed:"
+exit_code = 1
+files = { "/bad.tgz" = "not gzip data\n" }
+
+[[cases]]
+name = "tar_extract_garbage_on_text_stdin"
+# Text stdin (no stdin_bytes) falls back to ctx.stdin bytes.
+script = 'echo garbage | tar xf -'
+stdout = ""
+stderr_contains = "tar:"
+exit_code = 1
+
+[[cases]]
+name = "tar_extract_garbage_archive"
+script = 'tar xf /bad.tar'
+stdout = ""
+stderr_contains = "tar:"
+exit_code = 1
+files = { "/bad.tar" = "garbage\n" }
+
+[[cases]]
+name = "tar_extract_truncated_archive"
+# 2100-byte member; only 1000 bytes survive truncation, so the entry's
+# data read comes up short.
+script = 'tar cf /a.tar big.txt && head -c 1000 /a.tar > /b.tar && tar xf /b.tar'
+stdout = ""
+stderr_contains = "tar:"
+exit_code = 1
+files = { "/big.txt" = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n" }
+
+[[cases]]
+name = "tar_extract_path_traversal_skipped"
+# The extraction guard refuses to write outside the -C directory. rust-bash's
+# own tar create refuses "../" member names ("tar: error writing ../evil.txt"
+# -- itself a divergence from GNU, which strips leading "../"), so the
+# archive was crafted as a raw ustar header and embedded base64. The trailing
+# cat proves /evil.txt kept its original content.
+script = 'echo "Li4vZXZpbC50eHQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAwMDA2NDQAMDAwMDAwMAAwMDAwMDAwADAwMDAwMDAwMDA2ADAwMDAwMDAwMDAwADAwNzY1NAAgMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABQV05FRAoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" | base64 -d > /s.tar && mkdir /dest && tar -C /dest -xf /s.tar; cat /evil.txt'
+stdout = "x\n"
+stderr = "tar: ../evil.txt: path escapes extraction directory, skipping\n"
+exit_code = 0
+files = { "/evil.txt" = "x\n" }
+
+[[cases]]
+name = "tar_extract_verbose"
+script = 'tar cf /a.tar f.txt && rm f.txt && tar -xvf /a.tar && cat f.txt'
+stdout = "f.txt\ndata\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_extract_dir_entry_blocked_by_file"
+# "mydir/" mkdir_p fails (a file sits there); the member file write then
+# fails because its parent is not a directory.
+script = 'tar cf /a.tar mydir && mkdir /dest && printf x > /dest/mydir && tar -C /dest -xf /a.tar'
+stdout = ""
+stderr_contains = "tar:"
+exit_code = 1
+files = { "/mydir/sub.txt" = "s\n" }
+
+[[cases]]
+name = "tar_extract_creates_missing_parent_dirs"
+# Single member with a slash: no directory sentinel precedes it, so the
+# extractor mkdir_p's the parent itself.
+script = 'tar cf /a.tar sub/f.txt && mkdir /dest && tar -C /dest -xf /a.tar && cat /dest/sub/f.txt'
+stdout = "data\n"
+stderr = ""
+exit_code = 0
+files = { "/sub/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_extract_symlink_entry_written_as_empty_file"
+# PINNED DIVERGENCE: symlink entries (typeflag '2') are extracted as empty
+# regular files (see the TODO in tar_extract); GNU tar recreates the symlink.
+# The archive was crafted as a raw ustar header (symlink link.txt -> real.txt)
+# and embedded base64 because fixture files are text-only.
+script = 'echo "bGluay50eHQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAwMDA2NDQAMDAwMDAwMAAwMDAwMDAwADAwMDAwMDAwMDAwADAwMDAwMDAwMDAwADAxMTExNQAgMnJlYWwudHh0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | base64 -d > /s.tar && mkdir /dest && tar -C /dest -xf /s.tar && ls /dest'
+stdout = "link.txt\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "tar_extract_symlink_entry_in_missing_parent"
+# Same pinned divergence as above (symlink extracted as empty regular file);
+# here the member lives under a nonexistent subdirectory, so the catch-all
+# branch mkdir_p's the parent first.
+script = 'echo "c3ViL2xpbmsudHh0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAwMDA2NDQAMDAwMDAwMAAwMDAwMDAwADAwMDAwMDAwMDAwADAwMDAwMDAwMDAwADAxMTcwNgAgMnJlYWwudHh0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB1c3RhcgAwMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" | base64 -d > /s.tar && mkdir /dest && tar -C /dest -xf /s.tar && ls /dest/sub'
+stdout = "link.txt\n"
+stderr = ""
+exit_code = 0
+
+# -- tar list ---------------------------------------------------------
+
+[[cases]]
+name = "tar_list_missing_archive"
+script = 'tar tf /missing.tar'
+stdout = ""
+stderr = "tar: /missing.tar: No such file or directory: /missing.tar\n"
+exit_code = 1
+
+[[cases]]
+name = "tar_list_bad_gzip_data"
+script = 'tar tzf /bad.tgz'
+stdout = ""
+stderr_contains = "tar: gzip decompression failed:"
+exit_code = 1
+files = { "/bad.tgz" = "not gzip data\n" }
+
+[[cases]]
+name = "tar_list_garbage_archive"
+script = 'tar tf /bad.tar'
+stdout = ""
+stderr_contains = "tar:"
+exit_code = 1
+files = { "/bad.tar" = "garbage\n" }
+
+[[cases]]
+name = "tar_list_gzip_happy_path"
+script = 'tar -czf /a.tgz f.txt && tar tzf /a.tgz'
+stdout = "f.txt\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "tar_list_garbage_on_text_stdin"
+script = 'echo garbage | tar tf -'
+stdout = ""
+stderr_contains = "tar:"
+exit_code = 1
+
+[[cases]]
+name = "tar_gz_roundtrip_dashed_flags"
+script = 'tar -czf /a.tgz f.txt && rm f.txt && tar -xzf /a.tgz && cat f.txt'
+stdout = "data\n"
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "data\n" }

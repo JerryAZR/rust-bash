@@ -209,6 +209,10 @@ fn format_normal_diff(a: &DiffInput, b: &DiffInput) -> String {
         for op in &group {
             let op_old = op.old_range();
             for idx in op_old.clone() {
+                // Coverage note: with grouped_ops(0) any Equal op in a group
+                // has len 0 (hence an empty range) and Insert ops have an
+                // empty old_range, so this condition is always true whenever
+                // it is evaluated.
                 if matches!(
                     op,
                     similar::DiffOp::Delete { .. } | similar::DiffOp::Replace { .. }
@@ -229,6 +233,10 @@ fn format_normal_diff(a: &DiffInput, b: &DiffInput) -> String {
         for op in &group {
             let op_new = op.new_range();
             for idx in op_new.clone() {
+                // Coverage note: with grouped_ops(0) any Equal op in a group
+                // has len 0 (hence an empty range) and Delete ops have an
+                // empty new_range, so this condition is always true whenever
+                // it is evaluated.
                 if matches!(
                     op,
                     similar::DiffOp::Insert { .. } | similar::DiffOp::Replace { .. }
@@ -586,6 +594,9 @@ fn diff_directories(
 
     let entries1 = match ctx.fs.readdir(&resolved1) {
         Ok(entries) => entries,
+        // Coverage note: diff_directories is only called after is_directory
+        // confirmed this path, so readdir cannot fail on the in-memory VFS
+        // (a host-backed OverlayFs could in principle surface this).
         Err(e) => {
             stderr.push_str(&format!("diff: {}: {}\n", path1, e));
             return 2;
@@ -594,6 +605,7 @@ fn diff_directories(
 
     let entries2 = match ctx.fs.readdir(&resolved2) {
         Ok(entries) => entries,
+        // Coverage note: see entries1 above.
         Err(e) => {
             stderr.push_str(&format!("diff: {}: {}\n", path2, e));
             return 2;
@@ -641,6 +653,8 @@ fn diff_directories(
         } else if !is_dir1 && !is_dir2 {
             let content1 = match read_file_content(&child1, ctx) {
                 Ok(c) => c,
+                // Coverage note: readdir just returned this entry, so
+                // reading it cannot fail on the in-memory VFS.
                 Err(e) => {
                     stderr.push_str(&format!("{}\n", e));
                     exit_code = 2;
@@ -649,6 +663,7 @@ fn diff_directories(
             };
             let content2 = match read_file_content(&child2, ctx) {
                 Ok(c) => c,
+                // Coverage note: see content1 above.
                 Err(e) => {
                     stderr.push_str(&format!("{}\n", e));
                     exit_code = 2;
@@ -963,6 +978,8 @@ impl super::VirtualCommand for DiffCommand {
         let content1 = if exists1 {
             match read_file_content(path1, ctx) {
                 Ok(c) => c,
+                // Coverage note: file_exists just confirmed this path, so a
+                // read failure is not expressible on the in-memory VFS.
                 Err(e) => {
                     return CommandResult {
                         stderr: format!("{}\n", e),
@@ -978,6 +995,7 @@ impl super::VirtualCommand for DiffCommand {
         let content2 = if exists2 {
             match read_file_content(path2, ctx) {
                 Ok(c) => c,
+                // Coverage note: see content1 above.
                 Err(e) => {
                     return CommandResult {
                         stderr: format!("{}\n", e),

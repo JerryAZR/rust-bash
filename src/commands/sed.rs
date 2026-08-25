@@ -187,6 +187,9 @@ impl super::VirtualCommand for SedCommand {
                     ctx.limits.max_output_size,
                 );
                 stderr.push_str(&sed_err);
+                // Coverage note: the file was just read successfully, so
+                // write_file cannot fail on the in-memory VFS (a host-backed
+                // OverlayFs could in principle surface this).
                 if let Err(ref e) = ctx.fs.write_file(&path, result.as_bytes()) {
                     stderr.push_str(&format!("sed: {}: {}\n", file, e));
                     has_errors = true;
@@ -373,6 +376,9 @@ fn parse_args(args: &[String]) -> Result<SedOpts<'_>, CommandResult> {
                         j += 1;
                     }
                 } else {
+                    // Coverage note: unreachable — the loop guard already
+                    // broke on args not starting with '-' and on "-" itself,
+                    // so `other` always starts with '-' and has len > 1.
                     break;
                 }
             }
@@ -601,6 +607,8 @@ fn parse_single_command(
     pos: &mut usize,
     extended: bool,
 ) -> Result<SedCmd, String> {
+    // Coverage note: unreachable — parse_commands only calls this after
+    // verifying pos < chars.len().
     if *pos >= chars.len() {
         return Err("expected command".to_string());
     }
@@ -715,6 +723,7 @@ fn parse_text_command(chars: &[char], pos: &mut usize) -> Result<SedCmd, String>
         'a' => Ok(SedCmd::Append(text)),
         'i' => Ok(SedCmd::Insert(text)),
         'c' => Ok(SedCmd::Change(text)),
+        // Unreachable: parse_text_command is only called for a/i/c.
         _ => unreachable!(),
     }
 }
@@ -1027,6 +1036,8 @@ fn execute_commands(
         }
 
         if state.quit || state.deleted {
+            // Coverage note: defensive — every command that sets quit or
+            // deleted also returns Flow::Break, which already returned above.
             return;
         }
 
