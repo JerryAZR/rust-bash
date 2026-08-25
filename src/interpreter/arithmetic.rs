@@ -509,6 +509,8 @@ fn parse_base_n_value(base: i64, digits: &str) -> Result<i64, RustBashError> {
             }
             '@' => 62,
             '_' => 63,
+            // Unreachable: the tokenizer only accepts [0-9a-zA-Z@_] inside
+            // base-N literals, and every one of those is handled above.
             _ => {
                 return Err(RustBashError::Execution(format!(
                     "arithmetic: value too great for base: {digits} (base {base})"
@@ -1073,11 +1075,16 @@ impl<'a> Parser<'a> {
             }
         }
         if depth != 0 || p == 0 {
+            // Unreachable: this walk only runs when the previously parsed
+            // token is `]` of a subscript that was just parsed balanced, so
+            // a matching `[` always exists.
             return None;
         }
         // Token before LBracket should be the identifier
         let ident_tok = self.tokens[p - 1];
         if !matches!(ident_tok.kind, TokenKind::Ident) {
+            // Unreachable: the balanced `[` found above always follows the
+            // array-name identifier in a parsed subscript.
             return None;
         }
         let name = self.ident_name(ident_tok).to_string();
@@ -1088,6 +1095,8 @@ impl<'a> Parser<'a> {
         let sub_text = if lbracket.start + lbracket.len < rbracket.start {
             self.source[lbracket.start + lbracket.len..rbracket.start].to_string()
         } else {
+            // Unreachable: an empty subscript (`a[]`) errors out in
+            // read_array_element_checked before postfix ++/-- is handled.
             String::from("0")
         };
         Some((name, sub_text))
@@ -1309,8 +1318,11 @@ fn read_array_element(
                     VariableValue::AssociativeArray(map) => {
                         map.get(key).cloned().unwrap_or_default()
                     }
+                    // Unreachable: `kind` was determined from this same
+                    // variable above and nothing mutates env in between.
                     _ => String::new(),
                 },
+                // Unreachable: `kind` was determined from this same variable.
                 None => String::new(),
             }
         }
@@ -1335,8 +1347,13 @@ fn read_array_element(
                         };
                         map.get(&actual_idx).cloned().unwrap_or_default()
                     }
+                    // Unreachable: the subscript's arithmetic evaluation can
+                    // assign variables, but assignments preserve the array
+                    // kind (writing `name=val` on an indexed array writes
+                    // element 0), so the variable is still an indexed array.
                     _ => String::new(),
                 },
+                // Unreachable: arithmetic evaluation cannot unset variables.
                 None => String::new(),
             }
         }
@@ -1351,8 +1368,11 @@ fn read_array_element(
                             String::new()
                         }
                     }
+                    // Unreachable: scalar assignments cannot change the
+                    // variable into an array, so it is still a scalar.
                     _ => String::new(),
                 },
+                // Unreachable: arithmetic evaluation cannot unset variables.
                 None => String::new(),
             }
         }
@@ -1434,6 +1454,8 @@ fn write_array_element(
         let max_key = state.env.get(&resolved_name).and_then(|v| match &v.value {
             VariableValue::IndexedArray(map) => map.keys().next_back().copied(),
             VariableValue::Scalar(_) => Some(0),
+            // Unreachable: associative arrays are handled by the
+            // set_assoc_element early return above.
             _ => None,
         });
         match max_key {
@@ -1504,6 +1526,8 @@ fn apply_compound_op(op: TokenKind, lhs: i64, rhs: i64) -> Result<i64, RustBashE
         TokenKind::AmpEq => Ok(lhs & rhs),
         TokenKind::PipeEq => Ok(lhs | rhs),
         TokenKind::CaretEq => Ok(lhs ^ rhs),
+        // Unreachable: only called with the compound-assignment operators
+        // matched in parse_assignment.
         _ => unreachable!(),
     }
 }

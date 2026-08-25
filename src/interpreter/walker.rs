@@ -42,6 +42,8 @@ fn expand_ps4(state: &mut InterpreterState) -> String {
 }
 
 fn source_lines_for_range(source: &str, start_line: usize, end_line: usize) -> Option<String> {
+    // Defensive guards: verbose traces are produced for commands in exec()
+    // input, so the source is non-empty and AST line numbers are 1-based.
     if source.is_empty() || start_line == 0 || end_line < start_line {
         return None;
     }
@@ -68,6 +70,8 @@ fn maybe_verbose_trace(command: &ast::Command, state: &mut InterpreterState) -> 
     }
 
     let Some(loc) = command.location() else {
+        // Unreachable via the public API: commands from the parser always
+        // carry a source location.
         return String::new();
     };
     if loc.start.line <= state.last_verbose_line {
@@ -76,6 +80,8 @@ fn maybe_verbose_trace(command: &ast::Command, state: &mut InterpreterState) -> 
     let Some(snippet) =
         source_lines_for_range(&state.current_source_text, loc.start.line, loc.end.line)
     else {
+        // Unreachable via the public API: exec() source is non-empty and AST
+        // line numbers are 1-based and in bounds (see source_lines_for_range).
         return String::new();
     };
     state.last_verbose_line = loc.end.line;
@@ -156,6 +162,8 @@ fn xtrace_quote(word: &str) -> String {
 fn validate_function_name_word(word: &ast::Word) -> Result<(), RustBashError> {
     let pieces = brush_parser::word::parse(&word.value, &crate::interpreter::parser_options())
         .map_err(|_| RustBashError::ExpansionError {
+            // Unreachable: the shell parser already validated this word when
+            // parsing the function definition, so word::parse cannot fail.
             message: format!("{}: not a valid function name", word.value),
             exit_code: 1,
             should_exit: false,
@@ -186,6 +194,9 @@ fn format_xtrace_command(ps4: &str, cmd: &str, args: &[String]) -> String {
 }
 
 fn split_array_body_for_trace(body: &str) -> Vec<String> {
+    // Note: the leading/run-of-whitespace arms below are defensive — array
+    // assignment args are rendered by joining expanded parts with single
+    // spaces, so the body never starts with or repeats whitespace.
     let mut words = Vec::new();
     let mut current = String::new();
     let mut chars = body.chars().peekable();
@@ -287,6 +298,9 @@ fn current_indexed_array_for_trace(
                 map.insert(0, s.clone());
                 map
             }
+            // Unreachable: this helper only runs for indexed-array `+=` xtrace
+            // rendering; appending to an associative array is processed as an
+            // AssocArray assignment and never reaches here.
             VariableValue::AssociativeArray(_) => std::collections::BTreeMap::new(),
         },
         None => std::collections::BTreeMap::new(),
@@ -687,6 +701,8 @@ fn execute_pipeline(
         // If the command produced binary output, use it for next stage
         if let Some(bytes) = r.stdout_bytes {
             if bytes.is_empty() && !r.stdout.is_empty() {
+                // Defensive: commands only produce Some(stdout_bytes) with the
+                // full binary content, so this combination should not occur.
                 pipe_data = r.stdout;
                 pipe_data_bytes = None;
             } else {
@@ -838,6 +854,9 @@ fn execute_command(
                     );
                     Ok(ExecResult::default())
                 }
+                // Unreachable: validate_function_name_word (above) rejects
+                // any word with non-Text pieces, so this expansion only ever
+                // sees plain literal text, which cannot fail.
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
@@ -946,12 +965,14 @@ enum Assignment {
 impl Assignment {
     fn name(&self) -> &str {
         match self {
-            Assignment::Scalar { name, .. }
-            | Assignment::IndexedArray { name, .. }
+            Assignment::Scalar { name, .. } | Assignment::AppendScalar { name, .. } => name,
+            // Unreachable: the only callers (temp-binding processing in
+            // execute_simple_command) skip array-valued assignments before
+            // calling name(). The arms exist for match exhaustiveness.
+            Assignment::IndexedArray { name, .. }
             | Assignment::AssocArray { name, .. }
             | Assignment::ArrayElement { name, .. }
-            | Assignment::AppendArrayElement { name, .. }
-            | Assignment::AppendScalar { name, .. } => name,
+            | Assignment::AppendArrayElement { name, .. } => name,
         }
     }
 }
@@ -1197,6 +1218,9 @@ fn indexed_array_base_state(
                 map.insert(0, s.clone());
                 map
             }
+            // Unreachable: process_indexed_array_initializer (the only caller
+            // with append=true) is only used when the target is not an
+            // associative array.
             VariableValue::AssociativeArray(_) => std::collections::BTreeMap::new(),
         },
         None => std::collections::BTreeMap::new(),
@@ -1329,8 +1353,11 @@ fn current_assoc_array(
     match state.env.get(name) {
         Some(var) => match &var.value {
             VariableValue::AssociativeArray(map) => map.clone(),
+            // Unreachable: only called from process_assoc_array_initializer
+            // after the variable was confirmed to be an associative array.
             _ => std::collections::BTreeMap::new(),
         },
+        // Unreachable: same invariant as above.
         None => std::collections::BTreeMap::new(),
     }
 }
@@ -1518,6 +1545,7 @@ fn apply_assignment(
                     .get(&name)
                     .and_then(|v| match &v.value {
                         VariableValue::AssociativeArray(map) => map.get(&index).cloned(),
+                        // Unreachable: is_assoc was just verified above.
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -1583,6 +1611,8 @@ fn resolve_negative_array_index(
     let max_key = state.env.get(name).and_then(|v| match &v.value {
         VariableValue::IndexedArray(map) => map.keys().next_back().copied(),
         VariableValue::Scalar(_) => Some(0),
+        // Unreachable: callers resolve associative arrays before reaching
+        // here (set_assoc_element), so the value is never an assoc array.
         _ => None,
     });
     match max_key {
@@ -1726,6 +1756,9 @@ fn execute_simple_command(
                     redirects.push(redir);
                 }
                 ast::CommandPrefixOrSuffixItem::ProcessSubstitution(kind, subshell) => {
+                    // Unreachable: brush-parser's cmd_prefix rule only emits
+                    // assignments and redirects; process substitutions only
+                    // ever appear as suffix items.
                     let path = expand_process_substitution(
                         kind,
                         &subshell.list,
@@ -2459,6 +2492,8 @@ fn execute_compound_command(
             execute_arithmetic_for(afc, state, &effective_stdin)?
         }
         ast::CompoundCommand::Coprocess(_) => {
+            // Unreachable: the pinned brush-parser revision parses `coproc`
+            // as a simple command, so no Coprocess AST node is ever produced.
             state.stdin_offset = saved_stdin_offset;
             return Err(RustBashError::Execution(
                 "coproc is not supported".to_string(),
@@ -2714,12 +2749,15 @@ fn arithmetic_command_has_invalid_hash(
     state: &InterpreterState,
 ) -> bool {
     let source = &state.current_source_text;
+    // Defensive: arithmetic commands always execute within exec() input,
+    // so the source is non-empty and the AST indices are in bounds.
     if source.is_empty() {
         return false;
     }
 
     let Some(raw_command) = char_range_slice(source, arith.loc.start.index, arith.loc.end.index)
     else {
+        // Defensive: same in-bounds invariant as the source check above.
         return false;
     };
 
@@ -2727,6 +2765,8 @@ fn arithmetic_command_has_invalid_hash(
 }
 
 fn char_range_slice(source: &str, start: usize, end: usize) -> Option<&str> {
+    // Defensive guards: callers pass AST character indices into the current
+    // source, which always satisfy start <= end <= char-count.
     if start > end {
         return None;
     }
@@ -2736,6 +2776,8 @@ fn char_range_slice(source: &str, start: usize, end: usize) -> Option<&str> {
         return None;
     }
 
+    // Unreachable for `start`: an AST node's start index points at an
+    // existing character, never one past the end.
     let start_byte = if start == total_chars {
         source.len()
     } else {
@@ -2750,6 +2792,9 @@ fn char_range_slice(source: &str, start: usize, end: usize) -> Option<&str> {
 }
 
 fn find_for_header_line(source: &str, before_char_index: usize) -> Option<usize> {
+    // The `?` operators below are defensive: callers pass an in-bounds AST
+    // character index into `source`. The EOF arm is likewise unreachable:
+    // the index points at an existing token, never one past the end.
     let end_byte = if before_char_index == source.chars().count() {
         source.len()
     } else {
@@ -2838,6 +2883,8 @@ fn try_execute_multiline_paren_ambiguity_command(
     arith: &ast::ArithmeticCommand,
     state: &mut InterpreterState,
 ) -> Result<Option<ExecResult>, RustBashError> {
+    // Defensive: arithmetic commands execute within exec() input, so the
+    // source is non-empty and the AST indices are in bounds.
     if state.current_source_text.is_empty() {
         return Ok(None);
     }
@@ -2847,6 +2894,7 @@ fn try_execute_multiline_paren_ambiguity_command(
         arith.loc.start.index,
         arith.loc.end.index,
     ) else {
+        // Defensive: same in-bounds invariant as the source check above.
         return Ok(None);
     };
 
@@ -2859,6 +2907,9 @@ fn try_execute_multiline_paren_ambiguity_command(
         .strip_prefix("((")
         .and_then(|command| command.strip_suffix(") )"))
     else {
+        // Unreachable: the trimmed check above guarantees the delimiters,
+        // and raw_command spans exactly the command's source location (no
+        // leading/trailing padding).
         return Ok(None);
     };
     let mut rewritten = String::from("( {");
@@ -2870,6 +2921,8 @@ fn try_execute_multiline_paren_ambiguity_command(
 
     let program = match parse(&rewritten) {
         Ok(program) => program,
+        // Unreachable: the inner text comes from an already-parsed command
+        // body, so wrapping it in `( { ... } )` cannot fail to parse.
         Err(_) => return Ok(None),
     };
 
@@ -3746,6 +3799,8 @@ fn execute_exec_builtin(
     // Has command args → execute and exit
     let input_redirects = match collect_input_redirects(redirects, state, stdin) {
         Ok(map) => map,
+        // Unreachable: execute_simple_command already collected these same
+        // redirects successfully before dispatching to the exec builtin.
         Err(RustBashError::RedirectFailed(msg)) => {
             let result = ExecResult {
                 stderr: format!("rust-bash: {msg}\n"),
@@ -3856,6 +3911,9 @@ fn exec_persistent_redirects(
                     ast::IoFileRedirectKind::ReadAndWrite => {
                         let fd_num = fd.unwrap_or(0);
                         if !state.fs.exists(Path::new(&path)) {
+                            // Unreachable: a missing <> target fails input
+                            // collection in execute_simple_command before the
+                            // exec builtin runs.
                             state
                                 .fs
                                 .write_file(Path::new(&path), b"")
@@ -4067,6 +4125,9 @@ fn exec_fd_variable_alloc(
                         state.persistent_fd_offsets.insert(fd_num, 0);
                     } else {
                         if !state.fs.exists(Path::new(&path)) {
+                            // Unreachable: a missing <> target fails input
+                            // collection in execute_simple_command before the
+                            // exec builtin runs.
                             state
                                 .fs
                                 .write_file(Path::new(&path), b"")
@@ -4149,6 +4210,8 @@ fn expand_heredoc_body(
                         expanded_input.push(other);
                         chars.next();
                     }
+                    // Unreachable: the here-document body always ends with a
+                    // newline, so a backslash is never the last character.
                     None => expanded_input.push('\\'),
                 }
             } else if ch == '"' {
@@ -4198,6 +4261,9 @@ fn read_input_redirect(
     state: &mut InterpreterState,
     default_stdin: &str,
 ) -> Result<Option<String>, RustBashError> {
+    // Note: the fd-mismatch and fall-through arms below are unreachable —
+    // the only caller (collect_input_redirects) derives fd_num from this
+    // same redirect and only forwards input-redirect kinds.
     match redir {
         ast::IoRedirect::File(fd, kind, target) => {
             if fd.unwrap_or(0) != fd_num {
@@ -4214,6 +4280,8 @@ fn read_input_redirect(
                         return Ok(Some(String::new()));
                     }
                     if filename.is_empty() {
+                        // Unreachable: redirect_target_filename (via
+                        // expand_redirect_word) already rejects empty names.
                         return Err(RustBashError::RedirectFailed(
                             ": No such file or directory".to_string(),
                         ));
@@ -4735,6 +4803,8 @@ fn apply_duplicate_output(
             }
         }
         ast::IoFileRedirectTarget::Fd(target_fd) => target_fd.to_string(),
+        // Unreachable: the parser only produces Duplicate/Fd targets for
+        // `>&` redirects (io_fd_duplication_source).
         _ => return Ok(true),
     };
 
@@ -5264,6 +5334,9 @@ fn format_binary_pred(pred: &ast::BinaryPredicate) -> &'static str {
     match pred {
         BinaryPredicate::StringExactlyMatchesPattern => "==",
         BinaryPredicate::StringDoesNotExactlyMatchPattern => "!=",
+        // Unreachable in [[ ]] traces: the [[ ]] grammar only produces the
+        // Pattern variants above; the String variants come from the `[ ]`
+        // test-command grammar.
         BinaryPredicate::StringExactlyMatchesString => "==",
         BinaryPredicate::StringDoesNotExactlyMatchString => "!=",
         BinaryPredicate::StringMatchesRegex => "=~",
@@ -5400,6 +5473,7 @@ fn eval_extended_test_expr(
                     BinaryPredicate::ArithmeticGreaterThan => lval > rval,
                     BinaryPredicate::ArithmeticLessThanOrEqualTo => lval <= rval,
                     BinaryPredicate::ArithmeticGreaterThanOrEqualTo => lval >= rval,
+                    // Unreachable: guarded by the matches! check above.
                     _ => unreachable!(),
                 };
                 return Ok(result);
@@ -5429,9 +5503,12 @@ fn eval_extended_test_expr(
                         }
                     }
                     ast::BinaryPredicate::StringExactlyMatchesString => {
+                        // Unreachable: the [[ ]] grammar only produces
+                        // StringExactlyMatchesPattern for `==`.
                         left.eq_ignore_ascii_case(&right)
                     }
                     ast::BinaryPredicate::StringDoesNotExactlyMatchString => {
+                        // Unreachable: same as above.
                         !left.eq_ignore_ascii_case(&right)
                     }
                     _ => crate::commands::test_cmd::eval_binary_predicate(
@@ -5508,6 +5585,7 @@ fn test_variable_is_set(operand: &str, state: &mut InterpreterState) -> (bool, S
                 // Indexed array: evaluate index as arithmetic.
                 let idx = eval_index_arithmetic(index, state);
                 let Some(var) = state.env.get(&resolved) else {
+                    // Unreachable: arithmetic evaluation cannot unset vars.
                     return (false, stderr);
                 };
                 if let VariableValue::IndexedArray(map) = &var.value {
@@ -5531,6 +5609,9 @@ fn test_variable_is_set(operand: &str, state: &mut InterpreterState) -> (bool, S
                     };
                     (map.contains_key(&actual_idx), stderr)
                 } else {
+                    // Unreachable: arithmetic assignments preserve the array
+                    // kind (writing `name=val` on an indexed array writes
+                    // element 0), so the variable is still an indexed array.
                     (false, stderr)
                 }
             }
@@ -5544,6 +5625,10 @@ fn test_variable_is_set(operand: &str, state: &mut InterpreterState) -> (bool, S
                             if let VariableValue::AssociativeArray(map) = &var.value {
                                 Some(map.contains_key(index))
                             } else {
+                                // Unreachable: the assoc path performs no
+                                // evaluation between the type check above and
+                                // this lookup, so the variable is still an
+                                // associative array.
                                 None
                             }
                         })
