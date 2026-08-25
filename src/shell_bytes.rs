@@ -60,6 +60,11 @@ pub(crate) fn decode_shell_bytes(bytes: &[u8]) -> String {
                     Some(invalid_len) => {
                         for &byte in &bytes[i..i + invalid_len] {
                             if byte.is_ascii() {
+                                // Unreachable: an invalid UTF-8 span reported
+                                // by `str::from_utf8` never contains ASCII
+                                // bytes (ASCII is always a valid 1-byte char,
+                                // so it can't be part of an invalid span).
+                                // Kept as a defensive pass-through.
                                 out.push(byte as char);
                             } else {
                                 out.push(marker_for_byte(byte));
@@ -70,6 +75,10 @@ pub(crate) fn decode_shell_bytes(bytes: &[u8]) -> String {
                     None => {
                         for &byte in &bytes[i..] {
                             if byte.is_ascii() {
+                                // Unreachable: `error_len() == None` means the
+                                // input ends with a truncated multi-byte
+                                // sequence, whose bytes are all >= 0x80.
+                                // Kept as a defensive pass-through.
                                 out.push(byte as char);
                             } else {
                                 out.push(marker_for_byte(byte));

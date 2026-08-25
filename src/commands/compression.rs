@@ -177,6 +177,9 @@ fn gzip_compress_stdin(ctx: &CommandContext, level: u32) -> CommandResult {
 
     let mut encoder = GzEncoder::new(&input[..], Compression::new(level));
     let mut compressed = Vec::new();
+    // Coverage note: encoding from an in-memory slice cannot fail in practice
+    // (no I/O is involved); this arm exists only because flate2's Read API is
+    // fallible.
     if let Err(e) = encoder.read_to_end(&mut compressed) {
         return CommandResult {
             stderr: format!("gzip: {}\n", e),
@@ -325,6 +328,9 @@ fn gzip_decompress_file(
 
     // Remove original unless -k
     if !keep {
+        // Coverage note: unreachable on the in-memory VFS (the file was just
+        // read successfully); a host-backed OverlayFs could in principle
+        // surface this, hence the fallible map_err.
         ctx.fs
             .remove_file(&path)
             .map_err(|e| format!("gzip: {}: {}\n", file, e))?;
@@ -541,6 +547,10 @@ impl super::VirtualCommand for TarCommand {
                                 };
                             }
                         }
+                        // Coverage note: unreachable by construction — the
+                        // caller only enters this bundled-flags branch when
+                        // every char of the arg is in "cxtfzvC", and the arms
+                        // above cover exactly those chars.
                         _ => {
                             return CommandResult {
                                 stderr: format!("tar: unknown option -- '{}'\n", c),
@@ -640,6 +650,7 @@ impl super::VirtualCommand for TarCommand {
                 tar_extract(ctx, &effective_cwd, archive_file.as_deref(), gzip, verbose)
             }
             TarMode::List => tar_list(ctx, &effective_cwd, archive_file.as_deref(), gzip, verbose),
+            // TarMode::None was rejected above, before this dispatch.
             TarMode::None => unreachable!(),
         }
     }
@@ -718,6 +729,9 @@ fn tar_create(
 
         let stat = match ctx.fs.stat(&path) {
             Ok(s) => s,
+            // Coverage note: exists() succeeded just above, so stat cannot
+            // fail on the in-memory VFS (a host-backed OverlayFs could in
+            // principle surface this).
             Err(e) => {
                 stderr.push_str(&format!("tar: {}: {}\n", file_arg, e));
                 continue;
@@ -728,6 +742,8 @@ fn tar_create(
             // Recursively add directory contents
             let entries = match collect_files_recursive(ctx.fs, &path, Path::new(file_arg)) {
                 Ok(e) => e,
+                // Coverage note: readdir on a directory that just stat'd
+                // successfully cannot fail on the in-memory VFS.
                 Err(msg) => {
                     stderr.push_str(&msg);
                     continue;
@@ -742,6 +758,9 @@ fn tar_create(
             dir_header.set_mtime(system_time_to_secs(stat.mtime));
             let dir_name = format!("{}/", file_arg);
             dir_header.set_cksum();
+            // Note: append_data rejects absolute and ".." member names, so
+            // this arm fires for e.g. `tar cf a.tar /absdir` (covered by
+            // comparison fixtures).
             if tar_builder
                 .append_data(&mut dir_header, &dir_name, &[][..])
                 .is_err()
@@ -764,6 +783,11 @@ fn tar_create(
                     header.set_mode(0o755);
                     header.set_mtime(0);
                     header.set_cksum();
+                    // Coverage note: append_data rejects absolute and ".."
+                    // member names, but nested names join under the
+                    // already-accepted (relative) directory name, so they
+                    // are always valid here; and in-memory Vec writes cannot
+                    // fail. Unreachable by construction.
                     if tar_builder
                         .append_data(&mut header, &archive_name, &[][..])
                         .is_err()
@@ -783,6 +807,8 @@ fn tar_create(
                 header.set_cksum();
 
                 let archive_name = archive_path.to_string_lossy().to_string();
+                // Coverage note: unreachable by construction — see the
+                // sentinel-header note above.
                 if tar_builder
                     .append_data(&mut header, &archive_name, &data[..])
                     .is_err()
@@ -798,6 +824,8 @@ fn tar_create(
             // Single file
             let data = match ctx.fs.read_file(&path) {
                 Ok(d) => d,
+                // Coverage note: the path exists() and stat'd just above, so
+                // reading it cannot fail on the in-memory VFS.
                 Err(e) => {
                     stderr.push_str(&format!("tar: {}: {}\n", file_arg, e));
                     continue;
@@ -810,6 +838,9 @@ fn tar_create(
             header.set_mtime(system_time_to_secs(stat.mtime));
             header.set_cksum();
 
+            // Note: append_data rejects absolute and ".." member names, so
+            // this arm fires for e.g. `tar cf a.tar /abs.txt` (covered by
+            // comparison fixtures).
             if tar_builder
                 .append_data(&mut header, file_arg, &data[..])
                 .is_err()
@@ -826,6 +857,7 @@ fn tar_create(
     // Finalize
     let tar_data = match tar_builder.into_inner() {
         Ok(d) => d,
+        // Coverage note: finishing an in-memory Vec writer cannot fail.
         Err(e) => {
             return CommandResult {
                 stderr: format!("tar: {}\n", e),
@@ -839,6 +871,7 @@ fn tar_create(
     let final_data = if gzip {
         let mut encoder = GzEncoder::new(&tar_data[..], Compression::default());
         let mut compressed = Vec::new();
+        // Coverage note: gzip-encoding in-memory data cannot fail (no I/O).
         if let Err(e) = encoder.read_to_end(&mut compressed) {
             return CommandResult {
                 stderr: format!("tar: gzip compression failed: {}\n", e),
@@ -933,6 +966,9 @@ fn tar_extract(
     let mut archive = tar::Archive::new(&tar_data[..]);
     let entries = match archive.entries() {
         Ok(e) => e,
+        // Coverage note: tar::Archive::entries() only fails when the archive
+        // cursor is not at position 0; a fresh Archive always is, so this
+        // arm is unreachable by construction.
         Err(e) => {
             return CommandResult {
                 stderr: format!("tar: {}\n", e),
@@ -956,6 +992,9 @@ fn tar_extract(
 
         let entry_path = match entry.path() {
             Ok(p) => p.to_path_buf(),
+            // Coverage note: entry.path() fails only on non-UTF-8 member
+            // names. rust-bash's own tar create writes UTF-8 names, so this
+            // is reachable only with a host-supplied corrupt archive.
             Err(e) => {
                 stderr.push_str(&format!("tar: {}\n", e));
                 continue;
@@ -999,6 +1038,9 @@ fn tar_extract(
                 }
 
                 let mut data = Vec::new();
+                // Coverage note: the archive is an in-memory &[u8], whose
+                // reader cannot fail; truncated entries surface as iterator
+                // errors (handled above), not from read_to_end.
                 if let Err(e) = entry.read_to_end(&mut data) {
                     stderr.push_str(&format!("tar: {}: {}\n", entry_path.display(), e));
                     continue;
@@ -1082,6 +1124,9 @@ fn tar_list(
     let mut archive = tar::Archive::new(&tar_data[..]);
     let entries = match archive.entries() {
         Ok(e) => e,
+        // Coverage note: tar::Archive::entries() only fails when the archive
+        // cursor is not at position 0; a fresh Archive always is, so this
+        // arm is unreachable by construction.
         Err(e) => {
             return CommandResult {
                 stderr: format!("tar: {}\n", e),
@@ -1107,6 +1152,9 @@ fn tar_list(
 
         let path = match entry.path() {
             Ok(p) => p.to_path_buf(),
+            // Coverage note: entry.path() fails only on non-UTF-8 member
+            // names. rust-bash's own tar create writes UTF-8 names, so this
+            // is reachable only with a host-supplied corrupt archive.
             Err(e) => {
                 return CommandResult {
                     stderr: format!("tar: {}\n", e),

@@ -1,0 +1,373 @@
+# diff: long-option forms, attached/separate context values, error paths,
+# directory-vs-file comparison, and no-trailing-newline formatting.
+# NOTE (pinned divergences from GNU diff, documented per coverage-triage policy):
+#  - Hunk headers always include explicit counts ("@@ -1,0 +1,1 @@"); GNU
+#    elides ",1" counts and uses 0-based starts for empty sides.
+#  - Missing-file errors use rust-bash's own phrasing and exit 2, matching
+#    GNU's exit code.
+
+# ── normal format edge cases ────────────────────────────────────────
+
+[[cases]]
+name = "normal_change_no_trailing_newline"
+# < / > lines get an explicit newline appended for unterminated last lines.
+script = 'diff /a /b'
+stdout = "1c1\n< x\n---\n> y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x", "/b" = "y" }
+
+[[cases]]
+name = "normal_multiline_change_range"
+script = 'diff /a /b'
+stdout = "1,2c1,2\n< a\n< b\n---\n> c\n> d\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "a\nb\n", "/b" = "c\nd\n" }
+
+# ── unified format edge cases ───────────────────────────────────────
+
+[[cases]]
+name = "unified_empty_old_file"
+# Empty old side: start falls back to 1 and count to 0.
+script = 'diff -u /e /f'
+stdout = "--- /e\n+++ /f\n@@ -1,0 +1,1 @@\n+x\n"
+stderr = ""
+exit_code = 1
+files = { "/e" = "", "/f" = "x\n" }
+
+[[cases]]
+name = "unified_pure_insertion"
+script = 'diff -u /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,1 +1,2 @@\n a\n+b\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "a\n", "/b" = "a\nb\n" }
+
+[[cases]]
+name = "unified_equal_line_without_trailing_newline"
+# Shared trailing line "z" has no newline: equal/delete markers add one.
+script = 'diff -u /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,2 +1,2 @@\n-x\n+y\n z\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\nz", "/b" = "y\nz" }
+
+[[cases]]
+name = "unified_replace_without_trailing_newline"
+script = 'diff -u /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x", "/b" = "y" }
+
+[[cases]]
+name = "unified_delete_without_trailing_newline"
+script = 'diff -u /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,2 +1,1 @@\n x\n-z\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\nz", "/b" = "x\n" }
+
+[[cases]]
+name = "unified_insert_without_trailing_newline"
+script = 'diff -u /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,1 +1,2 @@\n x\n+z\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "x\nz" }
+
+# ── context format edge cases ───────────────────────────────────────
+
+[[cases]]
+name = "context_empty_old_file"
+# Empty old side: context headers fall back to start == end.
+script = 'diff -c /e /f'
+stdout = "*** /e\n--- /f\n***************\n*** 1,1 ****\n--- 1,1 ----\n+ x\n"
+stderr = ""
+exit_code = 1
+files = { "/e" = "", "/f" = "x\n" }
+
+[[cases]]
+name = "context_pure_deletion"
+# PINNED DIVERGENCE: the new-side section has no changes, so its equal
+# context line is omitted entirely (GNU prints "  a" after "--- 1,1 ----").
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,2 ****\n  a\n- b\n--- 1,1 ----\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "a\nb\n", "/b" = "a\n" }
+
+[[cases]]
+name = "context_pure_insertion"
+# PINNED DIVERGENCE: the old-side section has no changes, so its equal
+# context line is omitted entirely (GNU prints "  a" after "*** 1,1 ****").
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,1 ****\n--- 1,2 ----\n  a\n+ b\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "a\n", "/b" = "a\nb\n" }
+
+[[cases]]
+name = "context_equal_line_without_trailing_newline"
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,2 ****\n! x\n  z\n--- 1,2 ----\n! y\n  z\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\nz", "/b" = "y\nz" }
+
+[[cases]]
+name = "context_replace_without_trailing_newline"
+# Replaced lines lack trailing newlines on both sides.
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,1 ****\n! z\n--- 1,1 ----\n! y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "z", "/b" = "y" }
+
+[[cases]]
+name = "context_delete_without_trailing_newline"
+# PINNED DIVERGENCE: the new-side section has no changes, so its equal
+# context line is omitted entirely (GNU prints "  x" after "--- 1,1 ----").
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,2 ****\n  x\n- z\n--- 1,1 ----\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\nz", "/b" = "x\n" }
+
+[[cases]]
+name = "context_insert_without_trailing_newline"
+# PINNED DIVERGENCE: the old-side section has no changes, so its equal
+# context line is omitted entirely (GNU prints "  x" after "*** 1,1 ****").
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,1 ****\n--- 1,2 ----\n  x\n+ z\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "x\nz" }
+
+[[cases]]
+name = "context_group_with_replace_and_insert"
+# One hunk containing Replace + Equal + Insert: the old-side loop visits an
+# Insert op (no old lines) and falls through to its catch-all arm.
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,2 ****\n! x\n  y\n--- 1,3 ----\n! z\n  y\n+ w\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\ny\n", "/b" = "z\ny\nw\n" }
+
+[[cases]]
+name = "context_group_with_replace_and_delete"
+# One hunk containing Replace + Equal + Delete: the new-side loop visits a
+# Delete op (no new lines) and falls through to its catch-all arm.
+script = 'diff -c /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,3 ****\n! x\n  y\n- w\n--- 1,2 ----\n! z\n  y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\ny\nw\n", "/b" = "z\ny\n" }
+
+[[cases]]
+name = "context_empty_new_file"
+# Empty new side: new-side header positions fall back to 1 / new_start.
+script = 'diff -c /f /e'
+stdout = "*** /f\n--- /e\n***************\n*** 1,1 ****\n- x\n--- 1,1 ----\n"
+stderr = ""
+exit_code = 1
+files = { "/e" = "", "/f" = "x\n" }
+
+# ── directory comparison ────────────────────────────────────────────
+
+[[cases]]
+name = "recursive_only_in_differences"
+# Only "Only in" reports: exit_code is raised from 0 inside the loop.
+script = 'diff -r /d1 /d2'
+stdout = "Only in /d1: x.txt\nOnly in /d2: y.txt\n"
+stderr = ""
+exit_code = 1
+files = { "/d1/x.txt" = "1\n", "/d2/y.txt" = "2\n" }
+
+[[cases]]
+name = "recursive_only_in_second_directory"
+# Only /d2 has extra entries: the !in1 && in2 branch raises the exit code.
+script = 'diff -r /d1 /d2'
+stdout = "Only in /d2: y.txt\n"
+stderr = ""
+exit_code = 1
+files = { "/d1/a.txt" = "s\n", "/d2/a.txt" = "s\n", "/d2/y.txt" = "y\n" }
+
+[[cases]]
+name = "recursive_mixed_file_and_directory"
+script = 'diff -r /d1 /d2'
+stdout = "File /d1/x is a directory while file /d2/x is a regular file\n"
+stderr = ""
+exit_code = 1
+files = { "/d1/x/f.txt" = "in dir\n", "/d2/x" = "a file\n" }
+
+[[cases]]
+name = "file_against_directory_first_arg"
+# diff DIR FILE: compares FILE against DIR/<basename of FILE>.
+script = 'diff /dir /f.txt'
+stdout = ""
+stderr = ""
+exit_code = 0
+files = { "/f.txt" = "same\n", "/dir/f.txt" = "same\n" }
+
+[[cases]]
+name = "file_against_directory_second_arg_differing"
+script = 'diff /f.txt /dir'
+stdout = "1c1\n< one\n---\n> two\n"
+stderr = ""
+exit_code = 1
+files = { "/f.txt" = "one\n", "/dir/f.txt" = "two\n" }
+
+[[cases]]
+name = "file_against_directory_missing_member"
+script = 'diff /f.txt /dir'
+stdout = ""
+stderr = "diff: /dir/f.txt: No such file or directory: /dir/f.txt\n"
+exit_code = 2
+files = { "/f.txt" = "one\n", "/dir/other.txt" = "two\n" }
+
+[[cases]]
+name = "directory_against_missing_file"
+# diff DIR MISSING: reading the file operand fails before the dir member
+# is even considered.
+script = 'diff /dir /missing.txt'
+stdout = ""
+stderr = "diff: /missing.txt: No such file or directory: /missing.txt\n"
+exit_code = 2
+files = { "/dir/x.txt" = "x\n" }
+
+# ── option parsing ──────────────────────────────────────────────────
+
+[[cases]]
+name = "dash_dash_before_files"
+script = 'diff -- /a /b'
+stdout = "1c1\n< x\n---\n> y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "long_unified"
+script = 'diff --unified /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "long_context"
+script = 'diff --context /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,1 ****\n! x\n--- 1,1 ----\n! y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "long_label_missing_argument"
+script = 'diff --label'
+stdout = ""
+stderr = "diff: option '--label' requires an argument\n"
+exit_code = 2
+
+[[cases]]
+name = "long_unified_with_value"
+script = 'diff --unified=1 /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "long_unified_invalid_value"
+script = 'diff --unified=abc /a /b'
+stdout = ""
+stderr = "diff: invalid context length 'abc'\n"
+exit_code = 2
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "long_context_with_value"
+script = 'diff --context=1 /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,1 ****\n! x\n--- 1,1 ----\n! y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "long_context_invalid_value"
+script = 'diff --context=abc /a /b'
+stdout = ""
+stderr = "diff: invalid context length 'abc'\n"
+exit_code = 2
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "long_label_with_equals"
+script = 'diff -u --label=old --label=new /a /b'
+stdout = "--- old\n+++ new\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "unrecognized_long_option"
+script = 'diff --frobnicate /a /b'
+stdout = ""
+stderr = "diff: unrecognized option '--frobnicate'\n"
+exit_code = 2
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "U_separate_argument"
+script = 'diff -U 1 /a /b'
+stdout = "--- /a\n+++ /b\n@@ -1,1 +1,1 @@\n-x\n+y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "U_missing_argument"
+script = 'diff -U'
+stdout = ""
+stderr = "diff: option requires an argument -- 'U'\n"
+exit_code = 2
+
+[[cases]]
+name = "U_invalid_argument"
+script = 'diff -U abc /a /b'
+stdout = ""
+stderr = "diff: invalid context length 'abc'\n"
+exit_code = 2
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "C_separate_argument"
+script = 'diff -C 1 /a /b'
+stdout = "*** /a\n--- /b\n***************\n*** 1,1 ****\n! x\n--- 1,1 ----\n! y\n"
+stderr = ""
+exit_code = 1
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "C_missing_argument"
+script = 'diff -C'
+stdout = ""
+stderr = "diff: option requires an argument -- 'C'\n"
+exit_code = 2
+
+[[cases]]
+name = "invalid_short_option"
+script = 'diff -z /a /b'
+stdout = ""
+stderr = "diff: invalid option -- 'z'\n"
+exit_code = 2
+files = { "/a" = "x\n", "/b" = "y\n" }
+
+[[cases]]
+name = "missing_first_file"
+script = 'diff /missing.txt /b.txt'
+stdout = ""
+stderr = "diff: /missing.txt: No such file or directory\n"
+exit_code = 2
+files = { "/b.txt" = "y\n" }
