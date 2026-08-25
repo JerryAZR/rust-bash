@@ -243,10 +243,7 @@ impl AwkRuntime {
                             continue;
                         }
 
-                        let matched = match self.pattern_matches(rule, rule_idx) {
-                            Ok(m) => m,
-                            Err(()) => continue,
-                        };
+                        let matched = self.pattern_matches(rule, rule_idx);
                         if !matched {
                             continue;
                         }
@@ -284,17 +281,18 @@ impl AwkRuntime {
         (self.exit_code, self.stdout.clone(), self.stderr.clone())
     }
 
-    fn pattern_matches(&mut self, rule: &AwkRule, rule_idx: usize) -> Result<bool, ()> {
+    fn pattern_matches(&mut self, rule: &AwkRule, rule_idx: usize) -> bool {
         match &rule.pattern {
-            None => Ok(true),
-            Some(AwkPattern::Begin | AwkPattern::End) => Ok(false),
+            None => true,
+            // Unreachable: execute() skips Begin/End rules before calling this.
+            Some(AwkPattern::Begin | AwkPattern::End) => false,
             Some(AwkPattern::Regex(r)) => {
                 let field0 = self.fields[0].clone();
-                Ok(self.regex_match(r, &field0))
+                self.regex_match(r, &field0)
             }
             Some(AwkPattern::Expression(expr)) => {
                 let val = self.eval_expr(expr);
-                Ok(val.is_true())
+                val.is_true()
             }
             Some(AwkPattern::Range(start, end)) => {
                 let active = self.range_active.get(rule_idx).copied().unwrap_or(false);
@@ -305,7 +303,7 @@ impl AwkRuntime {
                     {
                         *a = false;
                     }
-                    Ok(true)
+                    true
                 } else {
                     let start_val = self.eval_expr(start);
                     if start_val.is_true() {
@@ -318,9 +316,9 @@ impl AwkRuntime {
                         {
                             *a = false;
                         }
-                        Ok(true)
+                        true
                     } else {
-                        Ok(false)
+                        false
                     }
                 }
             }
@@ -778,6 +776,7 @@ impl AwkRuntime {
                         }
                     }
                     BinOp::Pow => l.powf(r),
+                    // Unreachable: the match guard limits op to arithmetic variants.
                     _ => unreachable!(),
                 };
                 AwkValue::Num(result)
@@ -818,6 +817,7 @@ impl AwkRuntime {
                     }
                 }
                 AssignOp::PowAssign => old.powf(rhs),
+                // Unreachable: AssignOp::Assign returns via the early branch above.
                 AssignOp::Assign => unreachable!(),
             };
             AwkValue::Num(result)
@@ -1202,6 +1202,7 @@ fn compare_values(left: &AwkValue, right: &AwkValue, op: BinOp) -> bool {
             BinOp::Ge => l >= r,
             BinOp::Eq => l == r,
             BinOp::Ne => l != r,
+            // Unreachable: eval_binary_op only passes comparison operators here.
             _ => false,
         }
     } else {
@@ -1214,6 +1215,7 @@ fn compare_values(left: &AwkValue, right: &AwkValue, op: BinOp) -> bool {
             BinOp::Ge => l >= r,
             BinOp::Eq => l == r,
             BinOp::Ne => l != r,
+            // Unreachable: eval_binary_op only passes comparison operators here.
             _ => false,
         }
     }
@@ -1270,10 +1272,6 @@ fn split_records(input: &str, rs: &str) -> Vec<String> {
         for line in input.split('\n') {
             if line.is_empty() {
                 if !current.is_empty() {
-                    // Remove trailing newline from current record
-                    if current.ends_with('\n') {
-                        current.pop();
-                    }
                     records.push(current);
                     current = String::new();
                 }
@@ -1539,11 +1537,8 @@ fn format_g(n: f64, prec: usize) -> String {
         return "0".to_string();
     }
     let prec = if prec == 0 { 1 } else { prec };
-    let exp = if n != 0.0 {
-        n.abs().log10().floor() as i32
-    } else {
-        0
-    };
+    // n == 0.0 returned early above, so log10 is never -inf here.
+    let exp = n.abs().log10().floor() as i32;
     if exp >= -4 && exp < prec as i32 {
         // Use fixed notation
         let decimal_digits = (prec as i32 - 1 - exp).max(0) as usize;
@@ -1591,11 +1586,8 @@ mod tests {
         let tokens = Lexer::new(program).tokenize().unwrap();
         let ast = Parser::new(tokens).parse().unwrap();
         let mut runtime = AwkRuntime::new();
-        let inputs = if input.is_empty() {
-            vec![]
-        } else {
-            vec![("".to_string(), input.to_string())]
-        };
+        // Sole caller passes non-empty input, so no empty-input branch.
+        let inputs = vec![("".to_string(), input.to_string())];
         runtime.execute(&ast, &inputs)
     }
 
