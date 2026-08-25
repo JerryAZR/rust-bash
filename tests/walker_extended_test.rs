@@ -288,3 +288,13 @@ fn regex_capture_groups_populate_bash_rematch() {
     let (out, _, _) = run("[[ abc =~ (b) ]]; echo ${BASH_REMATCH[0]} ${BASH_REMATCH[1]}");
     assert_eq!(out, "b b\n");
 }
+
+#[test]
+fn extended_test_ampersand_redirect_pre_truncates() {
+    // `&>` on a compound command pre-truncates before the body runs (bash
+    // redirect ordering); `&>>` appends instead.
+    let (out, _, code) = run("echo old > /f; [[ a == a ]] &> /f; wc -c < /f");
+    assert_eq!((out.as_str(), code), ("0\n", 0));
+    let (out, _, _) = run("echo old > /g; [[ a == a ]] &>> /g; wc -c < /g");
+    assert_eq!(out, "4\n");
+}
