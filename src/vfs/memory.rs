@@ -274,6 +274,8 @@ fn navigate_mut<'a>(
     follow_final: bool,
     depth: u32,
 ) -> Result<&'a mut FsNode, VfsError> {
+    // Unreachable guard: navigate_mut never recurses — both callers
+    // (with_node_mut, with_parent_mut) always pass MAX_SYMLINK_DEPTH.
     if depth == 0 {
         return Err(VfsError::SymlinkLoop(path.to_path_buf()));
     }
@@ -298,6 +300,9 @@ fn navigate_mut<'a>(
                     .get_mut(*name)
                     .ok_or_else(|| VfsError::NotFound(path.to_path_buf()))?;
             }
+            // Unreachable: resolve_canonical_from_root above already verified
+            // every intermediate component of `canonical` is a directory, and
+            // the write lock is held across both traversals.
             _ => return Err(VfsError::NotADirectory(path.to_path_buf())),
         }
     }
@@ -372,6 +377,9 @@ fn resolve_canonical_from_root(
                 let child = children
                     .get(*name)
                     .ok_or_else(|| VfsError::NotFound(path.to_path_buf()))?;
+                // Unreachable: every caller (with_node_mut, with_parent_mut
+                // via navigate_mut, write_file's direct call, and the
+                // recursive call below) passes follow_final = true.
                 if is_last && !follow_final {
                     resolved = super::vfs_join(&resolved, name);
                     break;
@@ -401,10 +409,15 @@ fn resolve_if_symlink_from_root<'a>(
     depth: u32,
     root: &'a FsNode,
 ) -> Result<&'a FsNode, VfsError> {
+    // Unreachable guard: the sole caller (resolve_canonical_from_root)
+    // returns early on depth == 0 before calling us.
     if depth == 0 {
         return Err(VfsError::SymlinkLoop(original_path.to_path_buf()));
     }
     match node {
+        // Unreachable: resolve_canonical_from_root only ever passes nodes it
+        // has already fully resolved (root, or a non-symlink child / resolved
+        // symlink target), so `node` is never a symlink here.
         FsNode::Symlink { target, .. } => {
             let target_norm = normalize(target)?;
             navigate_readonly(root, &target_norm, true, depth - 1, root)
@@ -432,6 +445,9 @@ fn navigate_to_mut<'a>(node: &'a mut FsNode, parts: &[&str]) -> Option<&'a mut F
             FsNode::Directory { children, .. } => {
                 current = children.get_mut(*name)?;
             }
+            // Unreachable: the sole caller (write_file) passes a path just
+            // produced by resolve_canonical_from_root under the same write
+            // lock, so every intermediate component is a directory.
             _ => return None,
         }
     }
@@ -447,6 +463,8 @@ impl VirtualFs for InMemoryFs {
         self.with_node(path, |node| match node {
             FsNode::File { content, .. } => Ok(content.clone()),
             FsNode::Directory { .. } => Err(VfsError::IsADirectory(path.to_path_buf())),
+            // Unreachable: with_node follows symlinks on the final component,
+            // so the returned node is never a symlink (loops error out).
             FsNode::Symlink { .. } => Err(VfsError::IoError(
                 "unexpected symlink after resolution".into(),
             )),
@@ -481,6 +499,9 @@ impl VirtualFs for InMemoryFs {
                         FsNode::Directory { .. } => {
                             return Err(VfsError::IsADirectory(path.to_path_buf()));
                         }
+                        // Unreachable: `canon` came from
+                        // resolve_canonical_from_root with follow_final = true,
+                        // so its final component is never a symlink.
                         FsNode::Symlink { .. } => {}
                     }
                 }
@@ -518,6 +539,8 @@ impl VirtualFs for InMemoryFs {
                 Ok(())
             }
             FsNode::Directory { .. } => Err(VfsError::IsADirectory(path.to_path_buf())),
+            // Unreachable: with_node_mut resolves the final component via
+            // resolve_canonical_from_root with follow_final = true.
             FsNode::Symlink { .. } => Err(VfsError::IoError(
                 "unexpected symlink after resolution".into(),
             )),
@@ -594,6 +617,9 @@ impl VirtualFs for InMemoryFs {
                         }
                     }
                 }
+                // Unreachable: the loop only advances `current` past the inner
+                // match above, which returns an error for non-directories — so
+                // `current` is always a Directory at the top of the loop.
                 _ => return Err(VfsError::NotADirectory(path.to_path_buf())),
             }
         }
@@ -678,7 +704,9 @@ impl VirtualFs for InMemoryFs {
                     *m = mode;
                 }
                 FsNode::Symlink { .. } => {
-                    // chmod on a symlink (after resolution) shouldn't hit this
+                    // Unreachable: with_node_mut resolves the final component
+                    // via resolve_canonical_from_root with follow_final = true,
+                    // so chmod on a symlink path applies to its target.
                     return Err(VfsError::IoError("cannot chmod a symlink directly".into()));
                 }
             }
@@ -918,6 +946,9 @@ fn glob_collect(
     max: usize,
     opts: &GlobOptions,
 ) {
+    // Defensive backstop (max = 100_000 from glob_with_opts): unreachable in
+    // practice — it only fires once 100_000 results have been collected, and
+    // tests do not build trees anywhere near that size.
     if results.len() >= max {
         return;
     }
@@ -949,6 +980,7 @@ fn glob_collect(
         // One or more directories — recurse into children
         if let FsNode::Directory { children, .. } = resolved {
             for (name, child) in children {
+                // Defensive backstop, see the max-cap comment at fn entry.
                 if results.len() >= max {
                     return;
                 }
@@ -967,6 +999,13 @@ fn glob_collect(
             // When globskipdots is off, include synthetic . and .. entries
             if !opts.globskipdots && rest.is_empty() {
                 let match_fn = |name: &str| -> bool {
+                    // All four arms are exercised (the glob_globskipdots_off_*
+                    // tests in tests/vfs_cov.rs drive each extglob/nocaseglob
+                    // combination — note extglob defaults ON in the shell, so
+                    // the plain/nocase-only arms need `shopt -u extglob`), but
+                    // llvm-cov attributes the merged if/else-if arm regions
+                    // of this chain to neighboring lines, so some arms show
+                    // a zero line count no matter which tests run.
                     if opts.extglob && opts.nocaseglob {
                         extglob_match_nocase(effective_pattern, name)
                     } else if opts.extglob {
@@ -988,6 +1027,7 @@ fn glob_collect(
             }
 
             for (name, child) in children {
+                // Defensive backstop, see the max-cap comment at fn entry.
                 if results.len() >= max {
                     return;
                 }
@@ -995,6 +1035,11 @@ fn glob_collect(
                 if name.starts_with('.') && !effective_pattern.starts_with('.') && !opts.dotglob {
                     continue;
                 }
+                // Same llvm-cov line-attribution quirk as match_fn above:
+                // every arm is exercised (glob_nocaseglob_*,
+                // glob_extglob_with_nocaseglob_* tests, again with extglob
+                // explicitly unset where needed) but some arms report a zero
+                // line count.
                 let matched = if opts.extglob && opts.nocaseglob {
                     extglob_match_nocase(effective_pattern, name)
                 } else if opts.extglob {

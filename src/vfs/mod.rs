@@ -121,6 +121,8 @@ pub(crate) fn resolve_through_dangling(
             vfs_normalize(&text)
         } else {
             let parent = current.parent().unwrap_or(Path::new("/"));
+            // Non-UTF8 targets are only constructible through platform
+            // OsStr APIs (covered by cfg-gated tests per OS).
             let text_str = text
                 .to_str()
                 .ok_or_else(|| VfsError::InvalidPath(text.display().to_string()))?;

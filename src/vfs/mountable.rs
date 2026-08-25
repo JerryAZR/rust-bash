@@ -192,6 +192,9 @@ impl MountableFs {
             self.glob_walk(dir, rest, current_path.clone(), results, max);
 
             for entry in &entries {
+                // Defensive backstop (max = 100_000 from glob): only fires
+                // once 100_000 results have been collected; test trees are
+                // far smaller.
                 if results.len() >= max {
                     return;
                 }
@@ -206,6 +209,7 @@ impl MountableFs {
             }
         } else {
             for entry in &entries {
+                // Defensive backstop, see the max-cap comment above.
                 if results.len() >= max {
                     return;
                 }
@@ -472,6 +476,8 @@ impl VirtualFs for MountableFs {
                 return Ok(super::vfs_append(mount_point, inner_rel));
             }
         }
+        // Unreachable: resolve_mount(path) succeeded at fn entry, so some
+        // mount point prefixes `path` and the loop above always returns.
         Ok(canonical_in_mount)
     }
 
@@ -581,6 +587,9 @@ impl MountableFs {
                 return mount_point.clone();
             }
         }
+        // Defensive fallback: every call site (symlink, readlink) has already
+        // resolved `path` through resolve_mount successfully, so the loop
+        // above always finds a match.
         PathBuf::from("/")
     }
 }

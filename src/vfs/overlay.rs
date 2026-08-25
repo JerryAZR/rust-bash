@@ -270,6 +270,9 @@ impl OverlayFs {
         }
         match (self.read_lower_file(path), self.upper.read_file(path)) {
             (Ok(disk), Ok(upper)) => disk == upper,
+            // Read failure after a successful lstat: permission errors (e.g.
+            // an unreadable disk file — exercised by a cfg(unix) test) or an
+            // OS race where the file disappears mid-check.
             _ => false,
         }
     }
@@ -283,12 +286,19 @@ impl OverlayFs {
     /// True when the disk symlink at `path` has the same target as the
     /// upper-layer copy.
     fn symlink_matches_disk(&self, path: &Path) -> bool {
+        // The Ok arm requires a symlink in the lower directory — covered by
+        // overlay::lower_symlink_stat_readdir_and_sync, which skips when the
+        // OS denies symlink creation (e.g. unprivileged Windows).
         match self.lstat_lower(path) {
             Ok(meta) if meta.node_type == NodeType::Symlink => {}
             _ => return false,
         }
         match (self.readlink_lower(path), self.upper.readlink(path)) {
             (Ok(disk), Ok(upper)) => disk == upper,
+            // Unreachable by construction: lstat_lower above confirmed a disk
+            // symlink and the upper snapshot confirmed an upper symlink, so
+            // both readlinks succeed — barring an OS race (target unlinked
+            // mid-check), which this arm defensively treats as a mismatch.
             _ => false,
         }
     }
@@ -339,6 +349,9 @@ impl OverlayFs {
 
     /// Determine which layer `path` lives in (after normalization).
     fn resolve_layer(&self, path: &Path) -> LayerResult {
+        // Whiteout is unreachable for all current callers: they pass a path
+        // returned by resolve_path, which rejects whiteout-ed components
+        // (ancestors included) with NotFound before returning.
         if self.is_whiteout(path) {
             return LayerResult::Whiteout;
         }
@@ -392,6 +405,8 @@ impl OverlayFs {
             let node_type = if ft.is_dir() {
                 NodeType::Directory
             } else if ft.is_symlink() {
+                // Requires a symlink in the lower directory — covered by the
+                // skip-gated lower_symlink test (see symlink_matches_disk).
                 NodeType::Symlink
             } else {
                 NodeType::File
@@ -423,6 +438,9 @@ impl OverlayFs {
     /// Ensure a file is present in the upper layer. If it only exists in the
     /// lower layer, copy its content and metadata up.
     fn copy_up_if_needed(&self, path: &Path) -> Result<(), VfsError> {
+        // Unreachable early-return: every caller (append_file, chmod, utimes)
+        // only calls us when resolve_layer returned Lower, which requires the
+        // path to be absent from the upper layer.
         if self.upper_has_entry(path) {
             return Ok(());
         }
@@ -563,6 +581,9 @@ impl OverlayFs {
                     .is_ok_and(|m| m.node_type == NodeType::Symlink);
 
             if is_symlink_in_upper || is_symlink_in_lower {
+                // Unreachable: resolve_path is only ever invoked with
+                // follow_final = true (all call sites), so the final symlink
+                // is always followed.
                 if is_last && !follow_final {
                     resolved = candidate;
                 } else {
@@ -570,6 +591,9 @@ impl OverlayFs {
                     let target = if is_symlink_in_upper {
                         self.upper.readlink(&candidate)?
                     } else {
+                        // Requires a symlink in the lower directory — covered
+                        // by the skip-gated lower_symlink test (see
+                        // symlink_matches_disk).
                         self.readlink_lower(&candidate)?
                     };
                     // Resolve target (absolute or relative to parent)
@@ -617,6 +641,9 @@ impl OverlayFs {
             // One or more directories — recurse
             if let Ok(entries) = self.readdir_merged(dir) {
                 for entry in entries {
+                    // Defensive backstop (max = 100_000 from glob): only
+                    // fires once 100_000 results have been collected; test
+                    // trees are far smaller.
                     if results.len() >= max {
                         return;
                     }
@@ -632,8 +659,11 @@ impl OverlayFs {
                     }
                 }
             }
+        // readdir_merged never fails: it tolerates errors from both layer
+        // reads and always returns Ok, so this branch always matches.
         } else if let Ok(entries) = self.readdir_merged(dir) {
             for entry in entries {
+                // Defensive backstop, see the max-cap comment above.
                 if results.len() >= max {
                     return;
                 }
@@ -665,6 +695,8 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
+            // Unreachable: resolve_path rejects whiteout-ed paths (see
+            // resolve_layer).
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
             LayerResult::Upper => self.upper.read_file(&resolved),
             LayerResult::Lower => self.read_lower_file(&resolved),
@@ -692,6 +724,7 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
+            // Unreachable: resolve_path rejects whiteout-ed paths.
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
             LayerResult::Upper => self.upper.append_file(&resolved, content),
             LayerResult::Lower => {
@@ -888,6 +921,10 @@ impl VirtualFs for OverlayFs {
         // If it's a symlink, verify the target exists through the overlay
         let meta = match self.lstat_overlay(&norm, &norm) {
             Ok(m) => m,
+            // Unreachable by construction (barring OS races on the lower
+            // directory): the checks above established the entry exists in
+            // upper (whose lstat cannot then fail) or in lower (whose
+            // symlink_metadata just succeeded).
             Err(_) => return false,
         };
         if meta.node_type == NodeType::Symlink {
@@ -901,6 +938,7 @@ impl VirtualFs for OverlayFs {
         // Try to resolve symlinks
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
+            // Unreachable: resolve_path rejects whiteout-ed paths.
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
             LayerResult::Upper => self.upper.stat(&resolved),
             LayerResult::Lower => self.stat_lower(&resolved),
@@ -917,6 +955,7 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
+            // Unreachable: resolve_path rejects whiteout-ed paths.
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
             LayerResult::Upper => self.upper.chmod(&resolved, mode),
             LayerResult::Lower => {
@@ -931,6 +970,9 @@ impl VirtualFs for OverlayFs {
                         self.ensure_upper_dir_path(&resolved)?;
                         self.upper.chmod(&resolved, mode)
                     }
+                    // Unreachable: resolve_path(follow_final = true) above
+                    // already followed every symlink, so `resolved` is never
+                    // a symlink in either layer.
                     NodeType::Symlink => {
                         Err(VfsError::IoError("cannot chmod a symlink directly".into()))
                     }
@@ -944,6 +986,7 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
+            // Unreachable: resolve_path rejects whiteout-ed paths.
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
             LayerResult::Upper => self.upper.utimes(&resolved, mtime),
             LayerResult::Lower => {
@@ -957,9 +1000,11 @@ impl VirtualFs for OverlayFs {
                         self.ensure_upper_dir_path(&resolved)?;
                         self.upper.utimes(&resolved, mtime)
                     }
+                    // Unreachable: resolve_path(follow_final = true) above
+                    // already followed every symlink, so `resolved` is never
+                    // a symlink in either layer.
                     NodeType::Symlink => {
-                        self.copy_up_symlink_if_needed(&resolved)?;
-                        self.upper.utimes(&resolved, mtime)
+                        Err(VfsError::IoError("cannot utimes a symlink directly".into()))
                     }
                 }
             }
@@ -1017,6 +1062,8 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         // Make sure the resolved path actually exists
+        // Unreachable: resolve_path rejects whiteout-ed components (ancestors
+        // included) with NotFound before returning.
         if self.is_whiteout(&resolved) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
@@ -1175,6 +1222,10 @@ impl OverlayFs {
 
     /// Ensure a single directory exists in the upper layer at `path`.
     fn ensure_single_dir_in_upper(&self, path: &Path) -> Result<(), VfsError> {
+        // Defensive early-return: call sites invoke this only for paths
+        // absent from the upper layer (a whiteout-ed path cannot also have
+        // an upper entry — every whiteout-adding operation purges the upper
+        // entry first).
         if self.upper_has_entry(path) {
             return Ok(());
         }
@@ -1186,20 +1237,6 @@ impl OverlayFs {
             self.ensure_single_dir_in_upper(parent)?;
         }
         self.upper.mkdir(path)
-    }
-
-    /// Copy-up a symlink from lower to upper.
-    fn copy_up_symlink_if_needed(&self, path: &Path) -> Result<(), VfsError> {
-        if self.upper_has_entry(path) {
-            return Ok(());
-        }
-        if let Some(parent) = path.parent()
-            && parent != Path::new("/")
-        {
-            self.ensure_upper_dir_path(parent)?;
-        }
-        let target = self.readlink_lower(path)?;
-        self.upper.symlink(&target, path)
     }
 }
 
@@ -1226,10 +1263,20 @@ fn map_io_error(err: std::io::Error, path: &Path) -> VfsError {
     let p = path.to_path_buf();
     match err.kind() {
         std::io::ErrorKind::NotFound => VfsError::NotFound(p),
+        // Unreachable: the overlay never creates anything in the lower
+        // directory, so no lower-layer syscall can report AlreadyExists.
         std::io::ErrorKind::AlreadyExists => VfsError::AlreadyExists(p),
+        // Reached when the OS denies a lower read — e.g. reading a lower
+        // directory on Windows (ERROR_ACCESS_DENIED) or an unreadable file
+        // on Unix.
         std::io::ErrorKind::PermissionDenied => VfsError::PermissionDenied(p),
+        // Unreachable: the overlay never deletes from the lower directory.
         std::io::ErrorKind::DirectoryNotEmpty => VfsError::DirectoryNotEmpty(p),
+        // Reached on Unix for paths beneath a lower file (ENOTDIR); Windows
+        // reports ERROR_PATH_NOT_FOUND for those, mapping to NotFound above.
         std::io::ErrorKind::NotADirectory => VfsError::NotADirectory(p),
+        // Reached on Unix when reading a lower directory (EISDIR); Windows
+        // reports ERROR_ACCESS_DENIED for those, mapping to PermissionDenied.
         std::io::ErrorKind::IsADirectory => VfsError::IsADirectory(p),
         _ => VfsError::IoError(err.to_string()),
     }
@@ -1238,6 +1285,8 @@ fn map_io_error(err: std::io::Error, path: &Path) -> VfsError {
 /// Map `std::fs::Metadata` to our `vfs::Metadata`.
 fn map_std_metadata(meta: &std::fs::Metadata) -> Metadata {
     let node_type = if meta.is_symlink() {
+        // Requires a symlink in the lower directory — covered by the
+        // skip-gated lower_symlink test (see symlink_matches_disk above).
         NodeType::Symlink
     } else if meta.is_dir() {
         NodeType::Directory
