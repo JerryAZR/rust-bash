@@ -16,6 +16,7 @@ Internal engineering documentation for rust-bash — a Rust-based sandboxed bash
 | 8 | [Integration Targets](08-integration-targets.md) | Rust crate API, agent-harness embedding |
 | 9 | [Testing Strategy](09-testing-strategy.md) | Unit tests, snapshot tests, differential testing, fuzzing |
 | 10 | [Implementation Plan](10-implementation-plan.md) | Milestones, dependencies, build order, risk register |
+| 11 | [Known Divergences](11-known-divergences.md) | Registry of pinned bash/GNU/POSIX behavior divergences and their tests |
 
 ## How to Use This Guidebook
 
@@ -24,6 +25,7 @@ Internal engineering documentation for rust-bash — a Rust-based sandboxed bash
 - **Adding a command?** Chapter 6 covers the command trait, registration, and conventions.
 - **Working on the interpreter?** Chapters 3 and 4 cover parsing and execution in detail.
 - **Reviewing the safety model?** Chapter 7 states what the sandbox promises (best-effort guardrails) and what it doesn't (a security boundary).
+- **Hit surprising behavior?** Chapter 11 lists every pinned divergence from bash/GNU/POSIX with the test that pins it.
 
 ## Conventions
 

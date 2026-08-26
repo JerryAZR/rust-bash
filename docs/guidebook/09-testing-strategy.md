@@ -378,5 +378,7 @@ Recording mode skips cases marked with `skip`. Each script runs with a 10-second
 - **Test names describe behavior, not implementation**: `fn pipe_chains_stdout_to_stdin()` not `fn test_pipeline()`
 - **One assertion per concept**: test one behavior aspect per test function
 - **Use builder helpers**: create test-specific sandbox builders to reduce boilerplate
+- **Pin divergences, don't hide them**: when a test reveals behavior that diverges from bash/GNU/POSIX and the fix is out of scope, assert the *actual* behavior with a `DIVERGENCE` / `pinned` comment and register it in [Chapter 11](11-known-divergences.md). Never silently change behavior to make a new test pass.
+- **Every uncovered line is accounted for**: coverage gaps are triaged as fill (write a test), justify (code comment explaining unreachability), or remove (provably dead code). A numeric coverage target is deliberately *not* set — the requirement is that every gap has been examined.
 - **Test error cases too**: verify that invalid inputs produce correct error messages and exit codes
 - **Don't test brush-parser**: we trust the parser. Test our interpretation of its output.
