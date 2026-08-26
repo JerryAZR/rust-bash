@@ -1,0 +1,169 @@
+# awk file I/O: print/printf redirection, getline forms, close()
+# Semantics verified against gawk 5.x where noted.
+
+[[cases]]
+name = "print_truncate_creates_file"
+script = 'awk "BEGIN{print \"x\" > \"/f\"}"; cat /f'
+stdout = "x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "print_truncate_truncates_only_on_first_open"
+# gawk: the file is truncated once at first open; subsequent `>` writes to
+# the same (still open) file append.
+script = 'awk "BEGIN{print \"a\" > \"/f\"; print \"b\" > \"/f\"}"; cat /f'
+stdout = "a\nb\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "print_append_appends_to_existing_file"
+script = 'awk "BEGIN{print \"x\" >> \"/f\"}"; cat /f'
+files = { "/f" = "seed\n" }
+stdout = "seed\nx\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "print_truncate_after_append_does_not_truncate"
+# gawk: one open file per path — the first redirection mode wins for the
+# initial open, so a later `>` does not truncate.
+script = 'awk "BEGIN{print \"x\" >> \"/f\"; print \"y\" > \"/f\"}"; cat /f'
+files = { "/f" = "seed\n" }
+stdout = "seed\nx\ny\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "printf_redirect"
+script = 'awk "BEGIN{printf \"%s-%d\n\", \"n\", 5 > \"/f\"}"; cat /f'
+stdout = "n-5\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "print_redirect_in_main_rules_content"
+script = "awk '{print > \"/out\"}' /in; cat /out"
+files = { "/in" = "p\nq\n" }
+stdout = "p\nq\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "print_relative_redirect_resolves_against_cwd"
+script = 'cd /w; awk "BEGIN{print \"x\" > \"rel.txt\"}"; cat /w/rel.txt'
+files = { "/w/.keep" = "" }
+stdout = "x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "print_redirect_to_directory_errors"
+# Visible failure, exit 1 (guardrails philosophy: never silently drop).
+script = 'awk "BEGIN{print \"x\" > \"/d\"}"; echo rc=$?'
+files = { "/d/.keep" = "" }
+stdout = "rc=1\n"
+stderr = "awk: cannot write to /d: Is a directory: /d\n"
+exit_code = 0
+
+[[cases]]
+name = "print_pipe_is_a_visible_error"
+# Pipes are a deferred feature decision: explicit error, never silent.
+script = 'awk "BEGIN{print \"x\" | \"cat\"}"; echo rc=$?'
+stdout = "rc=1\n"
+stderr = "awk: pipe redirection is not supported\n"
+exit_code = 0
+
+[[cases]]
+name = "print_parenthesized_comparison_is_not_redirect"
+script = 'awk "BEGIN{print (1 > 2); print 1 < 2}"'
+stdout = "0\n1\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_bare_in_begin_consumes_first_record"
+script = "awk 'BEGIN{getline; print \"begin:\" $0} {print \"main:\" $0}' /f"
+files = { "/f" = "a\nb\n" }
+stdout = "begin:a\nmain:b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_bare_in_main_skips_records"
+script = "awk 'NR==1 && getline {print \"second:\" $0}' /f"
+files = { "/f" = "r1\nr2\nr3\n" }
+stdout = "second:r2\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_var_while_loop_idiom"
+script = 'awk "BEGIN{while ((getline line) > 0) n++; print n}" /f'
+files = { "/f" = "a\nb\nc\n" }
+stdout = "3\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_from_file_sequential_reads"
+script = "awk 'BEGIN{getline < \"/f\"; print $0; getline < \"/f\"; print $0}'"
+files = { "/f" = "l1\nl2\n" }
+stdout = "l1\nl2\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_from_file_sets_fields_not_nr"
+# `< file` sets $0/NF but not NR/FNR.
+script = "awk 'BEGIN{getline < \"/f\"; print NF, NR, $1}'"
+files = { "/f" = "x y\n" }
+stdout = "2 0 x\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_var_from_file"
+script = 'awk "BEGIN{getline v < \"/f\"; print v, NF, NR}"'
+files = { "/f" = "x y\n" }
+stdout = "x y 0 0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_from_file_eof_returns_zero"
+script = "awk 'BEGIN{getline < \"/f\"; print (getline < \"/f\")}'"
+files = { "/f" = "only\n" }
+stdout = "0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_from_missing_file_returns_minus_one"
+# gawk: -1 on open error.
+script = 'awk "BEGIN{print (getline < \"/missing\") + 0}"'
+stdout = "-1\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "getline_pipe_is_a_visible_error"
+script = 'awk "BEGIN{\"echo hi\" | getline v; print v}"; echo rc=$?'
+stdout = "\nrc=1\n"
+stderr = "awk: pipe getline is not supported\n"
+exit_code = 0
+
+[[cases]]
+name = "close_reopens_truncated"
+script = 'awk "BEGIN{print \"a\" > \"/f\"; close(\"/f\"); print \"b\" > \"/f\"}"; cat /f'
+stdout = "b\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "close_returns_one_for_open_target_zero_otherwise"
+script = 'awk "BEGIN{print \"a\" > \"/f\"; print close(\"/f\"), close(\"/never\")}"'
+stdout = "1 0\n"
+stderr = ""
+exit_code = 0

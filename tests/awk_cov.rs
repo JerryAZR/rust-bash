@@ -396,14 +396,24 @@ fn expression_range_pattern() {
 }
 
 #[test]
-fn print_output_redirection_is_parsed_but_ignored() {
-    // Divergence (the lexer documents redirection as "parsed but not fully
-    // supported"): `> "file"` after a print expression parses as a comparison
-    // ("x" > "/f" is true, printing 1); `>>` and `|` hit the redirect-skip
-    // path. Either way, output still goes to stdout.
-    let r = run("awk 'BEGIN{print \"x\" > \"/f\"; print \"y\" >> \"/f\"; print \"z\" | \"cat\"}'");
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "1\ny\nz\n");
+fn print_output_redirection_writes_files_and_pipes_error() {
+    // `>`/`>>` write through the sandbox fs (truncate-once, then append);
+    // `|` pipes are an explicit, visible error (deferred feature decision).
+    let r = run(
+        "awk 'BEGIN{print \"x\" > \"/f\"; print \"y\" >> \"/f\"; print \"z\" | \"cat\"}'; rc=$?; cat /f; echo rc=$rc",
+    );
+    assert_eq!(r.stdout, "x\ny\nrc=1\n");
+    assert_eq!(r.stderr, "awk: pipe redirection is not supported\n");
+}
+
+#[test]
+fn print_parenthesized_comparison_vs_redirect() {
+    // awk grammar: `print a > b` is redirection; `print (a > b)` is a
+    // comparison. `<` stays a comparison in print position.
+    let r = run("awk 'BEGIN{print (1 > 2); print 1 < 2}'");
+    assert_eq!(r.stdout, "0\n1\n");
+    let r = run("awk 'BEGIN{print 1 > \"/cmp\"}'; cat /cmp");
+    assert_eq!(r.stdout, "1\n");
 }
 
 #[test]
@@ -468,11 +478,14 @@ fn subscript_after_non_variable_is_a_parse_error() {
 }
 
 #[test]
-fn getline_stub_returns_zero() {
-    // getline is a documented stub ("not fully supported") that yields 0.
-    let r = run("awk 'BEGIN{print (getline)}'");
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "0\n");
+fn getline_bare_in_begin_consumes_first_record() {
+    // getline is fully implemented: bare form in BEGIN reads the first
+    // record of the main input (setting $0/NF/NR/FNR), so the main loop
+    // starts at record 2.
+    let r = run(
+        "printf 'a\\nb\\n' > /gl; awk 'BEGIN{getline; print \"begin:\" $0} {print \"main:\" $0}' /gl",
+    );
+    assert_eq!(r.stdout, "begin:a\nmain:b\n");
 }
 
 // ── runtime.rs: values ────────────────────────────────────────────────

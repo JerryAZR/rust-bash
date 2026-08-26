@@ -96,9 +96,10 @@ These were pinned as suspected divergences during the coverage campaign but real
 
 ## 5. awk
 
+File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through the sandbox fs, `getline` bare/var/`< file` forms with gawk cursor semantics, and `close()`. **Pipe forms (`print | "cmd"`, `"cmd" | getline`) are deliberately unimplemented** pending an explicit security decision (awk's backdoor to command execution); they fail *visibly* (stderr + exit 1), never silently. See `tests/fixtures/comparison/awk/io.toml`.
+
 | Behavior | Expected | Pinned in |
 |---|---|---|
-| `print "x" > "/f"` parses `>` as comparison (prints `1`); `>>`/`\|` output goes to stdout | real awk redirects (lexer documents "parsed but not fully supported") | `tests/awk_cov.rs` |
 | `awk -- '{print}'` → "no program text" | real awk treats next arg as program | `tests/awk_cov.rs` |
 | Unknown string escape `"x\qy"` keeps the backslash | gawk strips it with a warning | `tests/awk_cov.rs` |
 | Division/modulo by zero → stderr warning, yields `0`, exit 0 | gawk: fatal error | `tests/awk_cov.rs` |
@@ -111,7 +112,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 | `sprintf("%+d", 5)` → `5` (flag accepted, ignored) | gawk: `+5` | `tests/awk_cov.rs` |
 | `%g` keeps trailing zeros in scientific (`1.23450e-05`) *(suspected)* | C/gawk strip to `1.2345e-05` | `tests/awk_cov.rs` |
 | Non-finite floats print libc-style `inf`/`INF` | gawk prints `+inf` | `tests/awk_cov.rs::awk_non_finite_float_formats` |
-| `getline` is a stub returning 0 | real getline | `tests/awk_cov.rs` |
+| No user-defined functions (`function f(a,b) …` → "unknown function" warning, exit 0) | gawk supports them | `tests/awk_cov.rs` |
 
 ## 6. sed / diff / compression
 

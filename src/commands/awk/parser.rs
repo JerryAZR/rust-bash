@@ -22,14 +22,36 @@ pub enum AwkPattern {
     Range(Expr, Expr),
 }
 
+/// Output redirection on print/printf statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedirectKind {
+    /// `>` — truncate on first open, then append.
+    Truncate,
+    /// `>>` — append.
+    Append,
+    /// `| cmd` — pipe to a command.
+    Pipe,
+}
+
+/// Input source on a getline expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GetlineSource {
+    /// `< file`
+    File,
+    /// `cmd |`
+    Pipe,
+}
+
 #[derive(Debug, Clone)]
 pub enum AwkStatement {
     Print {
         exprs: Vec<Expr>,
+        redirect: Option<(RedirectKind, Expr)>,
     },
     Printf {
         format: Expr,
         exprs: Vec<Expr>,
+        redirect: Option<(RedirectKind, Expr)>,
     },
     If {
         cond: Expr,
@@ -118,7 +140,10 @@ pub enum Expr {
     PreDecrement(Box<Expr>),
     PostIncrement(Box<Expr>),
     PostDecrement(Box<Expr>),
-    Getline,
+    Getline {
+        var: Option<String>,
+        source: Option<(GetlineSource, Box<Expr>)>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -162,11 +187,18 @@ pub enum AssignOp {
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// While parsing print/printf arguments, `>` is redirection, not a
+    /// comparison (awk grammar: only the parenthesized form is comparison).
+    suppress_gt: bool,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            suppress_gt: false,
+        }
     }
 
     pub fn parse(mut self) -> Result<AwkProgram, String> {
@@ -339,6 +371,7 @@ impl Parser {
     fn parse_print(&mut self) -> Result<AwkStatement, String> {
         self.advance(); // consume 'print'
         let mut exprs = Vec::new();
+        self.suppress_gt = true;
         if self.is_print_expr_start() {
             exprs.push(self.parse_non_assign_expr()?);
             while matches!(self.peek(), Token::Comma) {
@@ -347,17 +380,14 @@ impl Parser {
                 exprs.push(self.parse_non_assign_expr()?);
             }
         }
-        // Skip output redirection (not supported, but don't misparse)
-        if matches!(self.peek(), Token::Gt | Token::Append | Token::Pipe) {
-            self.advance();
-            // Consume the redirection target expression
-            let _ = self.parse_non_assign_expr();
-        }
-        Ok(AwkStatement::Print { exprs })
+        self.suppress_gt = false;
+        let redirect = self.parse_redirect()?;
+        Ok(AwkStatement::Print { exprs, redirect })
     }
 
     fn parse_printf(&mut self) -> Result<AwkStatement, String> {
         self.advance(); // consume 'printf'
+        self.suppress_gt = true;
         let format = self.parse_non_assign_expr()?;
         let mut exprs = Vec::new();
         while matches!(self.peek(), Token::Comma) {
@@ -365,7 +395,27 @@ impl Parser {
             self.skip_newlines();
             exprs.push(self.parse_non_assign_expr()?);
         }
-        Ok(AwkStatement::Printf { format, exprs })
+        self.suppress_gt = false;
+        let (format, exprs) = (format, exprs);
+        let redirect = self.parse_redirect()?;
+        Ok(AwkStatement::Printf {
+            format,
+            exprs,
+            redirect,
+        })
+    }
+
+    /// Parse an optional `>`/`>>`/`|` output redirection after print/printf.
+    fn parse_redirect(&mut self) -> Result<Option<(RedirectKind, Expr)>, String> {
+        let kind = match self.peek() {
+            Token::Gt => RedirectKind::Truncate,
+            Token::Append => RedirectKind::Append,
+            Token::Pipe => RedirectKind::Pipe,
+            _ => return Ok(None),
+        };
+        self.advance();
+        let target = self.parse_non_assign_expr()?;
+        Ok(Some((kind, target)))
     }
 
     fn parse_if(&mut self) -> Result<AwkStatement, String> {
@@ -574,8 +624,37 @@ impl Parser {
         }
     }
 
+    /// Parse the optional `var` and `< file` after a `getline` token; when
+    /// the getline came from `cmd | getline`, `pipe_source` is that command.
+    fn parse_getline_tail(&mut self, pipe_source: Option<Expr>) -> Result<Expr, String> {
+        let var = if let Token::Ident(name) = self.peek() {
+            let name = name.clone();
+            self.advance();
+            Some(name)
+        } else {
+            None
+        };
+        let source = if matches!(self.peek(), Token::Lt) {
+            self.advance();
+            Some((GetlineSource::File, Box::new(self.parse_non_assign_expr()?)))
+        } else {
+            pipe_source.map(|e| (GetlineSource::Pipe, Box::new(e)))
+        };
+        Ok(Expr::Getline { var, source })
+    }
+
+    fn peek2(&self) -> Token {
+        self.tokens.get(self.pos + 1).cloned().unwrap_or(Token::Eof)
+    }
+
     fn parse_ternary(&mut self) -> Result<Expr, String> {
         let expr = self.parse_or()?;
+        // `cmd | getline [var]` — pipe-getline form.
+        if matches!(self.peek(), Token::Pipe) && matches!(self.peek2(), Token::Getline) {
+            self.advance(); // `|`
+            self.advance(); // `getline`
+            return self.parse_getline_tail(Some(expr));
+        }
         if matches!(self.peek(), Token::Question) {
             self.advance();
             let then = self.parse_assign()?;
@@ -668,6 +747,11 @@ impl Parser {
             self.peek(),
             Token::Lt | Token::Le | Token::Gt | Token::Ge | Token::Eq | Token::Ne
         ) {
+            if self.suppress_gt && matches!(self.peek(), Token::Gt) {
+                // In print/printf argument position, `>` starts an output
+                // redirection (see parse_print); leave it unconsumed.
+                break;
+            }
             let op = match self.advance() {
                 Token::Lt => BinOp::Lt,
                 Token::Le => BinOp::Le,
@@ -868,8 +952,13 @@ impl Parser {
             }
             Token::LParen => {
                 self.advance();
-                // Check for (expr) in array — parenthesized in-expression
+                // Check for (expr) in array — parenthesized in-expression.
+                // Parentheses reset the print-argument `>` suppression: awk
+                // requires parens for a real comparison in print position.
+                let saved = self.suppress_gt;
+                self.suppress_gt = false;
                 let expr = self.parse_expr()?;
+                self.suppress_gt = saved;
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
@@ -903,7 +992,7 @@ impl Parser {
             }
             Token::Getline => {
                 self.advance();
-                Ok(Expr::Getline)
+                self.parse_getline_tail(None)
             }
             _ => Err(format!("unexpected token in expression: {}", self.peek())),
         }

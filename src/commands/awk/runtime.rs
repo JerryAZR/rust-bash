@@ -1,8 +1,13 @@
 use super::parser::{
-    AssignOp, AwkPattern, AwkProgram, AwkRule, AwkStatement, BinOp, Expr, UnaryOp,
+    AssignOp, AwkPattern, AwkProgram, AwkRule, AwkStatement, BinOp, Expr, GetlineSource,
+    RedirectKind, UnaryOp,
 };
 use regex::Regex;
 use std::collections::HashMap;
+
+/// File content reader for `getline < file` (injected by the caller so the
+/// runtime stays fs-agnostic).
+pub type FileReader<'a> = Box<dyn Fn(&str) -> Result<String, String> + 'a>;
 
 // ── Control flow signals ────────────────────────────────────────────────
 
@@ -112,7 +117,7 @@ fn parse_awk_number(s: &str) -> f64 {
 
 // ── Runtime ─────────────────────────────────────────────────────────────
 
-pub struct AwkRuntime {
+pub struct AwkRuntime<'a> {
     // Built-in variables
     pub variables: HashMap<String, AwkValue>,
     // Associative arrays
@@ -138,9 +143,23 @@ pub struct AwkRuntime {
     max_loop_iterations: usize,
     max_output_size: usize,
     max_field_index: usize,
+    // Input stream state (shared cursor for the main loop and bare getline)
+    pending_inputs: std::collections::VecDeque<(String, String)>,
+    current_records: Vec<String>,
+    record_pos: usize,
+    // Output redirection state: per-target open-file table. The bool is
+    // truncate-at-open (`>` first use); data accumulates for deferred
+    // application by the caller (the runtime never touches the fs itself).
+    redirect_order: Vec<String>,
+    redirect_targets: HashMap<String, (bool, String)>,
+    // getline < file state: per-path records and read position
+    getline_files: HashMap<String, (Vec<String>, usize)>,
+    // File content reader for `getline < file` (injected by the caller so
+    // the runtime stays fs-agnostic)
+    file_reader: Option<FileReader<'a>>,
 }
 
-impl AwkRuntime {
+impl<'a> AwkRuntime<'a> {
     pub fn new() -> Self {
         let mut variables = HashMap::new();
         variables.insert("FS".to_string(), AwkValue::Str(" ".to_string()));
@@ -171,7 +190,35 @@ impl AwkRuntime {
             max_loop_iterations: 10_000_000,
             max_output_size: 10 * 1024 * 1024,
             max_field_index: 10_000,
+            pending_inputs: std::collections::VecDeque::new(),
+            current_records: Vec::new(),
+            record_pos: 0,
+            redirect_order: Vec::new(),
+            redirect_targets: HashMap::new(),
+            getline_files: HashMap::new(),
+            file_reader: None,
         }
+    }
+
+    /// Inject the file reader used by `getline < file` (the caller wires it
+    /// to the sandbox VirtualFs; unit tests can inject a fake).
+    pub fn set_file_reader(&mut self, reader: FileReader<'a>) {
+        self.file_reader = Some(reader);
+    }
+
+    /// Drain the deferred output-redirection writes in first-open order:
+    /// `(target, truncate_at_open, data)`. The caller applies them through
+    /// the sandbox filesystem.
+    pub fn take_pending_writes(&mut self) -> Vec<(String, bool, String)> {
+        let order = std::mem::take(&mut self.redirect_order);
+        order
+            .into_iter()
+            .filter_map(|path| {
+                self.redirect_targets
+                    .remove(&path)
+                    .map(|(truncate, data)| (path, truncate, data))
+            })
+            .collect()
     }
 
     pub fn apply_limits(&mut self, limits: &crate::interpreter::ExecutionLimits) {
@@ -209,6 +256,10 @@ impl AwkRuntime {
         // Initialize range_active for all range patterns
         self.range_active = vec![false; program.rules.len()];
 
+        // The input stream must be live before BEGIN: bare getline in BEGIN
+        // consumes the first record(s) of the main input.
+        self.pending_inputs = inputs.to_vec().into();
+
         // Execute BEGIN rules
         for rule in &program.rules {
             if matches!(rule.pattern, Some(AwkPattern::Begin))
@@ -219,48 +270,33 @@ impl AwkRuntime {
             }
         }
 
-        // Process each input
-        if inputs.is_empty() {
-            // No input files and no stdin content: skip to END
-        } else {
-            'outer: for (filename, content) in inputs {
-                self.fnr = 0;
-                self.filename = filename.clone();
-                self.variables
-                    .insert("FILENAME".to_string(), AwkValue::Str(filename.clone()));
+        // Process input records through the shared cursor (bare getline and
+        // the main loop consume the same stream).
+        'record: while self.next_input_record() {
+            for (rule_idx, rule) in program.rules.iter().enumerate() {
+                if matches!(rule.pattern, Some(AwkPattern::Begin | AwkPattern::End)) {
+                    continue;
+                }
 
-                let rs = self.get_var("RS").to_string_val();
-                let records = split_records(content, &rs);
+                let matched = self.pattern_matches(rule, rule_idx);
+                if !matched {
+                    continue;
+                }
 
-                'record: for record in &records {
-                    self.nr += 1;
-                    self.fnr += 1;
-                    self.set_record(record);
-                    self.sync_builtin_vars();
+                let default_action = [AwkStatement::Print {
+                    exprs: vec![],
+                    redirect: None,
+                }];
+                let action = rule.action.as_deref().unwrap_or(&default_action);
 
-                    for (rule_idx, rule) in program.rules.iter().enumerate() {
-                        if matches!(rule.pattern, Some(AwkPattern::Begin | AwkPattern::End)) {
-                            continue;
-                        }
-
-                        let matched = self.pattern_matches(rule, rule_idx);
-                        if !matched {
-                            continue;
-                        }
-
-                        let default_action = [AwkStatement::Print { exprs: vec![] }];
-                        let action = rule.action.as_deref().unwrap_or(&default_action);
-
-                        match self.execute_block(action) {
-                            Signal::Next => continue 'record,
-                            Signal::Exit(code) => {
-                                self.exit_code = code;
-                                break 'outer;
-                            }
-                            Signal::Break | Signal::Continue => {}
-                            Signal::None => {}
-                        }
+                match self.execute_block(action) {
+                    Signal::Next => continue 'record,
+                    Signal::Exit(code) => {
+                        self.exit_code = code;
+                        break 'record;
                     }
+                    Signal::Break | Signal::Continue => {}
+                    Signal::None => {}
                 }
             }
         }
@@ -279,6 +315,127 @@ impl AwkRuntime {
         }
 
         (self.exit_code, self.stdout.clone(), self.stderr.clone())
+    }
+
+    /// Advance the input stream to the next file, setting FILENAME/FNR and
+    /// splitting records by the CURRENT RS (same timing as before: at file
+    /// entry, after any BEGIN-time RS changes).
+    fn advance_input_file(&mut self) -> bool {
+        let Some((filename, content)) = self.pending_inputs.pop_front() else {
+            return false;
+        };
+        self.fnr = 0;
+        self.filename = filename.clone();
+        self.variables
+            .insert("FILENAME".to_string(), AwkValue::Str(filename));
+        let rs = self.get_var("RS").to_string_val();
+        self.current_records = split_records(&content, &rs);
+        self.record_pos = 0;
+        true
+    }
+
+    /// Pull the next raw record from the input stream (advancing files as
+    /// needed), incrementing NR/FNR but NOT touching $0/NF.
+    fn next_raw_record(&mut self) -> Option<String> {
+        loop {
+            if self.record_pos < self.current_records.len() {
+                let record = self.current_records[self.record_pos].clone();
+                self.record_pos += 1;
+                self.nr += 1;
+                self.fnr += 1;
+                self.sync_builtin_vars();
+                return Some(record);
+            }
+            if !self.advance_input_file() {
+                return None;
+            }
+        }
+    }
+
+    /// Pull the next record from the main input stream into $0 (the main
+    /// loop and bare `getline` share this cursor).
+    fn next_input_record(&mut self) -> bool {
+        match self.next_raw_record() {
+            Some(record) => {
+                self.set_record(&record);
+                self.sync_builtin_vars();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// getline forms (gawk semantics):
+    /// - `getline` — next record from the MAIN input into $0/NF/NR/FNR
+    /// - `getline var` — same stream, but into `var` (NR/FNR still advance)
+    /// - `getline [var] < file` — next record from that file ($0/NF or var;
+    ///   NR/FNR untouched); 1 ok, 0 at EOF, -1 on open error
+    /// - `cmd | getline` — pipes are an explicit, visible error
+    fn eval_getline(
+        &mut self,
+        var: Option<&str>,
+        source: Option<(GetlineSource, &Expr)>,
+    ) -> AwkValue {
+        match source {
+            None => match var {
+                None => AwkValue::Num(if self.next_input_record() { 1.0 } else { 0.0 }),
+                Some(name) => match self.next_raw_record() {
+                    Some(record) => {
+                        self.variables
+                            .insert(name.to_string(), AwkValue::Str(record));
+                        AwkValue::Num(1.0)
+                    }
+                    None => AwkValue::Num(0.0),
+                },
+            },
+            Some((GetlineSource::Pipe, _)) => {
+                self.stderr.push_str("awk: pipe getline is not supported\n");
+                self.exit_code = 1;
+                AwkValue::Num(0.0)
+            }
+            Some((GetlineSource::File, path_expr)) => {
+                let path = self.eval_expr(path_expr).to_string_val();
+                if !self.getline_files.contains_key(&path) {
+                    let content = match &self.file_reader {
+                        Some(reader) => match reader(&path) {
+                            Ok(content) => content,
+                            // gawk: -1 on open error.
+                            Err(_) => return AwkValue::Num(-1.0),
+                        },
+                        None => {
+                            self.stderr
+                                .push_str("awk: getline < file: no file reader available\n");
+                            self.exit_code = 1;
+                            return AwkValue::Num(-1.0);
+                        }
+                    };
+                    let rs = self.get_var("RS").to_string_val();
+                    let records = split_records(&content, &rs);
+                    self.getline_files.insert(path.clone(), (records, 0));
+                }
+                let Some((records, pos)) = self.getline_files.get_mut(&path) else {
+                    // Unreachable: the entry was just ensured above.
+                    return AwkValue::Num(0.0);
+                };
+                if *pos >= records.len() {
+                    return AwkValue::Num(0.0);
+                }
+                let record = records[*pos].clone();
+                *pos += 1;
+                match var {
+                    None => {
+                        // Sets $0/NF but NOT NR/FNR.
+                        self.set_record(&record);
+                        self.sync_builtin_vars();
+                    }
+                    Some(name) => {
+                        self.variables
+                            .insert(name.to_string(), AwkValue::Str(record));
+                    }
+                }
+                AwkValue::Num(1.0)
+            }
+        }
     }
 
     fn pattern_matches(&mut self, rule: &AwkRule, rule_idx: usize) -> bool {
@@ -452,12 +609,16 @@ impl AwkRuntime {
 
     fn execute_statement(&mut self, stmt: &AwkStatement) -> Signal {
         match stmt {
-            AwkStatement::Print { exprs } => {
-                self.exec_print(exprs);
+            AwkStatement::Print { exprs, redirect } => {
+                self.exec_print(exprs, redirect.as_ref());
                 Signal::None
             }
-            AwkStatement::Printf { format, exprs } => {
-                self.exec_printf(format, exprs);
+            AwkStatement::Printf {
+                format,
+                exprs,
+                redirect,
+            } => {
+                self.exec_printf(format, exprs, redirect.as_ref());
                 Signal::None
             }
             AwkStatement::If { cond, then, else_ } => {
@@ -611,33 +772,74 @@ impl AwkRuntime {
         self.stdout.len() > self.max_output_size
     }
 
-    fn exec_print(&mut self, exprs: &[Expr]) {
+    fn exec_print(&mut self, exprs: &[Expr], redirect: Option<&(RedirectKind, Expr)>) {
         if self.output_limit_reached() {
             return;
         }
         let ors = self.get_var("ORS").to_string_val();
+        let mut text = String::new();
         if exprs.is_empty() {
             let field0 = self.get_field(0);
-            self.stdout.push_str(&field0);
+            text.push_str(&field0);
         } else {
             let ofs = self.get_var("OFS").to_string_val();
             let mut parts = Vec::new();
             for expr in exprs {
                 parts.push(self.eval_expr(expr).to_string_val());
             }
-            self.stdout.push_str(&parts.join(&ofs));
+            text.push_str(&parts.join(&ofs));
         }
-        self.stdout.push_str(&ors);
+        text.push_str(&ors);
+        self.route_output(redirect, text);
     }
 
-    fn exec_printf(&mut self, format_expr: &Expr, arg_exprs: &[Expr]) {
+    fn exec_printf(
+        &mut self,
+        format_expr: &Expr,
+        arg_exprs: &[Expr],
+        redirect: Option<&(RedirectKind, Expr)>,
+    ) {
         if self.output_limit_reached() {
             return;
         }
         let fmt = self.eval_expr(format_expr).to_string_val();
         let args: Vec<AwkValue> = arg_exprs.iter().map(|e| self.eval_expr(e)).collect();
         let result = awk_sprintf(&fmt, &args);
-        self.stdout.push_str(&result);
+        self.route_output(redirect, result);
+    }
+
+    /// Route print/printf output to stdout or a redirection target. File
+    /// targets accumulate in the deferred open-file table (gawk semantics:
+    /// the first redirection to a path decides truncate-vs-append at open;
+    /// later writes to it append, and `close()` re-opens fresh). Pipes are
+    /// an explicit, visible error (not silently dropped).
+    fn route_output(&mut self, redirect: Option<&(RedirectKind, Expr)>, text: String) {
+        let Some((kind, target_expr)) = redirect else {
+            self.stdout.push_str(&text);
+            return;
+        };
+        let target = self.eval_expr(target_expr).to_string_val();
+        match kind {
+            RedirectKind::Pipe => {
+                self.stderr
+                    .push_str("awk: pipe redirection is not supported\n");
+                self.exit_code = 1;
+            }
+            RedirectKind::Truncate | RedirectKind::Append => {
+                let truncate_at_open = matches!(kind, RedirectKind::Truncate);
+                if !self.redirect_targets.contains_key(&target) {
+                    self.redirect_order.push(target.clone());
+                    self.redirect_targets
+                        .insert(target.clone(), (truncate_at_open, String::new()));
+                }
+                if let Some((_, data)) = self.redirect_targets.get_mut(&target) {
+                    data.push_str(&text);
+                    if data.len() > self.max_output_size {
+                        self.stderr.push_str("awk: output size limit exceeded\n");
+                    }
+                }
+            }
+        }
     }
 
     // ── Expression evaluation ────────────────────────────────────────
@@ -727,9 +929,9 @@ impl AwkRuntime {
                 self.assign_to(e, AwkValue::Num(val - 1.0));
                 AwkValue::Num(val)
             }
-            Expr::Getline => {
-                // Basic getline: not fully supported, return 0
-                AwkValue::Num(0.0)
+            Expr::Getline { var, source } => {
+                let source = source.as_ref().map(|(k, e)| (*k, e.as_ref()));
+                self.eval_getline(var.as_deref(), source)
             }
         }
     }
@@ -862,6 +1064,22 @@ impl AwkRuntime {
 
     fn eval_func_call(&mut self, name: &str, args: &[Expr]) -> AwkValue {
         match name {
+            "close" => {
+                let target = args
+                    .first()
+                    .map(|e| self.eval_expr(e).to_string_val())
+                    .unwrap_or_default();
+                let mut closed = false;
+                if let Some(i) = self.redirect_order.iter().position(|p| p == &target) {
+                    self.redirect_order.remove(i);
+                    self.redirect_targets.remove(&target);
+                    closed = true;
+                }
+                if self.getline_files.remove(&target).is_some() {
+                    closed = true;
+                }
+                AwkValue::Num(if closed { 1.0 } else { 0.0 })
+            }
             "length" => {
                 if args.is_empty() {
                     let s = self.get_field(0);

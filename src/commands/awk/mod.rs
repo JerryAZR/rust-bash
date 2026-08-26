@@ -187,15 +187,44 @@ fn run_awk(args: &[String], ctx: &CommandContext) -> Result<CommandResult, Strin
     // Collect inputs
     let inputs = collect_inputs(&opts.files, ctx)?;
 
+    // Wire getline < file / print redirection to the sandbox fs
+    let cwd = ctx.cwd.to_string();
+    let fs = ctx.fs;
+    runtime.set_file_reader(Box::new(move |path: &str| {
+        let resolved = resolve_path(path, &cwd);
+        fs.read_file(&resolved)
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .map_err(|e| e.to_string())
+    }));
+
     // Execute
     let (exit_code, stdout, stderr) = runtime.execute(&program, &inputs);
 
-    Ok(CommandResult {
+    let mut result = CommandResult {
         stdout,
         stderr,
         exit_code,
         stdout_bytes: None,
-    })
+    };
+
+    // Apply deferred output-redirection writes (first-open mode decides
+    // truncate vs append; close() starts a fresh entry)
+    for (path, truncate, data) in runtime.take_pending_writes() {
+        let resolved = resolve_path(&path, ctx.cwd);
+        let write_result = if truncate {
+            ctx.fs.write_file(&resolved, data.as_bytes())
+        } else {
+            ctx.fs.append_file(&resolved, data.as_bytes())
+        };
+        if let Err(e) = write_result {
+            result
+                .stderr
+                .push_str(&format!("awk: cannot write to {path}: {e}\n"));
+            result.exit_code = 1;
+        }
+    }
+
+    Ok(result)
 }
 
 fn collect_inputs(files: &[String], ctx: &CommandContext) -> Result<Vec<(String, String)>, String> {
