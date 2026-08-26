@@ -209,13 +209,12 @@ fn nested_ternary_in_skipped_true_branch() {
 }
 
 #[test]
-fn nested_ternary_inside_parens_divergence() {
-    // DIVERGENCE (suspected): real bash prints 2 here. rust-bash's
-    // skip_ternary_branch consumes the closing `)` while skipping the
-    // nested false branch, so the parenthesized parse fails.
-    let (_, err, code) = run("echo $(( (1 ? 2 : 0 ? 3 : 4) + 0 ))");
-    assert_eq!(err, "rust-bash: line 1: arithmetic: expected RParen\n");
-    assert_eq!(code, 1);
+fn nested_ternary_inside_parens_evaluates_correctly() {
+    // Fixed with the AST-based evaluator: the untaken ternary branch is
+    // never evaluated (structural short-circuit), so the nested false
+    // branch no longer consumes the closing paren. Real bash prints 2.
+    let (out, err, code) = run("echo $(( (1 ? 2 : 0 ? 3 : 4) + 0 ))");
+    assert_eq!((out.as_str(), err.as_str(), code), ("2\n", "", 0));
 }
 
 // ── Logical operator short-circuit skipping ─────────────────────────
@@ -289,11 +288,14 @@ fn postfix_increment_on_assoc_element() {
 }
 
 #[test]
-fn pre_increment_requires_variable_name() {
-    let (_, err, _) = run("echo $(( ++5 ))");
-    assert_eq!(
-        err,
-        "rust-bash: line 1: arithmetic: expected variable name\n"
+fn pre_increment_on_literal_is_a_syntax_error() {
+    // bash: "syntax error: operand expected". The brush structural parser
+    // rejects `++5` (prefix ++ requires an lvalue) with its own message.
+    let (_, err, code) = run("echo $(( ++5 ))");
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("arithmetic: syntax error in expression"),
+        "stderr: {err}"
     );
 }
 
@@ -391,4 +393,97 @@ fn special_variables() {
     assert_eq!(out, "0\n");
     let (out, _, _) = run("echo $(( SECONDS + 0 ))");
     assert_eq!(out, "0\n");
+}
+
+#[test]
+fn decimal_overflow_is_an_error() {
+    let (_, err, code) = run("echo $((99999999999999999999999999))");
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("arithmetic: invalid decimal number"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn assoc_compound_subscript_text_is_the_literal_key() {
+    // bash uses the subscript TEXT as the assoc key in arithmetic (no
+    // evaluation): m[k+1] reads key "k+1", m[-k] reads "-k", etc.
+    let (out, err, code) = run(
+        "declare -A m; m['k+1']=5; m['-k']=6; m['1?2:3']=7; m['k=1']=8; m['k++']=9; \
+         echo $((m[k+1])) $((m[-k])) $((m[1?2:3])) $((m[k=1])) $((m[k++]))",
+    );
+    assert_eq!(
+        (out.as_str(), err.as_str(), code),
+        ("5 6 7 8 9\n", "", 0),
+        "stdout: {out} stderr: {err}"
+    );
+}
+
+#[test]
+fn assoc_quoted_key_with_spaces_and_escapes() {
+    // Quoted keys survive verbatim, including spaces around the brackets
+    // and backslash escapes inside double quotes.
+    let (out, _, code) = run("declare -A m; m['a b']=5; echo $((m[ \"a b\" ]))");
+    assert_eq!((out.as_str(), code), ("5\n", 0));
+    let (out, _, _) = run("declare -A m; m['a\"b']=7; echo $((m[\"a\\\"b\"]))");
+    assert_eq!(out, "7\n");
+}
+
+#[test]
+fn assoc_unterminated_quoted_key_is_an_error() {
+    // The unterminated quote leaves the arithmetic expression unbalanced;
+    // the exact surface is a parse-level error (exit 2 here, since the
+    // `$((` itself never closes cleanly).
+    let (_, err, code) = run("declare -A m; echo $((m[\"abc))");
+    assert_ne!(code, 0);
+    assert!(!err.is_empty());
+}
+
+#[test]
+fn empty_subscript_with_whitespace_is_bad_array_subscript() {
+    let (_, err, _) = run("echo $(( a[ ] ))");
+    assert_eq!(err, "rust-bash: line 1: a: bad array subscript\n");
+}
+
+#[test]
+fn assoc_operator_rich_subscript_text_rendered_verbatim() {
+    // bash never parses an assoc subscript as arithmetic — the text up to
+    // `]` is the literal key. Our brush AST + unparser reproduces that
+    // (whitespace-free) text for every operator shape.
+    let script = "declare -A m; \
+        m['!k']=1; m['~k']=2; m['+k']=3; m['k+=1']=4; m['k--']=5; m['a[0]']=6; \
+        m['++k']=26; m['--k']=27; m['a[0]+=1']=28; m['k,1']=7; m['k||1']=8; m['k&&1']=9; m['k|1']=10; m['k^1']=11; m['k&1']=12; \
+        m['k==1']=13; m['k!=1']=14; m['k<1']=15; m['k>1']=16; m['k<=1']=17; m['k>=1']=18; \
+        m['k<<1']=19; m['k>>1']=20; m['k-1']=21; m['k*1']=22; m['k%1']=23; m['k/1']=24; m['k**2']=25; \
+        echo $((m[!k])) $((m[~k])) $((m[+k])) $((m[k+=1])) $((m[k--])) $((m[a[0]])) \
+             $((m[++k])) $((m[--k])) $((m[a[0]+=1])) $((m[k,1])) $((m[k||1])) $((m[k&&1])) $((m[k|1])) $((m[k^1])) $((m[k&1])) \
+             $((m[k==1])) $((m[k!=1])) $((m[k<1])) $((m[k>1])) $((m[k<=1])) $((m[k>=1])) \
+             $((m[k<<1])) $((m[k>>1])) $((m[k-1])) $((m[k*1])) $((m[k%1])) $((m[k/1])) $((m[k**2]))";
+    let (out, err, code) = run(script);
+    assert_eq!(code, 0, "stderr: {err}");
+    assert_eq!(
+        out,
+        "1 2 3 4 5 6 26 27 28 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25\n"
+    );
+}
+
+#[test]
+fn assoc_quoted_key_not_followed_by_bracket_falls_back_to_rendering() {
+    // `m["k" + 1]`: the quoted-key placeholder requires `]` right after the
+    // quote, so this falls back to quote-stripping + text rendering, making
+    // the key "k+1". (bash would use the verbatim text `"k" + 1` —
+    // whitespace/quotes included — a registered edge divergence.)
+    let (out, err, code) = run("declare -A m; m['k+1']=5; echo $((m[\"k\" + 1]))");
+    assert_eq!((out.as_str(), err.as_str(), code), ("5\n", "", 0));
+}
+
+#[test]
+fn assoc_quote_unterminated_inside_arithmetic_is_an_error() {
+    // The shell tokenizer catches the unterminated quote before arithmetic
+    // evaluation (exit 2). The arithmetic-internal path is covered by a
+    // unit test in arithmetic.rs.
+    let (_, err, code) = run("declare -A m; echo $(( m[\"k + 1 ))");
+    assert_eq!(code, 2);
+    assert!(err.contains("unterminated double quote"), "stderr: {err}");
 }

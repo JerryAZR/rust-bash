@@ -1,8 +1,23 @@
 //! Arithmetic expression evaluator for `$((...))`, `(( ))`, `let`, and
 //! C-style `for (( ; ; ))` loops.
 //!
-//! Implements a recursive-descent parser that handles all bash arithmetic
-//! operators with correct precedence.
+//! Structure: `brush_parser::arithmetic::parse` produces a full expression
+//! AST (it is brush's own shell-arithmetic grammar, pinned with the rest of
+//! our parser), and this module tree-walks it with rust-bash's variable
+//! semantics (wrapping i64, base-N literals, namerefs, array elements,
+//! `RANDOM` draws, nounset). Short-circuiting is structural — untaken
+//! ternary/&&/|| branches are simply never evaluated — which removes the
+//! old textual skip family and its parenthesis-tracking bugs.
+//!
+//! Pipeline: quoted assoc-subscript placeholder pass → double-quote
+//! stripping → literal/character validation (keeps our exact error
+//! messages) → brush structural parse → tree-walk evaluation.
+
+use std::collections::HashMap;
+
+use brush_parser::ast::{
+    ArithmeticExpr, ArithmeticTarget, BinaryOperator, UnaryAssignmentOperator, UnaryOperator,
+};
 
 use crate::error::RustBashError;
 use crate::interpreter::{InterpreterState, set_variable};
@@ -15,107 +30,135 @@ pub(crate) fn eval_arithmetic(
     expr: &str,
     state: &mut InterpreterState,
 ) -> Result<i64, RustBashError> {
-    let tokens = tokenize(expr, state.shopt_opts.strict_arith)?;
-    if tokens.is_empty() {
+    let (prepped, placeholders) = substitute_quoted_assoc_subscripts(expr, state);
+    let stripped = strip_and_validate(&prepped, state.shopt_opts.strict_arith)?;
+    if stripped.trim().is_empty() {
         return Ok(0);
     }
-    let mut parser = Parser::with_source(&tokens, expr);
-    let result = parser.parse_comma(state)?;
-    if parser.pos < parser.tokens.len() {
-        return Err(RustBashError::Execution(format!(
-            "arithmetic: unexpected token near `{}`",
-            parser.tokens[parser.pos].text(expr)
-        )));
+    let ast = brush_parser::arithmetic::parse(&stripped).map_err(|e| {
+        RustBashError::Execution(format!("arithmetic: syntax error in expression: {e}"))
+    })?;
+    let mut evaluator = Evaluator {
+        state,
+        placeholders: &placeholders,
+    };
+    evaluator.eval(&ast)
+}
+
+// ── Pre-pass 1: quoted associative-array subscripts ─────────────────
+//
+// bash uses the *verbatim text* of an associative subscript as the key
+// (`m["my key"]`, `m['k+1']`), but brush's arithmetic grammar cannot parse
+// quotes. Replace `name["..."]`/`name['...']` on variables that are
+// associative arrays with a placeholder identifier; the evaluator maps the
+// placeholder back to the exact key text.
+
+const PLACEHOLDER_PREFIX: &str = "__RB_ASSOC_KEY_";
+
+fn substitute_quoted_assoc_subscripts(
+    expr: &str,
+    state: &InterpreterState,
+) -> (String, HashMap<String, String>) {
+    let bytes = expr.as_bytes();
+    let mut out = String::with_capacity(expr.len());
+    let mut placeholders = HashMap::new();
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        // Identifier followed by `[`?
+        if bytes[i] == b'_' || bytes[i].is_ascii_alphabetic() {
+            let start = i;
+            while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            let name = &expr[start..i];
+            // Only assoc arrays get the placeholder treatment.
+            if i < bytes.len() && bytes[i] == b'[' && is_assoc_array(state, name) {
+                let mut j = i + 1;
+                while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                    j += 1;
+                }
+                if j < bytes.len()
+                    && matches!(bytes[j], b'\'' | b'"')
+                    && let Some((key, end)) = take_quoted_key(expr, j)
+                {
+                    let ph = format!("{PLACEHOLDER_PREFIX}{}__", placeholders.len());
+                    out.push_str(name);
+                    out.push('[');
+                    out.push_str(&ph);
+                    out.push(']');
+                    placeholders.insert(ph, key);
+                    i = end;
+                    continue;
+                }
+            }
+            out.push_str(name);
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
     }
-    Ok(result)
+    (out, placeholders)
 }
 
-// ── Tokens ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenKind {
-    Number(i64),
-    Ident,      // variable name (start, len stored separately)
-    Plus,       // +
-    Minus,      // -
-    Star,       // *
-    StarStar,   // **
-    Slash,      // /
-    Percent,    // %
-    Amp,        // &
-    AmpAmp,     // &&
-    Pipe,       // |
-    PipePipe,   // ||
-    Caret,      // ^
-    Tilde,      // ~
-    Bang,       // !
-    Eq,         // =
-    EqEq,       // ==
-    BangEq,     // !=
-    Lt,         // <
-    LtEq,       // <=
-    LtLt,       // <<
-    Gt,         // >
-    GtEq,       // >=
-    GtGt,       // >>
-    PlusEq,     // +=
-    MinusEq,    // -=
-    StarEq,     // *=
-    SlashEq,    // /=
-    PercentEq,  // %=
-    LtLtEq,     // <<=
-    GtGtEq,     // >>=
-    AmpEq,      // &=
-    PipeEq,     // |=
-    CaretEq,    // ^=
-    PlusPlus,   // ++
-    MinusMinus, // --
-    Question,   // ?
-    Colon,      // :
-    LParen,     // (
-    RParen,     // )
-    LBracket,   // [
-    RBracket,   // ]
-    Comma,      // ,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Token {
-    kind: TokenKind,
-    start: usize,
-    len: usize,
-}
-
-impl Token {
-    fn text<'a>(&self, source: &'a str) -> &'a str {
-        &source[self.start..self.start + self.len]
+/// Read a quoted key starting at `bytes[start]` (a quote char), returning the
+/// inner text and the index just past the closing `]`. Returns None if the
+/// shape doesn't match.
+fn take_quoted_key(expr: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = expr.as_bytes();
+    let quote = bytes[start];
+    let mut i = start + 1;
+    // Double quotes unescape \" \\ \$ and \` per bash; single quotes
+    // are verbatim.
+    let mut inner = String::new();
+    while i < bytes.len() && bytes[i] != quote {
+        if quote == b'"'
+            && bytes[i] == b'\\'
+            && i + 1 < bytes.len()
+            && matches!(bytes[i + 1], b'"' | b'\\' | b'$' | b'`')
+        {
+            inner.push(bytes[i + 1] as char);
+            i += 2;
+            continue;
+        }
+        inner.push(bytes[i] as char);
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    i += 1; // past the quote
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b']' {
+        Some((inner, i + 1))
+    } else {
+        None
     }
 }
 
-// ── Tokenizer ───────────────────────────────────────────────────────
+// ── Pre-pass 2/3: double-quote stripping + literal/char validation ──
+//
+// Mirrors the old tokenizer's acceptance rules and exact error messages:
+// double-quoted regions are treated as arithmetic (`$(( "1+2" ))` == 3),
+// single quotes outside assoc subscripts are an operand error, literals
+// (decimal/hex/octal/base#N) are validated with our historical messages.
 
-fn tokenize(input: &str, strict_arith: bool) -> Result<Vec<Token>, RustBashError> {
-    tokenize_with_offset(input, strict_arith, 0)
-}
-
-fn tokenize_with_offset(
-    input: &str,
-    strict_arith: bool,
-    offset: usize,
-) -> Result<Vec<Token>, RustBashError> {
+fn strip_and_validate(input: &str, strict_arith: bool) -> Result<String, RustBashError> {
     let bytes = input.as_bytes();
-    let mut tokens = Vec::new();
-    let mut i = 0;
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
 
     while i < bytes.len() {
         if is_arithmetic_whitespace(bytes[i]) {
+            out.push(bytes[i] as char);
             i += 1;
             continue;
         }
 
-        let start = i;
-
         if bytes[i].is_ascii_digit() {
+            let start = i;
             let num = parse_number(bytes, &mut i)?;
             if i < bytes.len() && bytes[i] == b'.' {
                 return Err(RustBashError::Execution(
@@ -138,19 +181,11 @@ fn tokenize_with_offset(
                     i += 1;
                 }
                 let val_str = std::str::from_utf8(&bytes[val_start..i]).unwrap();
-                let result = parse_base_n_value(base, val_str)?;
-                tokens.push(Token {
-                    kind: TokenKind::Number(result),
-                    start: offset + start,
-                    len: i - start,
-                });
-            } else {
-                tokens.push(Token {
-                    kind: TokenKind::Number(num),
-                    start: offset + start,
-                    len: i - start,
-                });
+                // Validate with our exact error messages; the brush parser
+                // re-parses the same text for the actual value.
+                parse_base_n_value(base, val_str)?;
             }
+            out.push_str(&input[start..i]);
             continue;
         }
 
@@ -161,337 +196,194 @@ fn tokenize_with_offset(
         }
 
         if bytes[i] == b'"' {
+            // Double-quoted region: contents are arithmetic. Strip the quotes
+            // and validate the inner text recursively (same semantics as the
+            // old tokenizer's recursive tokenization).
             i += 1;
             let inner_start = i;
             while i < bytes.len() && bytes[i] != b'"' {
                 if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                    i += 2;
-                } else {
                     i += 1;
                 }
+                i += 1;
             }
-            let inner = std::str::from_utf8(&bytes[inner_start..i]).unwrap_or("");
+            let inner = &input[inner_start..i];
             if i < bytes.len() {
-                i += 1;
+                i += 1; // closing quote
             }
-            tokens.extend(tokenize_with_offset(
-                inner,
-                strict_arith,
-                offset + inner_start,
-            )?);
-            continue;
-        }
-
-        if bytes[i] == b'_' || bytes[i].is_ascii_alphabetic() {
-            while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
-                i += 1;
-            }
-            tokens.push(Token {
-                kind: TokenKind::Ident,
-                start: offset + start,
-                len: i - start,
-            });
+            let inner_stripped = strip_and_validate(inner, strict_arith)?;
+            out.push_str(&inner_stripped);
             continue;
         }
 
         if bytes[i] == b'$' {
+            // Arithmetic treats `$x` / `${x}` / `$1` / `$#` / `$?` like the
+            // bare variable (bash expands `$` inside arithmetic). brush's
+            // grammar has no `$`, so map them to the plain name; anything
+            // else keeps the `$` for the structural parser to reject.
             i += 1;
             if i < bytes.len() && bytes[i] == b'{' {
-                i += 1;
-                let var_start = i;
-                while i < bytes.len() && bytes[i] != b'}' {
-                    i += 1;
+                let var_start = i + 1;
+                let mut j = var_start;
+                while j < bytes.len() && bytes[j] != b'}' {
+                    j += 1;
                 }
-                if i < bytes.len() {
-                    tokens.push(Token {
-                        kind: TokenKind::Ident,
-                        start: offset + var_start,
-                        len: i - var_start,
-                    });
-                    i += 1;
+                let inner = &input[var_start..j];
+                if j < bytes.len()
+                    && !inner.is_empty()
+                    && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    out.push_str(inner);
+                    i = j + 1;
                 }
-            } else if i < bytes.len() && bytes[i].is_ascii_digit() {
-                let var_start = i;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                tokens.push(Token {
-                    kind: TokenKind::Ident,
-                    start: offset + var_start,
-                    len: i - var_start,
-                });
-            } else if i < bytes.len() && (bytes[i] == b'#' || bytes[i] == b'?') {
-                tokens.push(Token {
-                    kind: TokenKind::Ident,
-                    start: offset + i,
-                    len: 1,
-                });
-                i += 1;
-            } else if i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphabetic()) {
+                // Otherwise leave `i` just after `$` so the remainder is
+                // validated/parsed normally (and errors if malformed).
+                continue;
+            }
+            if i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphabetic()) {
                 let var_start = i;
                 while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
                     i += 1;
                 }
-                tokens.push(Token {
-                    kind: TokenKind::Ident,
-                    start: offset + var_start,
-                    len: i - var_start,
-                });
+                out.push_str(&input[var_start..i]);
+                continue;
             }
+            if i < bytes.len() && bytes[i].is_ascii_digit() {
+                // Positional parameter read, not a number literal — brush
+                // can't express it, so use a placeholder the evaluator
+                // maps back to read_var("<n>").
+                let var_start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                out.push_str("__RB_ARITH_POS_");
+                out.push_str(&input[var_start..i]);
+                out.push_str("__");
+                continue;
+            }
+            if i < bytes.len() && matches!(bytes[i], b'#' | b'?') {
+                // Positional-count/exit-status pseudo targets resolve via
+                // read_var's special cases; brush can't parse them, so use
+                // a placeholder variable the evaluator maps back.
+                let special = if bytes[i] == b'#' {
+                    "__RB_ARITH_HASH__"
+                } else {
+                    "__RB_ARITH_QUESTION__"
+                };
+                out.push_str(special);
+                i += 1;
+                continue;
+            }
+            // Lone `$` (not followed by an ident/digit/`{`/`#`/`?`)
+            // produces no token, mirroring the old tokenizer.
             continue;
         }
 
-        let next = if i + 1 < bytes.len() {
-            Some(bytes[i + 1])
-        } else {
-            None
-        };
-        let next2 = if i + 2 < bytes.len() {
-            Some(bytes[i + 2])
-        } else {
-            None
-        };
-
-        let push = |tokens: &mut Vec<Token>, kind: TokenKind, len: usize| {
-            tokens.push(Token {
-                kind,
-                start: offset + start,
-                len,
-            });
-        };
-
-        match (bytes[i], next, next2) {
-            (b'*', Some(b'*'), _) => {
-                push(&mut tokens, TokenKind::StarStar, 2);
-                i += 2;
-            }
-            (b'<', Some(b'<'), Some(b'=')) => {
-                push(&mut tokens, TokenKind::LtLtEq, 3);
-                i += 3;
-            }
-            (b'>', Some(b'>'), Some(b'=')) => {
-                push(&mut tokens, TokenKind::GtGtEq, 3);
-                i += 3;
-            }
-            (b'+', Some(b'+'), _) => {
-                push(&mut tokens, TokenKind::PlusPlus, 2);
-                i += 2;
-            }
-            (b'-', Some(b'-'), _) => {
-                push(&mut tokens, TokenKind::MinusMinus, 2);
-                i += 2;
-            }
-            (b'+', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::PlusEq, 2);
-                i += 2;
-            }
-            (b'-', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::MinusEq, 2);
-                i += 2;
-            }
-            (b'*', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::StarEq, 2);
-                i += 2;
-            }
-            (b'/', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::SlashEq, 2);
-                i += 2;
-            }
-            (b'%', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::PercentEq, 2);
-                i += 2;
-            }
-            (b'&', Some(b'&'), _) => {
-                push(&mut tokens, TokenKind::AmpAmp, 2);
-                i += 2;
-            }
-            (b'&', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::AmpEq, 2);
-                i += 2;
-            }
-            (b'|', Some(b'|'), _) => {
-                push(&mut tokens, TokenKind::PipePipe, 2);
-                i += 2;
-            }
-            (b'|', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::PipeEq, 2);
-                i += 2;
-            }
-            (b'^', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::CaretEq, 2);
-                i += 2;
-            }
-            (b'=', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::EqEq, 2);
-                i += 2;
-            }
-            (b'!', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::BangEq, 2);
-                i += 2;
-            }
-            (b'<', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::LtEq, 2);
-                i += 2;
-            }
-            (b'<', Some(b'<'), _) => {
-                push(&mut tokens, TokenKind::LtLt, 2);
-                i += 2;
-            }
-            (b'>', Some(b'='), _) => {
-                push(&mut tokens, TokenKind::GtEq, 2);
-                i += 2;
-            }
-            (b'>', Some(b'>'), _) => {
-                push(&mut tokens, TokenKind::GtGt, 2);
-                i += 2;
-            }
-            (b'+', _, _) => {
-                push(&mut tokens, TokenKind::Plus, 1);
+        if bytes[i] == b'\\' {
+            // A backslash-escaped `$` reaches arithmetic through expansion
+            // (`\$1`, `\$#`, `\$?`); step onto the `$` and let the dollar
+            // branch map it. Any other escape is invalid.
+            if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+                // (llvm-cov region artifact: this arm executes — pinned by
+                // escaped_dollar_idents_reach_the_tokenizer.)
                 i += 1;
+                continue;
             }
-            (b'-', _, _) => {
-                push(&mut tokens, TokenKind::Minus, 1);
-                i += 1;
-            }
-            (b'*', _, _) => {
-                push(&mut tokens, TokenKind::Star, 1);
-                i += 1;
-            }
-            (b'/', _, _) => {
-                push(&mut tokens, TokenKind::Slash, 1);
-                i += 1;
-            }
-            (b'%', _, _) => {
-                push(&mut tokens, TokenKind::Percent, 1);
-                i += 1;
-            }
-            (b'&', _, _) => {
-                push(&mut tokens, TokenKind::Amp, 1);
-                i += 1;
-            }
-            (b'|', _, _) => {
-                push(&mut tokens, TokenKind::Pipe, 1);
-                i += 1;
-            }
-            (b'^', _, _) => {
-                push(&mut tokens, TokenKind::Caret, 1);
-                i += 1;
-            }
-            (b'~', _, _) => {
-                push(&mut tokens, TokenKind::Tilde, 1);
-                i += 1;
-            }
-            (b'!', _, _) => {
-                push(&mut tokens, TokenKind::Bang, 1);
-                i += 1;
-            }
-            (b'=', _, _) => {
-                push(&mut tokens, TokenKind::Eq, 1);
-                i += 1;
-            }
-            (b'<', _, _) => {
-                push(&mut tokens, TokenKind::Lt, 1);
-                i += 1;
-            }
-            (b'>', _, _) => {
-                push(&mut tokens, TokenKind::Gt, 1);
-                i += 1;
-            }
-            (b'?', _, _) => {
-                push(&mut tokens, TokenKind::Question, 1);
-                i += 1;
-            }
-            (b':', _, _) => {
-                push(&mut tokens, TokenKind::Colon, 1);
-                i += 1;
-            }
-            (b'(', _, _) => {
-                push(&mut tokens, TokenKind::LParen, 1);
-                i += 1;
-            }
-            (b')', _, _) => {
-                push(&mut tokens, TokenKind::RParen, 1);
-                i += 1;
-            }
-            (b'[', _, _) => {
-                push(&mut tokens, TokenKind::LBracket, 1);
-                i += 1;
-            }
-            (b']', _, _) => {
-                push(&mut tokens, TokenKind::RBracket, 1);
-                i += 1;
-            }
-            (b',', _, _) => {
-                push(&mut tokens, TokenKind::Comma, 1);
-                i += 1;
-            }
-            _ => {
-                return Err(RustBashError::Execution(format!(
-                    "arithmetic: unexpected character `{}`",
-                    bytes[i] as char
-                )));
-            }
+            return Err(RustBashError::Execution(
+                "arithmetic: unexpected character `\\`".into(),
+            ));
         }
-    }
 
-    Ok(tokens)
+        if bytes[i] == b'_' || bytes[i].is_ascii_alphabetic() {
+            let start = i;
+            while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            let name = &input[start..i];
+            // An empty subscript (`a[]`) is a bad-array-subscript error,
+            // not a syntax error (bash parity).
+            if i < bytes.len() && bytes[i] == b'[' {
+                let mut j = i + 1;
+                while j < bytes.len() && matches!(bytes[j], b' ' | b'\t') {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b']' {
+                    return Err(RustBashError::Execution(format!(
+                        "{name}: bad array subscript"
+                    )));
+                }
+            }
+            out.push_str(name);
+            continue;
+        }
+
+        const OPERATOR_CHARS: &[u8] = b"+-*/%&|^~!<>=?():[],";
+        if !OPERATOR_CHARS.contains(&bytes[i]) {
+            return Err(RustBashError::Execution(format!(
+                "arithmetic: unexpected character `{}`",
+                bytes[i] as char
+            )));
+        }
+
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    Ok(out)
 }
 
 fn is_arithmetic_whitespace(byte: u8) -> bool {
+    // `\r` is deliberately excluded: most shells (incl. bash) reject it in
+    // arithmetic, and the catch-all turns it into "unexpected character".
     matches!(byte, b' ' | b'\t' | b'\n')
 }
 
 fn parse_number(bytes: &[u8], i: &mut usize) -> Result<i64, RustBashError> {
     let start = *i;
-
-    // Hex: 0x or 0X
-    if bytes[start] == b'0'
-        && *i + 1 < bytes.len()
-        && (bytes[*i + 1] == b'x' || bytes[*i + 1] == b'X')
-    {
-        *i += 2;
-        let hex_start = *i;
-        while *i < bytes.len() && bytes[*i].is_ascii_hexdigit() {
-            *i += 1;
+    if bytes[*i] == b'0' {
+        // Hex?
+        if *i + 1 < bytes.len() && (bytes[*i + 1] == b'x' || bytes[*i + 1] == b'X') {
+            *i += 2;
+            let hex_start = *i;
+            while *i < bytes.len() && bytes[*i].is_ascii_hexdigit() {
+                *i += 1;
+            }
+            if *i == hex_start {
+                return Err(RustBashError::Execution(
+                    "arithmetic: invalid hex number".into(),
+                ));
+            }
+            let hex_str = std::str::from_utf8(&bytes[hex_start..*i]).unwrap();
+            return i64::from_str_radix(hex_str, 16).map_err(|_| {
+                RustBashError::Execution(format!("arithmetic: invalid hex number `0x{hex_str}`"))
+            });
         }
-        if *i == hex_start {
-            return Err(RustBashError::Execution(
-                "arithmetic: invalid hex number".into(),
-            ));
-        }
-        let s = std::str::from_utf8(&bytes[hex_start..*i]).unwrap();
-        return i64::from_str_radix(s, 16).map_err(|_| {
-            RustBashError::Execution(format!("arithmetic: invalid hex number `0x{s}`"))
-        });
-    }
-
-    // Octal: leading 0 followed by digits
-    if bytes[start] == b'0' && *i + 1 < bytes.len() && bytes[*i + 1].is_ascii_digit() {
-        *i += 1;
-        let oct_start = *i;
+        // Octal (leading 0)
         while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
         }
-        let s = std::str::from_utf8(&bytes[oct_start..*i]).unwrap();
-        return i64::from_str_radix(s, 8).map_err(|_| {
-            RustBashError::Execution(format!("arithmetic: invalid octal number `0{s}`"))
+        let oct_str = std::str::from_utf8(&bytes[start..*i]).unwrap();
+        return i64::from_str_radix(oct_str, 8).map_err(|_| {
+            RustBashError::Execution(format!("arithmetic: invalid octal number `{oct_str}`"))
         });
     }
-
-    // Decimal
     while *i < bytes.len() && bytes[*i].is_ascii_digit() {
         *i += 1;
     }
-    let s = std::str::from_utf8(&bytes[start..*i]).unwrap();
-    s.parse::<i64>()
-        .map_err(|_| RustBashError::Execution(format!("arithmetic: invalid number `{s}`")))
+    let num_str = std::str::from_utf8(&bytes[start..*i]).unwrap();
+    num_str.parse::<i64>().map_err(|_| {
+        RustBashError::Execution(format!("arithmetic: invalid decimal number `{num_str}`"))
+    })
 }
 
-/// Parse a value in base N (2..64). Digits: 0-9, a-z, A-Z, @, _
 fn parse_base_n_value(base: i64, digits: &str) -> Result<i64, RustBashError> {
     if !(2..=64).contains(&base) {
         return Err(RustBashError::Execution(format!(
             "arithmetic: invalid arithmetic base: {base}"
+        )));
+    }
+    if digits.is_empty() {
+        return Err(RustBashError::Execution(format!(
+            "arithmetic: invalid base constant `{base}#`"
         )));
     }
     let base_u = base as u64;
@@ -501,7 +393,7 @@ fn parse_base_n_value(base: i64, digits: &str) -> Result<i64, RustBashError> {
             '0'..='9' => (ch as u64) - (b'0' as u64),
             'a'..='z' => (ch as u64) - (b'a' as u64) + 10,
             'A'..='Z' => {
-                if base <= 36 {
+                if base_u <= 36 {
                     (ch as u64) - (b'A' as u64) + 10
                 } else {
                     (ch as u64) - (b'A' as u64) + 36
@@ -509,7 +401,7 @@ fn parse_base_n_value(base: i64, digits: &str) -> Result<i64, RustBashError> {
             }
             '@' => 62,
             '_' => 63,
-            // Unreachable: the tokenizer only accepts [0-9a-zA-Z@_] inside
+            // Unreachable: the caller only accepts [0-9a-zA-Z@_] inside
             // base-N literals, and every one of those is handled above.
             _ => {
                 return Err(RustBashError::Execution(format!(
@@ -527,669 +419,456 @@ fn parse_base_n_value(base: i64, digits: &str) -> Result<i64, RustBashError> {
     Ok(result)
 }
 
-// ── Recursive-descent parser / evaluator ────────────────────────────
+// ── Tree-walk evaluator ─────────────────────────────────────────────
 
-struct Parser<'a> {
-    tokens: &'a [Token],
-    source: &'a str,
-    pos: usize,
+struct Evaluator<'a, 'b> {
+    state: &'a mut InterpreterState,
+    placeholders: &'b HashMap<String, String>,
 }
 
-impl<'a> Parser<'a> {
-    fn with_source(tokens: &'a [Token], source: &'a str) -> Self {
-        Self {
-            tokens,
-            source,
-            pos: 0,
-        }
-    }
-
-    fn peek(&self) -> Option<TokenKind> {
-        self.tokens.get(self.pos).map(|t| t.kind)
-    }
-
-    fn advance(&mut self) -> Token {
-        let t = self.tokens[self.pos];
-        self.pos += 1;
-        t
-    }
-
-    fn expect(&mut self, kind: TokenKind) -> Result<Token, RustBashError> {
-        match self.peek() {
-            Some(k) if k == kind => Ok(self.advance()),
-            _ => Err(RustBashError::Execution(format!(
-                "arithmetic: expected {kind:?}"
-            ))),
-        }
-    }
-
-    fn ident_name(&self, tok: Token) -> &'a str {
-        &self.source[tok.start..tok.start + tok.len]
-    }
-
-    // ── Precedence levels (low to high) ─────────────────────────────
-
-    // Comma (lowest)
-    fn parse_comma(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut result = self.parse_assignment(state)?;
-        while self.peek() == Some(TokenKind::Comma) {
-            self.advance();
-            result = self.parse_assignment(state)?;
-        }
-        Ok(result)
-    }
-
-    // Assignment: = += -= *= /= %= <<= >>= &= |= ^=
-    // Right-to-left associative
-    fn parse_assignment(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        // Look ahead: if current is Ident followed by assignment op, handle it.
-        // Also handle Ident[expr] = ... for array element assignment.
-        if let Some(TokenKind::Ident) = self.peek() {
-            let saved = self.pos;
-            let ident_tok = self.advance();
-            let name = self.ident_name(ident_tok).to_string();
-
-            // Check for array subscript — capture raw text between [ and ]
-            let raw_subscript = if self.peek() == Some(TokenKind::LBracket) {
-                Some(self.extract_raw_subscript()?)
-            } else {
-                None
-            };
-
-            if let Some(op) = self.peek() {
-                match op {
-                    TokenKind::Eq => {
-                        self.advance();
-                        let val = self.parse_assignment(state)?;
-                        if let Some(ref sub) = raw_subscript {
-                            write_array_element(state, &name, sub, val)?;
-                        } else {
-                            set_variable(state, &name, val.to_string())?;
-                        }
-                        return Ok(val);
-                    }
-                    TokenKind::PlusEq
-                    | TokenKind::MinusEq
-                    | TokenKind::StarEq
-                    | TokenKind::SlashEq
-                    | TokenKind::PercentEq
-                    | TokenKind::LtLtEq
-                    | TokenKind::GtGtEq
-                    | TokenKind::AmpEq
-                    | TokenKind::PipeEq
-                    | TokenKind::CaretEq => {
-                        self.advance();
-                        let rhs = self.parse_assignment(state)?;
-                        let lhs = if let Some(ref sub) = raw_subscript {
-                            read_array_element(state, &name, sub)?
-                        } else {
-                            read_var(state, &name)?
-                        };
-                        let val = apply_compound_op(op, lhs, rhs)?;
-                        if let Some(ref sub) = raw_subscript {
-                            write_array_element(state, &name, sub, val)?;
-                        } else {
-                            set_variable(state, &name, val.to_string())?;
-                        }
-                        return Ok(val);
-                    }
-                    _ => {
-                        // Not an assignment — backtrack
-                        self.pos = saved;
-                    }
-                }
-            } else {
-                self.pos = saved;
+impl Evaluator<'_, '_> {
+    fn eval(&mut self, expr: &ArithmeticExpr) -> Result<i64, RustBashError> {
+        match expr {
+            ArithmeticExpr::Literal(n) => Ok(*n),
+            ArithmeticExpr::Reference(target) => self.read_target(target),
+            ArithmeticExpr::UnaryOp(op, inner) => {
+                let v = self.eval(inner)?;
+                Ok(match op {
+                    UnaryOperator::LogicalNot => i64::from(v == 0),
+                    UnaryOperator::BitwiseNot => !v,
+                    UnaryOperator::UnaryPlus => v,
+                    UnaryOperator::UnaryMinus => v.wrapping_neg(),
+                })
             }
-        }
-        self.parse_ternary(state)
-    }
-
-    // Ternary: cond ? true_val : false_val
-    // Bash short-circuits: only the taken branch is evaluated for side effects.
-    fn parse_ternary(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let cond = self.parse_logical_or(state)?;
-        if self.peek() == Some(TokenKind::Question) {
-            self.advance();
-            if cond != 0 {
-                let true_val = self.parse_assignment(state)?;
-                self.expect(TokenKind::Colon)?;
-                self.skip_ternary_branch()?;
-                Ok(true_val)
-            } else {
-                self.skip_ternary_branch()?;
-                self.expect(TokenKind::Colon)?;
-                let false_val = self.parse_assignment(state)?;
-                Ok(false_val)
-            }
-        } else {
-            Ok(cond)
-        }
-    }
-
-    /// Skip tokens for one ternary branch without evaluating side effects.
-    /// Handles nested ternaries by tracking `?`/`:` depth.
-    fn skip_ternary_branch(&mut self) -> Result<(), RustBashError> {
-        let mut depth = 0;
-        loop {
-            match self.peek() {
-                Some(TokenKind::Question) => {
-                    depth += 1;
-                    self.advance();
-                }
-                Some(TokenKind::Colon) if depth == 0 => break,
-                Some(TokenKind::Colon) => {
-                    depth -= 1;
-                    self.advance();
-                }
-                None => break,
-                _ => {
-                    self.advance();
-                }
-            }
-        }
-        Ok(())
-    }
-
-    // Logical OR: || (short-circuit: skip RHS if LHS is truthy)
-    fn parse_logical_or(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_logical_and(state)?;
-        while self.peek() == Some(TokenKind::PipePipe) {
-            self.advance();
-            if left != 0 {
-                // RHS of || is a logical-and-level expression; skip past && chains
-                self.skip_logical_operand(true)?;
-                left = 1;
-            } else {
-                let right = self.parse_logical_and(state)?;
-                left = i64::from(right != 0);
-            }
-        }
-        Ok(left)
-    }
-
-    // Logical AND: && (short-circuit: skip RHS if LHS is falsy)
-    fn parse_logical_and(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_bitwise_or(state)?;
-        while self.peek() == Some(TokenKind::AmpAmp) {
-            self.advance();
-            if left == 0 {
-                // RHS of && is a bitwise-or-level expression; stop at &&
-                self.skip_logical_operand(false)?;
-                left = 0;
-            } else {
-                let right = self.parse_bitwise_or(state)?;
-                left = i64::from(right != 0);
-            }
-        }
-        Ok(left)
-    }
-
-    /// Skip one operand expression without evaluating side effects.
-    /// When `skip_and` is true (called from `||`), skips past `&&` chains
-    /// since `&&` has higher precedence than `||`.
-    fn skip_logical_operand(&mut self, skip_and: bool) -> Result<(), RustBashError> {
-        let mut paren_depth = 0i32;
-        let mut bracket_depth = 0i32;
-        loop {
-            match self.peek() {
-                None => break,
-                Some(TokenKind::LParen) => {
-                    paren_depth += 1;
-                    self.advance();
-                }
-                Some(TokenKind::RParen) => {
-                    if paren_depth <= 0 {
-                        break;
-                    }
-                    paren_depth -= 1;
-                    self.advance();
-                }
-                Some(TokenKind::LBracket) => {
-                    bracket_depth += 1;
-                    self.advance();
-                }
-                Some(TokenKind::RBracket) => {
-                    bracket_depth -= 1;
-                    self.advance();
-                }
-                Some(TokenKind::AmpAmp) if skip_and && paren_depth == 0 && bracket_depth == 0 => {
-                    // Inside ||'s RHS: consume && and skip its operand too
-                    self.advance();
-                    self.skip_logical_operand(false)?;
-                }
-                Some(
-                    TokenKind::PipePipe
-                    | TokenKind::AmpAmp
-                    | TokenKind::Question
-                    | TokenKind::Colon
-                    | TokenKind::Comma,
-                ) if paren_depth == 0 && bracket_depth == 0 => {
-                    break;
-                }
-                _ => {
-                    self.advance();
-                }
-            }
-        }
-        Ok(())
-    }
-
-    // Bitwise OR: |
-    fn parse_bitwise_or(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_bitwise_xor(state)?;
-        while self.peek() == Some(TokenKind::Pipe) {
-            self.advance();
-            let right = self.parse_bitwise_xor(state)?;
-            left |= right;
-        }
-        Ok(left)
-    }
-
-    // Bitwise XOR: ^
-    fn parse_bitwise_xor(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_bitwise_and(state)?;
-        while self.peek() == Some(TokenKind::Caret) {
-            self.advance();
-            let right = self.parse_bitwise_and(state)?;
-            left ^= right;
-        }
-        Ok(left)
-    }
-
-    // Bitwise AND: &
-    fn parse_bitwise_and(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_equality(state)?;
-        while self.peek() == Some(TokenKind::Amp) {
-            self.advance();
-            let right = self.parse_equality(state)?;
-            left &= right;
-        }
-        Ok(left)
-    }
-
-    // Equality: == !=
-    fn parse_equality(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_comparison(state)?;
-        loop {
-            match self.peek() {
-                Some(TokenKind::EqEq) => {
-                    self.advance();
-                    let right = self.parse_comparison(state)?;
-                    left = i64::from(left == right);
-                }
-                Some(TokenKind::BangEq) => {
-                    self.advance();
-                    let right = self.parse_comparison(state)?;
-                    left = i64::from(left != right);
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    // Comparison: < > <= >=
-    fn parse_comparison(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_shift(state)?;
-        loop {
-            match self.peek() {
-                Some(TokenKind::Lt) => {
-                    self.advance();
-                    let right = self.parse_shift(state)?;
-                    left = i64::from(left < right);
-                }
-                Some(TokenKind::Gt) => {
-                    self.advance();
-                    let right = self.parse_shift(state)?;
-                    left = i64::from(left > right);
-                }
-                Some(TokenKind::LtEq) => {
-                    self.advance();
-                    let right = self.parse_shift(state)?;
-                    left = i64::from(left <= right);
-                }
-                Some(TokenKind::GtEq) => {
-                    self.advance();
-                    let right = self.parse_shift(state)?;
-                    left = i64::from(left >= right);
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    // Shift: << >>
-    fn parse_shift(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_additive(state)?;
-        loop {
-            match self.peek() {
-                Some(TokenKind::LtLt) => {
-                    self.advance();
-                    let right = self.parse_additive(state)?;
-                    left = left.wrapping_shl(right as u32);
-                }
-                Some(TokenKind::GtGt) => {
-                    self.advance();
-                    let right = self.parse_additive(state)?;
-                    left = left.wrapping_shr(right as u32);
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    // Addition / subtraction: + -
-    fn parse_additive(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_multiplicative(state)?;
-        loop {
-            match self.peek() {
-                Some(TokenKind::Plus) => {
-                    self.advance();
-                    let right = self.parse_multiplicative(state)?;
-                    left = left.wrapping_add(right);
-                }
-                Some(TokenKind::Minus) => {
-                    self.advance();
-                    let right = self.parse_multiplicative(state)?;
-                    left = left.wrapping_sub(right);
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    // Multiplication / division / modulo: * / %
-    fn parse_multiplicative(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let mut left = self.parse_exponentiation(state)?;
-        loop {
-            match self.peek() {
-                Some(TokenKind::Star) => {
-                    self.advance();
-                    let right = self.parse_exponentiation(state)?;
-                    left = left.wrapping_mul(right);
-                }
-                Some(TokenKind::Slash) => {
-                    self.advance();
-                    let right = self.parse_exponentiation(state)?;
-                    if right == 0 {
-                        return Err(RustBashError::Execution(
-                            "arithmetic: division by zero".into(),
-                        ));
-                    }
-                    left = left.wrapping_div(right);
-                }
-                Some(TokenKind::Percent) => {
-                    self.advance();
-                    let right = self.parse_exponentiation(state)?;
-                    if right == 0 {
-                        return Err(RustBashError::Execution(
-                            "arithmetic: division by zero".into(),
-                        ));
-                    }
-                    left = left.wrapping_rem(right);
-                }
-                _ => break,
-            }
-        }
-        Ok(left)
-    }
-
-    // Exponentiation: ** (right-to-left associative)
-    fn parse_exponentiation(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let base = self.parse_unary(state)?;
-        if self.peek() == Some(TokenKind::StarStar) {
-            self.advance();
-            let exp = self.parse_exponentiation(state)?; // right-associative
-            wrapping_pow(base, exp)
-        } else {
-            Ok(base)
-        }
-    }
-
-    // Unary: + - ! ~ (right-to-left)
-    fn parse_unary(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        match self.peek() {
-            Some(TokenKind::Plus) => {
-                self.advance();
-                self.parse_unary(state)
-            }
-            Some(TokenKind::Minus) => {
-                self.advance();
-                let val = self.parse_unary(state)?;
-                Ok(val.wrapping_neg())
-            }
-            Some(TokenKind::Bang) => {
-                self.advance();
-                let val = self.parse_unary(state)?;
-                Ok(i64::from(val == 0))
-            }
-            Some(TokenKind::Tilde) => {
-                self.advance();
-                let val = self.parse_unary(state)?;
-                Ok(!val)
-            }
-            // Pre-increment / pre-decrement (supports both var and var[subscript])
-            Some(TokenKind::PlusPlus) => {
-                self.advance();
-                let tok = self.expect_ident()?;
-                let name = self.ident_name(tok).to_string();
-                if self.peek() == Some(TokenKind::LBracket) {
-                    let raw_sub = self.extract_raw_subscript()?;
-                    let old = read_array_element(state, &name, &raw_sub)?;
-                    let val = old.wrapping_add(1);
-                    write_array_element(state, &name, &raw_sub, val)?;
-                    Ok(val)
+            ArithmeticExpr::BinaryOp(op, lhs, rhs) => self.eval_binary(op, lhs, rhs),
+            // Short-circuiting is structural: only the taken branch is
+            // evaluated, so side effects in the other branch never happen.
+            ArithmeticExpr::Conditional(cond, then_branch, else_branch) => {
+                if self.eval(cond)? != 0 {
+                    self.eval(then_branch)
                 } else {
-                    let val = read_var(state, &name)?.wrapping_add(1);
-                    set_variable(state, &name, val.to_string())?;
-                    Ok(val)
+                    self.eval(else_branch)
                 }
             }
-            Some(TokenKind::MinusMinus) => {
-                self.advance();
-                let tok = self.expect_ident()?;
-                let name = self.ident_name(tok).to_string();
-                if self.peek() == Some(TokenKind::LBracket) {
-                    let raw_sub = self.extract_raw_subscript()?;
-                    let old = read_array_element(state, &name, &raw_sub)?;
-                    let val = old.wrapping_sub(1);
-                    write_array_element(state, &name, &raw_sub, val)?;
-                    Ok(val)
-                } else {
-                    let val = read_var(state, &name)?.wrapping_sub(1);
-                    set_variable(state, &name, val.to_string())?;
-                    Ok(val)
-                }
-            }
-            _ => self.parse_postfix(state),
-        }
-    }
-
-    // Postfix: var++ var-- (also supports var[subscript]++ and var[subscript]--)
-    fn parse_postfix(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        let val = self.parse_primary(state)?;
-
-        // Check for postfix ++ or -- after an identifier (with optional subscript)
-        if self.pos >= 1 {
-            // Check if the previous token was ] (array subscript) or Ident (simple var)
-            let prev = self.tokens[self.pos - 1];
-            let is_array = matches!(prev.kind, TokenKind::RBracket);
-            let is_simple_ident = matches!(prev.kind, TokenKind::Ident);
-
-            if is_array {
-                // Find the variable name and subscript by walking back
-                if let Some(op @ (TokenKind::PlusPlus | TokenKind::MinusMinus)) = self.peek() {
-                    self.advance();
-                    // Reconstruct the var name and subscript from the parsed tokens
-                    // We need to find the Ident before the [ ... ] sequence
-                    if let Some((name, raw_sub)) = self.find_preceding_array_ref() {
-                        let delta: i64 = if op == TokenKind::PlusPlus { 1 } else { -1 };
-                        write_array_element(state, &name, &raw_sub, val.wrapping_add(delta))?;
-                        return Ok(val);
-                    }
-                }
-            } else if is_simple_ident {
-                match self.peek() {
-                    Some(TokenKind::PlusPlus) => {
-                        self.advance();
-                        let name = self.ident_name(prev).to_string();
-                        set_variable(state, &name, (val.wrapping_add(1)).to_string())?;
-                        return Ok(val); // return old value
-                    }
-                    Some(TokenKind::MinusMinus) => {
-                        self.advance();
-                        let name = self.ident_name(prev).to_string();
-                        set_variable(state, &name, (val.wrapping_sub(1)).to_string())?;
-                        return Ok(val); // return old value
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(val)
-    }
-
-    /// Walk backward from current position to find the array name and subscript
-    /// text for a `name[subscript]` that was just parsed.
-    fn find_preceding_array_ref(&self) -> Option<(String, String)> {
-        // We expect tokens ending: Ident LBracket <subscript tokens...> RBracket
-        // Walk backward from current pos - 1 (which is the postfix op we just consumed)
-        // The token before that was RBracket. Find matching LBracket.
-        let mut p = self.pos - 2; // pos after advance; -1 = op token, -2 = RBracket
-        let mut depth = 1;
-        while p > 0 {
-            p -= 1;
-            match self.tokens[p].kind {
-                TokenKind::RBracket => depth += 1,
-                TokenKind::LBracket => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        if depth != 0 || p == 0 {
-            // Unreachable: this walk only runs when the previously parsed
-            // token is `]` of a subscript that was just parsed balanced, so
-            // a matching `[` always exists.
-            return None;
-        }
-        // Token before LBracket should be the identifier
-        let ident_tok = self.tokens[p - 1];
-        if !matches!(ident_tok.kind, TokenKind::Ident) {
-            // Unreachable: the balanced `[` found above always follows the
-            // array-name identifier in a parsed subscript.
-            return None;
-        }
-        let name = self.ident_name(ident_tok).to_string();
-        // Reconstruct the raw source between the brackets so quoted associative
-        // keys survive tokenization.
-        let lbracket = self.tokens[p];
-        let rbracket = self.tokens[self.pos - 2];
-        let sub_text = if lbracket.start + lbracket.len < rbracket.start {
-            self.source[lbracket.start + lbracket.len..rbracket.start].to_string()
-        } else {
-            // Unreachable: an empty subscript (`a[]`) errors out in
-            // read_array_element_checked before postfix ++/-- is handled.
-            String::from("0")
-        };
-        Some((name, sub_text))
-    }
-
-    // Primary: number, variable, parenthesized expression
-    fn parse_primary(&mut self, state: &mut InterpreterState) -> Result<i64, RustBashError> {
-        match self.peek() {
-            Some(TokenKind::Number(n)) => {
-                self.advance();
-                Ok(n)
-            }
-            Some(TokenKind::Ident) => {
-                let tok = self.advance();
-                let name = self.ident_name(tok).to_string();
-                // Check for array subscript: ident[expr]
-                if self.peek() == Some(TokenKind::LBracket) {
-                    let raw_sub = self.extract_raw_subscript()?;
-                    // Reject double subscript: a[i][j]
-                    if self.peek() == Some(TokenKind::LBracket) {
-                        return Err(RustBashError::Execution(
-                            "arithmetic: syntax error in expression".into(),
-                        ));
-                    }
-                    read_array_element_checked(state, &name, &raw_sub)
-                } else {
-                    Ok(read_var(state, &name)?)
-                }
-            }
-            Some(TokenKind::LParen) => {
-                self.advance();
-                let val = self.parse_comma(state)?;
-                self.expect(TokenKind::RParen)?;
+            ArithmeticExpr::Assignment(target, rhs) => {
+                let val = self.eval(rhs)?;
+                self.write_target(target, val)?;
                 Ok(val)
             }
-            Some(kind) => Err(RustBashError::Execution(format!(
-                "arithmetic: unexpected token {kind:?}"
-            ))),
-            None => Err(RustBashError::Execution(
-                "arithmetic: unexpected end of expression".into(),
-            )),
-        }
-    }
-
-    /// Extract the raw source text of an array subscript between `[` and `]`.
-    /// The parser position must be at the `[` token. After this call, the
-    /// position is advanced past the matching `]`.
-    fn extract_raw_subscript(&mut self) -> Result<String, RustBashError> {
-        self.expect(TokenKind::LBracket)?;
-        let lbracket = self.tokens[self.pos - 1];
-        // Find the matching ] — track nesting
-        let mut depth = 1;
-        while self.pos < self.tokens.len() {
-            match self.tokens[self.pos].kind {
-                TokenKind::LBracket => depth += 1,
-                TokenKind::RBracket => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
+            ArithmeticExpr::BinaryAssignment(op, target, rhs) => {
+                let rhs_val = self.eval(rhs)?;
+                let lhs_val = self.read_target(target)?;
+                let val = apply_binary_arith(op, lhs_val, rhs_val)?;
+                self.write_target(target, val)?;
+                Ok(val)
             }
-            self.pos += 1;
+            ArithmeticExpr::UnaryAssignment(op, target) => {
+                let old = self.read_target(target)?;
+                let new = old.wrapping_add(match op {
+                    UnaryAssignmentOperator::PrefixIncrement
+                    | UnaryAssignmentOperator::PostfixIncrement => 1,
+                    UnaryAssignmentOperator::PrefixDecrement
+                    | UnaryAssignmentOperator::PostfixDecrement => -1,
+                });
+                self.write_target(target, new)?;
+                Ok(match op {
+                    UnaryAssignmentOperator::PrefixIncrement
+                    | UnaryAssignmentOperator::PrefixDecrement => new,
+                    UnaryAssignmentOperator::PostfixIncrement
+                    | UnaryAssignmentOperator::PostfixDecrement => old,
+                })
+            }
         }
-        if depth != 0 {
-            return Err(RustBashError::Execution(
-                "arithmetic: expected RBracket".into(),
-            ));
-        }
-        // Reconstruct the raw source between the brackets so quoted associative
-        // keys are preserved exactly.
-        let rbracket = self.tokens[self.pos];
-        let raw = if lbracket.start + lbracket.len < rbracket.start {
-            self.source[lbracket.start + lbracket.len..rbracket.start].to_string()
-        } else {
-            String::new()
-        };
-        self.advance(); // consume ]
-        Ok(raw)
     }
 
-    fn expect_ident(&mut self) -> Result<Token, RustBashError> {
-        match self.peek() {
-            Some(TokenKind::Ident) => Ok(self.advance()),
-            _ => Err(RustBashError::Execution(
-                "arithmetic: expected variable name".into(),
-            )),
+    fn eval_binary(
+        &mut self,
+        op: &BinaryOperator,
+        lhs: &ArithmeticExpr,
+        rhs: &ArithmeticExpr,
+    ) -> Result<i64, RustBashError> {
+        match op {
+            BinaryOperator::Comma => {
+                self.eval(lhs)?;
+                self.eval(rhs)
+            }
+            // Short-circuit by construction.
+            BinaryOperator::LogicalOr => {
+                if self.eval(lhs)? != 0 {
+                    Ok(1)
+                } else {
+                    Ok(i64::from(self.eval(rhs)? != 0))
+                }
+            }
+            BinaryOperator::LogicalAnd => {
+                if self.eval(lhs)? == 0 {
+                    Ok(0)
+                } else {
+                    Ok(i64::from(self.eval(rhs)? != 0))
+                }
+            }
+            _ => {
+                let l = self.eval(lhs)?;
+                let r = self.eval(rhs)?;
+                apply_binary_arith(op, l, r)
+            }
+        }
+    }
+
+    fn read_target(&mut self, target: &ArithmeticTarget) -> Result<i64, RustBashError> {
+        match target {
+            ArithmeticTarget::Variable(name) => {
+                let mapped = match name.as_str() {
+                    "__RB_ARITH_HASH__" => "#",
+                    "__RB_ARITH_QUESTION__" => "?",
+                    _ => name
+                        .strip_prefix("__RB_ARITH_POS_")
+                        .and_then(|rest| rest.strip_suffix("__"))
+                        .unwrap_or(name.as_str()),
+                };
+                read_var(self.state, mapped)
+            }
+            ArithmeticTarget::ArrayElement(name, index) => {
+                let resolved = crate::interpreter::resolve_nameref_or_self(name, self.state);
+                if is_assoc_array(self.state, &resolved) {
+                    let key = self.render_assoc_key(index);
+                    // Unreachable: is_assoc_array returned true, so the
+                    // (resolved) variable exists and contains_key passes.
+                    if self.state.shell_opts.nounset && !self.state.env.contains_key(&resolved) {
+                        return Err(RustBashError::Execution(format!(
+                            "{name}[{key}]: unbound variable"
+                        )));
+                    }
+                    read_assoc_element(self.state, &resolved, &key)
+                } else {
+                    if self.state.shell_opts.nounset && !self.state.env.contains_key(&resolved) {
+                        return Err(RustBashError::Execution(format!(
+                            "{name}[{}]: unbound variable",
+                            render_index_for_message(index)
+                        )));
+                    }
+                    let idx = self.eval(index)?;
+                    read_indexed_element(self.state, &resolved, idx)
+                }
+            }
+        }
+    }
+
+    fn write_target(&mut self, target: &ArithmeticTarget, value: i64) -> Result<(), RustBashError> {
+        match target {
+            ArithmeticTarget::Variable(name) => set_variable(self.state, name, value.to_string()),
+            ArithmeticTarget::ArrayElement(name, index) => {
+                let resolved = crate::interpreter::resolve_nameref_or_self(name, self.state);
+                if is_assoc_array(self.state, &resolved) {
+                    let key = self.render_assoc_key(index);
+                    crate::interpreter::set_assoc_element(
+                        self.state,
+                        &resolved,
+                        key,
+                        value.to_string(),
+                    )
+                } else {
+                    let idx = self.eval(index)?;
+                    write_indexed_element(self.state, &resolved, idx, value)
+                }
+            }
+        }
+    }
+
+    /// bash uses the *text* of an associative subscript as the key — no
+    /// arithmetic evaluation (`m[k+1]` is the literal key "k+1"). Render the
+    /// index AST back to text; placeholders carry the exact quoted key.
+    fn render_assoc_key(&self, index: &ArithmeticExpr) -> String {
+        match index {
+            ArithmeticExpr::Reference(ArithmeticTarget::Variable(name)) => self
+                .placeholders
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.clone()),
+            ArithmeticExpr::Literal(n) => n.to_string(),
+            other => render_index_for_message(other),
         }
     }
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────
+/// Render an index expression to text for assoc keys / error messages.
+/// Note: whitespace is normalized away (brush's AST drops it), so a key
+/// written with spaces in the source renders compacted — a documented
+/// edge vs bash's verbatim-text semantics.
+fn render_index_for_message(expr: &ArithmeticExpr) -> String {
+    match expr {
+        ArithmeticExpr::Literal(n) => n.to_string(),
+        ArithmeticExpr::Reference(ArithmeticTarget::Variable(name)) => name.clone(),
+        ArithmeticExpr::Reference(ArithmeticTarget::ArrayElement(name, idx)) => {
+            format!("{name}[{}]", render_index_for_message(idx))
+        }
+        ArithmeticExpr::UnaryOp(op, inner) => {
+            let sym = match op {
+                UnaryOperator::LogicalNot => "!",
+                UnaryOperator::BitwiseNot => "~",
+                UnaryOperator::UnaryPlus => "+",
+                UnaryOperator::UnaryMinus => "-",
+            };
+            format!("{sym}{}", render_index_for_message(inner))
+        }
+        ArithmeticExpr::BinaryOp(op, l, r) => {
+            format!(
+                "{}{}{}",
+                render_index_for_message(l),
+                binary_op_symbol(op),
+                render_index_for_message(r)
+            )
+        }
+        ArithmeticExpr::Conditional(c, t, f) => format!(
+            "{}?{}:{}",
+            render_index_for_message(c),
+            render_index_for_message(t),
+            render_index_for_message(f)
+        ),
+        ArithmeticExpr::Assignment(t, v) => {
+            format!(
+                "{}={}",
+                render_target_for_message(t),
+                render_index_for_message(v)
+            )
+        }
+        ArithmeticExpr::BinaryAssignment(op, t, v) => {
+            format!(
+                "{}{}={}",
+                render_target_for_message(t),
+                binary_op_symbol(op),
+                render_index_for_message(v)
+            )
+        }
+        ArithmeticExpr::UnaryAssignment(op, t) => {
+            let sym = match op {
+                UnaryAssignmentOperator::PrefixIncrement
+                | UnaryAssignmentOperator::PostfixIncrement => "++",
+                UnaryAssignmentOperator::PrefixDecrement
+                | UnaryAssignmentOperator::PostfixDecrement => "--",
+            };
+            match op {
+                UnaryAssignmentOperator::PrefixIncrement
+                | UnaryAssignmentOperator::PrefixDecrement => {
+                    format!("{sym}{}", render_target_for_message(t))
+                }
+                _ => format!("{}{sym}", render_target_for_message(t)),
+            }
+        }
+    }
+}
+
+fn render_target_for_message(target: &ArithmeticTarget) -> String {
+    match target {
+        ArithmeticTarget::Variable(name) => name.clone(),
+        ArithmeticTarget::ArrayElement(name, idx) => {
+            format!("{name}[{}]", render_index_for_message(idx))
+        }
+    }
+}
+
+fn binary_op_symbol(op: &BinaryOperator) -> &'static str {
+    match op {
+        BinaryOperator::Comma => ",",
+        BinaryOperator::LogicalOr => "||",
+        BinaryOperator::LogicalAnd => "&&",
+        BinaryOperator::BitwiseOr => "|",
+        BinaryOperator::BitwiseXor => "^",
+        BinaryOperator::BitwiseAnd => "&",
+        BinaryOperator::Equals => "==",
+        BinaryOperator::NotEquals => "!=",
+        BinaryOperator::LessThan => "<",
+        BinaryOperator::GreaterThan => ">",
+        BinaryOperator::LessThanOrEqualTo => "<=",
+        BinaryOperator::GreaterThanOrEqualTo => ">=",
+        BinaryOperator::ShiftLeft => "<<",
+        BinaryOperator::ShiftRight => ">>",
+        BinaryOperator::Add => "+",
+        BinaryOperator::Subtract => "-",
+        BinaryOperator::Multiply => "*",
+        BinaryOperator::Modulo => "%",
+        BinaryOperator::Divide => "/",
+        BinaryOperator::Power => "**",
+    }
+}
+
+fn apply_binary_arith(op: &BinaryOperator, lhs: i64, rhs: i64) -> Result<i64, RustBashError> {
+    match op {
+        BinaryOperator::Add => Ok(lhs.wrapping_add(rhs)),
+        BinaryOperator::Subtract => Ok(lhs.wrapping_sub(rhs)),
+        BinaryOperator::Multiply => Ok(lhs.wrapping_mul(rhs)),
+        BinaryOperator::Divide => {
+            if rhs == 0 {
+                return Err(RustBashError::Execution(
+                    "arithmetic: division by zero".into(),
+                ));
+            }
+            Ok(lhs.wrapping_div(rhs))
+        }
+        BinaryOperator::Modulo => {
+            if rhs == 0 {
+                return Err(RustBashError::Execution(
+                    "arithmetic: division by zero".into(),
+                ));
+            }
+            Ok(lhs.wrapping_rem(rhs))
+        }
+        BinaryOperator::Power => wrapping_pow(lhs, rhs),
+        BinaryOperator::ShiftLeft => Ok(lhs.wrapping_shl(rhs as u32)),
+        BinaryOperator::ShiftRight => Ok(lhs.wrapping_shr(rhs as u32)),
+        BinaryOperator::BitwiseAnd => Ok(lhs & rhs),
+        BinaryOperator::BitwiseOr => Ok(lhs | rhs),
+        BinaryOperator::BitwiseXor => Ok(lhs ^ rhs),
+        BinaryOperator::Equals => Ok(i64::from(lhs == rhs)),
+        BinaryOperator::NotEquals => Ok(i64::from(lhs != rhs)),
+        BinaryOperator::LessThan => Ok(i64::from(lhs < rhs)),
+        BinaryOperator::GreaterThan => Ok(i64::from(lhs > rhs)),
+        BinaryOperator::LessThanOrEqualTo => Ok(i64::from(lhs <= rhs)),
+        BinaryOperator::GreaterThanOrEqualTo => Ok(i64::from(lhs >= rhs)),
+        // Unreachable: Comma/LogicalAnd/LogicalOr are short-circuited in
+        // eval_binary before reaching here.
+        _ => unreachable!(),
+    }
+}
+
+// ── Array element read/write (evaluated indices and assoc keys) ─────
+
+/// Read an associative-array element by string key, then interpret the
+/// stored string as an arithmetic value (recursively, as bash does).
+fn read_assoc_element(
+    state: &mut InterpreterState,
+    resolved_name: &str,
+    key: &str,
+) -> Result<i64, RustBashError> {
+    use crate::interpreter::VariableValue;
+    let val_str = state
+        .env
+        .get(resolved_name)
+        .and_then(|v| match &v.value {
+            VariableValue::AssociativeArray(map) => map.get(key).cloned(),
+            // Unreachable: the caller checked is_assoc_array on the same
+            // variable and nothing mutates env in between.
+            _ => None,
+        })
+        .unwrap_or_default();
+    value_from_string(state, &val_str, &format!("{resolved_name}[{key}]"))
+}
+
+/// Read an indexed-array (or scalar) element by evaluated index.
+fn read_indexed_element(
+    state: &mut InterpreterState,
+    resolved_name: &str,
+    index: i64,
+) -> Result<i64, RustBashError> {
+    use crate::interpreter::VariableValue;
+    let val_str = match state.env.get(resolved_name) {
+        None => return Ok(0),
+        Some(v) => match &v.value {
+            VariableValue::IndexedArray(map) => {
+                let actual_idx = if index < 0 {
+                    let max_key = map.keys().next_back().copied().unwrap_or(0);
+                    let resolved = max_key as i64 + 1 + index;
+                    if resolved < 0 {
+                        let ln = state.current_lineno;
+                        state.pending_cmdsub_stderr.push_str(&format!(
+                            "rust-bash: line {ln}: {resolved_name}: bad array subscript\n"
+                        ));
+                        return Ok(0);
+                    }
+                    resolved as usize
+                } else {
+                    index as usize
+                };
+                map.get(&actual_idx).cloned().unwrap_or_default()
+            }
+            VariableValue::Scalar(s) => {
+                if index == 0 || index == -1 {
+                    s.clone()
+                } else {
+                    String::new()
+                }
+            }
+            // Unreachable: the caller routes assoc arrays elsewhere.
+            VariableValue::AssociativeArray(_) => String::new(),
+        },
+    };
+    value_from_string(state, &val_str, &format!("{resolved_name}[{index}]"))
+}
+
+/// Interpret a stored string as an arithmetic value: direct i64 parse, or
+/// recursively evaluate it as an expression (bash semantics), with a
+/// recursion guard (e.g. `a[0]="a[0]"`).
+fn value_from_string(
+    state: &mut InterpreterState,
+    val_str: &str,
+    context: &str,
+) -> Result<i64, RustBashError> {
+    if val_str.is_empty() {
+        return Ok(0);
+    }
+    match val_str.parse::<i64>() {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            use std::cell::Cell;
+            thread_local! {
+                static DEPTH: Cell<usize> = const { Cell::new(0) };
+            }
+            DEPTH.with(|d| {
+                let cur = d.get();
+                if cur >= 10 {
+                    return Err(RustBashError::Execution(format!(
+                        "{context}: recursive evaluation depth exceeded"
+                    )));
+                }
+                d.set(cur + 1);
+                let result = eval_arithmetic(val_str, state);
+                d.set(cur);
+                result
+            })
+        }
+    }
+}
+
+/// Write to an indexed-array (or scalar) element by evaluated index.
+fn write_indexed_element(
+    state: &mut InterpreterState,
+    resolved_name: &str,
+    index: i64,
+    value: i64,
+) -> Result<(), RustBashError> {
+    use crate::interpreter::VariableValue;
+    if index < 0 {
+        let max_key = state.env.get(resolved_name).and_then(|v| match &v.value {
+            VariableValue::IndexedArray(map) => map.keys().next_back().copied(),
+            VariableValue::Scalar(_) => Some(0),
+            // Unreachable: the caller routes assoc arrays elsewhere.
+            VariableValue::AssociativeArray(_) => None,
+        });
+        return match max_key {
+            Some(mk) => {
+                let resolved = mk as i64 + 1 + index;
+                if resolved < 0 {
+                    Err(RustBashError::Execution(format!(
+                        "{resolved_name}: bad array subscript"
+                    )))
+                } else {
+                    crate::interpreter::set_array_element(
+                        state,
+                        resolved_name,
+                        resolved as usize,
+                        value.to_string(),
+                    )
+                }
+            }
+            None => Err(RustBashError::Execution(format!(
+                "{resolved_name}: bad array subscript"
+            ))),
+        };
+    }
+    crate::interpreter::set_array_element(state, resolved_name, index as usize, value.to_string())
+}
+
+// ── Variable resolution helpers ─────────────────────────────────────
 
 fn read_var(state: &mut InterpreterState, name: &str) -> Result<i64, RustBashError> {
     // Handle special parameters
@@ -1261,16 +940,6 @@ fn resolve_var_recursive(
     Ok(0)
 }
 
-/// Strip surrounding single or double quotes from an associative array key.
-fn strip_assoc_quotes(s: &str) -> &str {
-    let s = s.trim();
-    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
-        &s[1..s.len() - 1]
-    } else {
-        s
-    }
-}
-
 /// Determine if a variable is an associative array.
 fn is_assoc_array(state: &InterpreterState, name: &str) -> bool {
     use crate::interpreter::VariableValue;
@@ -1279,208 +948,6 @@ fn is_assoc_array(state: &InterpreterState, name: &str) -> bool {
         .env
         .get(&resolved)
         .is_some_and(|v| matches!(v.value, VariableValue::AssociativeArray(_)))
-}
-
-/// Read a specific array element.
-/// For associative arrays, the raw subscript is used as a string key.
-/// For indexed arrays, it is evaluated as an arithmetic expression.
-/// Checks nounset if enabled.
-fn read_array_element(
-    state: &mut InterpreterState,
-    name: &str,
-    raw_subscript: &str,
-) -> Result<i64, RustBashError> {
-    use crate::interpreter::VariableValue;
-    let resolved_name = crate::interpreter::resolve_nameref_or_self(name, state);
-
-    // Determine type and extract value without holding a borrow across eval_arithmetic.
-    enum VarKind {
-        Assoc,
-        Indexed,
-        Scalar,
-        Missing,
-    }
-    let kind = match state.env.get(&resolved_name) {
-        Some(v) => match &v.value {
-            VariableValue::AssociativeArray(_) => VarKind::Assoc,
-            VariableValue::IndexedArray(_) => VarKind::Indexed,
-            VariableValue::Scalar(_) => VarKind::Scalar,
-        },
-        None => VarKind::Missing,
-    };
-
-    let val_str = match kind {
-        VarKind::Missing => return Ok(0),
-        VarKind::Assoc => {
-            let key = strip_assoc_quotes(raw_subscript);
-            match state.env.get(&resolved_name) {
-                Some(v) => match &v.value {
-                    VariableValue::AssociativeArray(map) => {
-                        map.get(key).cloned().unwrap_or_default()
-                    }
-                    // Unreachable: `kind` was determined from this same
-                    // variable above and nothing mutates env in between.
-                    _ => String::new(),
-                },
-                // Unreachable: `kind` was determined from this same variable.
-                None => String::new(),
-            }
-        }
-        VarKind::Indexed => {
-            let index = eval_arithmetic(raw_subscript, state).unwrap_or(0);
-            match state.env.get(&resolved_name) {
-                Some(v) => match &v.value {
-                    VariableValue::IndexedArray(map) => {
-                        let actual_idx = if index < 0 {
-                            let max_key = map.keys().next_back().copied().unwrap_or(0);
-                            let resolved = max_key as i64 + 1 + index;
-                            if resolved < 0 {
-                                let ln = state.current_lineno;
-                                state.pending_cmdsub_stderr.push_str(&format!(
-                                    "rust-bash: line {ln}: {resolved_name}: bad array subscript\n"
-                                ));
-                                return Ok(0);
-                            }
-                            resolved as usize
-                        } else {
-                            index as usize
-                        };
-                        map.get(&actual_idx).cloned().unwrap_or_default()
-                    }
-                    // Unreachable: the subscript's arithmetic evaluation can
-                    // assign variables, but assignments preserve the array
-                    // kind (writing `name=val` on an indexed array writes
-                    // element 0), so the variable is still an indexed array.
-                    _ => String::new(),
-                },
-                // Unreachable: arithmetic evaluation cannot unset variables.
-                None => String::new(),
-            }
-        }
-        VarKind::Scalar => {
-            let index = eval_arithmetic(raw_subscript, state).unwrap_or(0);
-            match state.env.get(&resolved_name) {
-                Some(v) => match &v.value {
-                    VariableValue::Scalar(s) => {
-                        if index == 0 || index == -1 {
-                            s.clone()
-                        } else {
-                            String::new()
-                        }
-                    }
-                    // Unreachable: scalar assignments cannot change the
-                    // variable into an array, so it is still a scalar.
-                    _ => String::new(),
-                },
-                // Unreachable: arithmetic evaluation cannot unset variables.
-                None => String::new(),
-            }
-        }
-    };
-    if val_str.is_empty() {
-        return Ok(0);
-    }
-    match val_str.parse::<i64>() {
-        Ok(v) => Ok(v),
-        Err(_) => {
-            // Guard against infinite recursion (e.g. a[0]="a[0]").
-            use std::cell::Cell;
-            thread_local! {
-                static DEPTH: Cell<usize> = const { Cell::new(0) };
-            }
-            DEPTH.with(|d| {
-                let cur = d.get();
-                if cur >= 10 {
-                    return Err(RustBashError::Execution(format!(
-                        "{name}[{raw_subscript}]: recursive evaluation depth exceeded"
-                    )));
-                }
-                d.set(cur + 1);
-                let result = eval_arithmetic(&val_str, state);
-                d.set(cur);
-                result
-            })
-        }
-    }
-}
-
-/// Like `read_array_element`, but returns a `Result` to propagate nounset errors.
-fn read_array_element_checked(
-    state: &mut InterpreterState,
-    name: &str,
-    raw_subscript: &str,
-) -> Result<i64, RustBashError> {
-    if raw_subscript.trim().is_empty() {
-        return Err(RustBashError::Execution(format!(
-            "{name}: bad array subscript"
-        )));
-    }
-    let resolved_name = crate::interpreter::resolve_nameref_or_self(name, state);
-    if state.shell_opts.nounset && !state.env.contains_key(&resolved_name) {
-        return Err(RustBashError::Execution(format!(
-            "{name}[{raw_subscript}]: unbound variable"
-        )));
-    }
-    read_array_element(state, name, raw_subscript)
-}
-
-/// Write a value to a specific array element.
-/// For associative arrays, the raw subscript is used as a string key.
-/// For indexed arrays, it is evaluated as an arithmetic expression.
-fn write_array_element(
-    state: &mut InterpreterState,
-    name: &str,
-    raw_subscript: &str,
-    value: i64,
-) -> Result<(), RustBashError> {
-    if raw_subscript.trim().is_empty() {
-        return Err(RustBashError::Execution(format!(
-            "{name}: bad array subscript"
-        )));
-    }
-    use crate::interpreter::VariableValue;
-    let resolved_name = crate::interpreter::resolve_nameref_or_self(name, state);
-    if is_assoc_array(state, &resolved_name) {
-        let key = strip_assoc_quotes(raw_subscript).to_string();
-        return crate::interpreter::set_assoc_element(
-            state,
-            &resolved_name,
-            key,
-            value.to_string(),
-        );
-    }
-    let index = eval_arithmetic(raw_subscript, state)?;
-    if index < 0 {
-        let max_key = state.env.get(&resolved_name).and_then(|v| match &v.value {
-            VariableValue::IndexedArray(map) => map.keys().next_back().copied(),
-            VariableValue::Scalar(_) => Some(0),
-            // Unreachable: associative arrays are handled by the
-            // set_assoc_element early return above.
-            _ => None,
-        });
-        match max_key {
-            Some(mk) => {
-                let resolved = mk as i64 + 1 + index;
-                if resolved < 0 {
-                    return Err(RustBashError::Execution(format!(
-                        "{name}: bad array subscript"
-                    )));
-                }
-                return crate::interpreter::set_array_element(
-                    state,
-                    &resolved_name,
-                    resolved as usize,
-                    value.to_string(),
-                );
-            }
-            None => {
-                return Err(RustBashError::Execution(format!(
-                    "{name}: bad array subscript"
-                )));
-            }
-        }
-    }
-    crate::interpreter::set_array_element(state, &resolved_name, index as usize, value.to_string())
 }
 
 fn wrapping_pow(mut base: i64, mut exp: i64) -> Result<i64, RustBashError> {
@@ -1498,38 +965,6 @@ fn wrapping_pow(mut base: i64, mut exp: i64) -> Result<i64, RustBashError> {
         base = base.wrapping_mul(base);
     }
     Ok(result)
-}
-
-fn apply_compound_op(op: TokenKind, lhs: i64, rhs: i64) -> Result<i64, RustBashError> {
-    match op {
-        TokenKind::PlusEq => Ok(lhs.wrapping_add(rhs)),
-        TokenKind::MinusEq => Ok(lhs.wrapping_sub(rhs)),
-        TokenKind::StarEq => Ok(lhs.wrapping_mul(rhs)),
-        TokenKind::SlashEq => {
-            if rhs == 0 {
-                return Err(RustBashError::Execution(
-                    "arithmetic: division by zero".into(),
-                ));
-            }
-            Ok(lhs.wrapping_div(rhs))
-        }
-        TokenKind::PercentEq => {
-            if rhs == 0 {
-                return Err(RustBashError::Execution(
-                    "arithmetic: division by zero".into(),
-                ));
-            }
-            Ok(lhs.wrapping_rem(rhs))
-        }
-        TokenKind::LtLtEq => Ok(lhs.wrapping_shl(rhs as u32)),
-        TokenKind::GtGtEq => Ok(lhs.wrapping_shr(rhs as u32)),
-        TokenKind::AmpEq => Ok(lhs & rhs),
-        TokenKind::PipeEq => Ok(lhs | rhs),
-        TokenKind::CaretEq => Ok(lhs ^ rhs),
-        // Unreachable: only called with the compound-assignment operators
-        // matched in parse_assignment.
-        _ => unreachable!(),
-    }
 }
 
 // ── Unit tests ──────────────────────────────────────────────────────
@@ -1620,6 +1055,29 @@ mod tests {
 
     fn eval_with(expr: &str, state: &mut InterpreterState) -> i64 {
         eval_arithmetic(expr, state).unwrap()
+    }
+
+    #[test]
+    fn assoc_unterminated_quoted_key_declines_placeholder() {
+        // Direct eval path (no shell tokenizer): the placeholder scan hits
+        // the unterminated quote and declines; quote-stripping then leaves
+        // an unbalanced `[`, which the structural parser rejects.
+        let mut state = make_state();
+        state.env.insert(
+            "m".to_string(),
+            crate::interpreter::Variable {
+                value: crate::interpreter::VariableValue::AssociativeArray(
+                    std::collections::BTreeMap::new(),
+                ),
+                attrs: crate::interpreter::VariableAttrs::empty(),
+            },
+        );
+        let result = eval_arithmetic("m[\"k", &mut state);
+        let Err(RustBashError::Execution(msg)) = result else {
+            // Only evaluated when the assertion fails (test-only path).
+            panic!("expected syntax error, got {result:?}");
+        };
+        assert!(msg.contains("syntax error"), "msg: {msg}");
     }
 
     #[test]

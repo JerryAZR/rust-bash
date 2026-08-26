@@ -13,11 +13,11 @@ This chapter is the consolidated registry of places where rust-bash's actual beh
 
 Fix priority, just-bash-style: **Critical** = host crash / wrong output on common agent paths; **High** = visible wrong behavior on realistic scripts; **Medium** = edge-case fidelity; **Low** = cosmetic.
 
-| Priority | Behavior | Expected | Pinned in |
-|---|---|---|---|
-| High | Nested ternary in parens `$(( (1 ? 2 : 0 ? 3 : 4) + 0 ))` → `expected RParen` | bash prints `2` (`skip_ternary_branch` consumes the `)`; root cause: single-pass parse-and-evaluate with textual branch-skipping, no paren tracking — just-bash avoids the class with an AST-producing arithmetic parser) | `tests/arithmetic_eval.rs::nested_ternary_inside_parens_divergence` |
+*No open entries.* All section-1 bugs have been fixed; see "Fixed and retired".
 
 ### Fixed and retired
+
+- ~~Nested ternary in parens `$(( (1 ? 2 : 0 ? 3 : 4) + 0 ))` → `expected RParen`~~ — fixed by re-architecting arithmetic evaluation: `brush_parser::arithmetic::parse` produces a full expression AST and rust-bash tree-walks it (structural short-circuit — untaken branches are never evaluated), deleting the textual `skip_*` family and its paren-tracking bug class. Test: `tests/arithmetic_eval.rs::nested_ternary_inside_parens_evaluates_correctly`. Two edge notes registered in §2.
 
 - ~~`echo ${ ;}` prints `${;}`; `${ case $x in (a) …; }` and `${ echo hi; }` ksh-style command substitution accepted~~ — fixed: legacy ksh `${ ...; }` / `${|…}` forms are rejected pre-parse with bash's exact surface (exit 1, `rust-bash: {token}: bad substitution`), incl. inside double quotes; single-quoted stays literal. The rewrite machinery was deleted (net −60 lines). One residual difference: because we parse the whole input up front, commands *before* the offending one in the same `exec` do not run, whereas bash parses incrementally and preserves their output (consistent with our handling of all other syntax errors). Tests: `tests/integration.rs` legacy_ksh_*, `tests/interp_core_cov.rs`; oils `command-sub-ksh.test` cases demoted to xfail.
 - ~~`expand -t 0,` host panic~~ — fixed: GNU-mirror `-t` validation (`parse_tab_stops`): integer ≥ 1, ascending, GNU's exact error messages, for both `expand` and `unexpand`. `unexpand` list support remains pinned (see §4).
@@ -51,6 +51,8 @@ These were pinned as suspected divergences during the coverage campaign but real
 | `[[:a-1:]]` matches literal `[]` *(unverified)* | bash likely rejects | `tests/pattern_cov.rs` |
 | extglob nesting depth >64 fails to match | bash has no limit (rust-bash recursion guard) | `tests/pattern_cov.rs` |
 | `echo x 2>&1-` discards the line silently | bash errors on write to closed fd | `tests/walker_redirects.rs` |
+| `$((08#1))` (base constant with leading zero, non-strict mode) → syntax error | bash accepts (base 8); brush's grammar requires the base to start `[1-9]`. `strict_arith` mode already rejected it | edge, registered |
+| Assoc subscripts containing unquoted whitespace (`$((m[k + 1]))`) render compacted (`k+1`) as the key | bash uses the verbatim text (`k + 1`); brush's AST drops whitespace. Quoted keys (`m["k + 1"]`) are exact | `tests/arithmetic_eval.rs` (operator-rich subscript test) |
 | `echo x 1<>/missing` fails input collection; file created empty during error handling | bash creates the file and writes | `tests/walker_redirects.rs::readwrite_redirect_missing_file_divergence` |
 | `exec {fd}<> /missing` fails before exec runs | bash creates the file | `tests/walker_redirects.rs::exec_fd_variable_alloc_readwrite_missing_file_divergence` |
 
