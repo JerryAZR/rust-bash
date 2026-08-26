@@ -50,6 +50,19 @@ impl RustBash {
 
         let program = match interpreter::parse(input) {
             Ok(p) => p,
+            // Fatal expansion errors detected at parse time (legacy ksh
+            // `${ ...; }` rejection) carry their own exit code and render
+            // like their runtime counterparts.
+            Err(RustBashError::ExpansionError {
+                message, exit_code, ..
+            }) => {
+                self.state.last_exit_code = exit_code;
+                return Ok(ExecResult {
+                    exit_code,
+                    stderr: format!("rust-bash: {message}\n"),
+                    ..ExecResult::default()
+                });
+            }
             Err(e) => {
                 self.state.last_exit_code = 2;
                 return Ok(ExecResult {

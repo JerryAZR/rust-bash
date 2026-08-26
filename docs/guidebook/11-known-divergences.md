@@ -16,11 +16,10 @@ Fix priority, just-bash-style: **Critical** = host crash / wrong output on commo
 | Priority | Behavior | Expected | Pinned in |
 |---|---|---|---|
 | High | Nested ternary in parens `$(( (1 ? 2 : 0 ? 3 : 4) + 0 ))` → `expected RParen` | bash prints `2` (`skip_ternary_branch` consumes the `)`; root cause: single-pass parse-and-evaluate with textual branch-skipping, no paren tracking — just-bash avoids the class with an AST-producing arithmetic parser) | `tests/arithmetic_eval.rs::nested_ternary_inside_parens_divergence` |
-| Medium | `echo ${ ;}` prints `${;}` | bash: bad substitution (just-bash rejects in its expansion parser) | `tests/interp_core_cov.rs` |
-| Medium | `${ case $x in (a) …; }` and `${ echo hi; }` ksh-style command substitution accepted and executed | bash: bad substitution (brush-parser legacy-ksh feature; just-bash rejects) | `tests/interp_core_cov.rs` |
 
 ### Fixed and retired
 
+- ~~`echo ${ ;}` prints `${;}`; `${ case $x in (a) …; }` and `${ echo hi; }` ksh-style command substitution accepted~~ — fixed: legacy ksh `${ ...; }` / `${|…}` forms are rejected pre-parse with bash's exact surface (exit 1, `rust-bash: {token}: bad substitution`), incl. inside double quotes; single-quoted stays literal. The rewrite machinery was deleted (net −60 lines). One residual difference: because we parse the whole input up front, commands *before* the offending one in the same `exec` do not run, whereas bash parses incrementally and preserves their output (consistent with our handling of all other syntax errors). Tests: `tests/integration.rs` legacy_ksh_*, `tests/interp_core_cov.rs`; oils `command-sub-ksh.test` cases demoted to xfail.
 - ~~`expand -t 0,` host panic~~ — fixed: GNU-mirror `-t` validation (`parse_tab_stops`): integer ≥ 1, ascending, GNU's exact error messages, for both `expand` and `unexpand`. `unexpand` list support remains pinned (see §4).
 - ~~`format_scientific(inf)` → `"NaNe+2147483647"`~~ — fixed: non-finite guard in both formatter families prints C/glibc `inf`/`INF`/`nan` (gawk's `"+inf"` remains a minor divergence, see §5).
 

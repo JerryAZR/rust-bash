@@ -144,49 +144,66 @@ fn unterminated_extended_test_is_a_parse_error() {
     );
 }
 
-// ── Legacy ksh `${ ...; }` rewrite ──────────────────────────────────
+// ── Legacy ksh `${ ...; }` rejection ───────────────────────────────
 
 #[test]
-fn legacy_ksh_empty_pipe_body_is_left_unrewritten() {
-    // `${|}` has an empty body after the `|`, so the legacy-ksh rewrite
-    // declines; expansion later rejects it as a bad substitution.
+fn legacy_ksh_pipe_form_is_bad_substitution() {
+    // `${|...}` (ksh reply substitution) is rejected pre-parse, mirroring
+    // bash: exit 1, "bad substitution".
     let (out, err, code) = run("echo ${|}");
     assert_eq!(
         (out.as_str(), err.as_str(), code),
-        ("", "rust-bash: ${|}: bad substitution\n", 1)
+        (
+            "",
+            "rust-bash: ${|}: bad substitution
+",
+            1
+        )
     );
 }
 
 #[test]
-fn legacy_ksh_empty_command_body_is_left_unrewritten() {
-    // `${ ;}` trims to an empty command body, so the legacy-ksh rewrite
-    // declines.
-    // DIVERGENCE? Real bash reports ``${ ;}`: bad substitution'' here;
-    // rust-bash leaves the token unrewritten and prints it literally with
-    // the inner whitespace collapsed by word splitting.
+fn legacy_ksh_empty_body_is_bad_substitution() {
+    // Verified against real bash 5.2: ``${ ;}`: bad substitution'', exit 1.
     let (out, err, code) = run("echo ${ ;}");
-    assert_eq!((out.as_str(), err.as_str(), code), ("${;}\n", "", 0));
-}
-
-#[test]
-fn legacy_ksh_case_with_parenthesized_patterns_needs_no_paren_insert() {
-    // The legacy-ksh normalizer inserts `(` before unparenthesized case
-    // patterns; a body that is already parenthesized skips the insertion.
-    // DIVERGENCE? Real bash rejects `${ ...; }` as a bad substitution; the
-    // ksh-style rewrite is an intentional rust-bash feature.
-    let (out, err, code) = run("x=a; echo ${ case $x in (a) REPLY=hit;; esac; }");
-    assert_eq!((out.as_str(), err.as_str(), code), ("\n", "", 0));
-}
-
-#[test]
-fn legacy_ksh_case_without_in_keyword_falls_through_normalizer() {
-    // A `case` body with no ` in ` gives the normalizer nothing to rewrite;
-    // the result parses (`$(case esac)`) but the command substitution's
-    // inner re-parse fails at expansion time.
-    let (out, err, code) = run("echo ${ case esac; }");
     assert_eq!(
         (out.as_str(), err.as_str(), code),
-        ("", "ERR:parse error: syntax error at end of input", -1)
+        (
+            "",
+            "rust-bash: ${ ;}: bad substitution
+",
+            1
+        )
+    );
+}
+
+#[test]
+fn legacy_ksh_case_form_is_bad_substitution() {
+    // Verified against real bash 5.2: ksh-style `${ case ...; }` is a bad
+    // substitution, not a command substitution.
+    let (out, err, code) = run("x=a; echo ${ case $x in (a) REPLY=hit;; esac; }");
+    assert_eq!(
+        (out.as_str(), err.as_str(), code),
+        (
+            "",
+            "rust-bash: ${ case $x in (a) REPLY=hit;; esac; }: bad substitution
+",
+            1
+        )
+    );
+}
+
+#[test]
+fn legacy_ksh_non_ksh_expansions_are_unaffected() {
+    // The detector must not false-positive on valid parameter expansions,
+    // including pattern-stripping forms that end in ';'.
+    let (out, err, code) = run("v=abc; echo ${v%;} ${x:-d} ${#v}");
+    assert_eq!(
+        (out.as_str(), err.as_str(), code),
+        (
+            "abc d 3
+", "", 0
+        )
     );
 }
 

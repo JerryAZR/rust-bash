@@ -956,10 +956,6 @@ command-parsing.test:Prefix env on control flow
 command-parsing.test:Redirect on assignment (enabled 7/2019)
 command-parsing.test:Redirect on control flow (ignored in OSH)
 command-parsing.test:Redirect on control flow with ysh:all (no_parse_ignored)
-command-sub-ksh.test:${ echo hi;}
-command-sub-ksh.test:${ echo hi }  without semi-colon
-command-sub-ksh.test:${|REPLY=hi}
-command-sub-ksh.test:for loop / case
 command-sub.test:Backtick
 command-sub.test:Backtick 2
 command-sub.test:case

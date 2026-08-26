@@ -665,8 +665,18 @@ pub(crate) fn parser_options() -> brush_parser::ParserOptions {
 
 /// Parse a shell input string into an AST.
 pub fn parse(input: &str) -> Result<ast::Program, RustBashError> {
-    let mut parse_input =
-        rewrite_legacy_ksh_command_substitutions(input).unwrap_or_else(|| input.to_string());
+    if let Some(token) = find_legacy_ksh_command_substitution(input) {
+        // Bash rejects legacy ksh `${ ...; }` command substitutions with
+        // "bad substitution" (exit 1). brush-parser does not support the
+        // form, so accepting it would mean silent empty output — reject
+        // up front instead.
+        return Err(RustBashError::ExpansionError {
+            message: format!("{token}: bad substitution"),
+            exit_code: 1,
+            should_exit: true,
+        });
+    }
+    let mut parse_input = input.to_string();
     if let Some(rewritten) = rewrite_assignment_prefixed_dbracket(&parse_input) {
         parse_input = rewritten;
     }
@@ -717,119 +727,90 @@ pub fn parse(input: &str) -> Result<ast::Program, RustBashError> {
     }
 }
 
-fn rewrite_legacy_ksh_command_substitutions(input: &str) -> Option<String> {
+/// Find a legacy ksh `${ ...; }` command-substitution token (the form bash
+/// rejects with "bad substitution"), returning the offending token text.
+/// Detection mirrors bash: a `${...}` whose body starts with whitespace or
+/// `|` is the command-substitution shape; parameter expansions never start
+/// that way. Single-quoted regions are literal; double-quoted regions are
+/// still scanned (bash expands `${...}` inside double quotes).
+fn find_legacy_ksh_command_substitution(input: &str) -> Option<String> {
     if !input.contains("${") {
         return None;
     }
 
+    #[derive(PartialEq)]
+    enum Mode {
+        Normal,
+        SingleQuoted,
+        DoubleQuoted,
+    }
+
     let chars: Vec<char> = input.chars().collect();
-    let mut out = String::with_capacity(input.len());
     let mut i = 0usize;
-    let mut changed = false;
-    let mut quote: Option<char> = None;
+    let mut mode = Mode::Normal;
 
     while i < chars.len() {
         let ch = chars[i];
-        if let Some(active_quote) = quote {
-            out.push(ch);
-            if ch == active_quote {
-                quote = None;
-            } else if ch == '\\' && active_quote == '"' && i + 1 < chars.len() {
+        match mode {
+            Mode::SingleQuoted => {
+                if ch == '\'' {
+                    mode = Mode::Normal;
+                }
                 i += 1;
-                out.push(chars[i]);
+                continue;
             }
-            i += 1;
-            continue;
+            Mode::DoubleQuoted => {
+                if ch == '"' {
+                    mode = Mode::Normal;
+                    i += 1;
+                    continue;
+                }
+                // In double quotes backslash only escapes $ ` " \ (and
+                // newline); `'` has no special meaning.
+                if ch == '\\'
+                    && i + 1 < chars.len()
+                    && matches!(chars[i + 1], '$' | '`' | '"' | '\\' | '\n')
+                {
+                    i += 2;
+                    continue;
+                }
+            }
+            Mode::Normal => {
+                if ch == '\'' {
+                    mode = Mode::SingleQuoted;
+                    i += 1;
+                    continue;
+                }
+                if ch == '"' {
+                    mode = Mode::DoubleQuoted;
+                    i += 1;
+                    continue;
+                }
+                if ch == '\\' && i + 1 < chars.len() {
+                    i += 2;
+                    continue;
+                }
+            }
         }
-
-        if matches!(ch, '\'' | '"') {
-            quote = Some(ch);
-            out.push(ch);
-            i += 1;
-            continue;
-        }
-
         if ch == '$'
             && i + 1 < chars.len()
             && chars[i + 1] == '{'
             && let Some((token, next_idx)) = take_heredoc_delimiter_token(&chars, i)
-            && let Some(rewritten) = rewrite_single_legacy_ksh_token(&token)
         {
-            out.push_str(&rewritten);
-            changed = true;
+            let inner = &token[2..token.len() - 1];
+            let is_ksh_shape =
+                inner.starts_with('|') || inner.chars().next().is_some_and(|ch| ch.is_whitespace());
+            if is_ksh_shape {
+                return Some(token);
+            }
             i = next_idx;
             continue;
         }
 
-        out.push(ch);
         i += 1;
     }
 
-    changed.then_some(out)
-}
-
-fn rewrite_single_legacy_ksh_token(token: &str) -> Option<String> {
-    // Unreachable by construction: `token` comes from
-    // `take_heredoc_delimiter_token`, which is only invoked at a `${` the
-    // caller located and returns through the matching `}`.
-    if !(token.starts_with("${") && token.ends_with('}')) {
-        return None;
-    }
-
-    let inner = &token[2..token.len() - 1];
-    if let Some(rest) = inner.strip_prefix('|') {
-        if rest.chars().next().is_none_or(|ch| ch.is_whitespace()) {
-            return None;
-        }
-        let body = normalize_legacy_ksh_command_body(trim_legacy_ksh_command_body(rest)?);
-        return Some(format!(
-            "$( {{ BRUSH_LEGACY_KSH_REPLY=1; {body}; printf '%s' \"$REPLY\"; }} )"
-        ));
-    }
-
-    if !inner.chars().next().is_some_and(|ch| ch.is_whitespace()) {
-        return None;
-    }
-
-    let trimmed = inner.trim_start();
-    if trimmed.starts_with('|') {
-        return None;
-    }
-
-    let body = normalize_legacy_ksh_command_body(trim_legacy_ksh_command_body(trimmed)?);
-    Some(format!("$({body})"))
-}
-
-fn trim_legacy_ksh_command_body(body: &str) -> Option<String> {
-    let mut trimmed = body.trim_end();
-    if let Some(stripped) = trimmed.strip_suffix(';') {
-        trimmed = stripped.trim_end();
-    }
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn normalize_legacy_ksh_command_body(body: String) -> String {
-    if !body.trim_start().starts_with("case ") {
-        return body;
-    }
-
-    if let Some(in_pos) = body.find(" in ") {
-        let clause_start = in_pos + 4;
-        if body
-            .get(clause_start..)
-            .is_some_and(|rest| !rest.starts_with('('))
-        {
-            let mut normalized = body;
-            normalized.insert(clause_start, '(');
-            return normalized;
-        }
-    }
-
-    body
+    None
 }
 
 fn rewrite_expansion_like_heredoc_delimiters(input: &str) -> Option<String> {

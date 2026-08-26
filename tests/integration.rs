@@ -6551,53 +6551,71 @@ fn duplicate_redirect_with_multiword_dollar_at_is_ambiguous() {
 }
 
 #[test]
-fn legacy_ksh_command_substitution_captures_stdout() {
+fn legacy_ksh_command_substitution_is_bad_substitution() {
+    // Real bash (and just-bash) reject legacy ksh `${ ...; }` command
+    // substitutions: exit 1, "bad substitution". Verified against bash 5.2.
     let mut sh = shell();
-    let r = sh.exec("x=${ echo hi; }; echo \"[$x]\"").unwrap();
-    assert_eq!(r.stdout, "[hi]\n");
-}
-
-#[test]
-fn legacy_ksh_reply_substitution_reads_reply() {
-    let mut sh = shell();
-    let r = sh
-        .exec("x=${|y=' reply var '; REPLY=$y}; echo \"[$x]\"")
-        .unwrap();
-    assert_eq!(r.stdout, "[ reply var ]\n");
-}
-
-#[test]
-fn legacy_ksh_command_substitution_supports_compound_commands() {
-    let mut sh = shell();
-    let r = sh
-        .exec(
-            "x=${ for i in a b; do echo -$i-; done; }; \
-             y=${|for i in a b; do REPLY+=\"-$i-\"; done; }; \
-             printf '%s\n%s\n' \"$x\" \"$y\"",
-        )
-        .unwrap();
-    assert_eq!(r.stdout, "-a-\n-b-\n-a--b-\n");
-}
-
-#[test]
-fn invalid_legacy_ksh_command_substitutions_are_bad_substitution() {
-    let mut sh = shell();
-    let r = sh.exec("x=${myfunc;}; echo after").unwrap();
+    let r = sh.exec("x=${ echo hi; }; echo after").unwrap();
     assert_eq!(r.exit_code, 1);
     assert_eq!(r.stdout, "");
-    assert!(
-        r.stderr.contains("bad substitution"),
-        "stderr: {}",
-        r.stderr
+    assert_eq!(
+        r.stderr,
+        "rust-bash: ${ echo hi; }: bad substitution
+"
     );
+}
 
-    let r = sh.exec("x=${ |REPLY=zz}; echo after").unwrap();
+#[test]
+fn legacy_ksh_reply_substitution_is_bad_substitution() {
+    let mut sh = shell();
+    let r = sh.exec("x=${|y=' reply '; REPLY=$y}; echo after").unwrap();
     assert_eq!(r.exit_code, 1);
     assert_eq!(r.stdout, "");
-    assert!(
-        r.stderr.contains("bad substitution"),
-        "stderr: {}",
-        r.stderr
+    assert_eq!(
+        r.stderr,
+        "rust-bash: ${|y=' reply '; REPLY=$y}: bad substitution
+"
+    );
+}
+
+#[test]
+fn legacy_ksh_compound_command_substitution_is_bad_substitution() {
+    let mut sh = shell();
+    let r = sh
+        .exec("x=${ for i in a b; do echo -$i-; done; }; echo after")
+        .unwrap();
+    assert_eq!(r.exit_code, 1);
+    assert_eq!(r.stdout, "");
+    assert_eq!(
+        r.stderr,
+        "rust-bash: ${ for i in a b; do echo -$i-; done; }: bad substitution
+"
+    );
+}
+
+#[test]
+fn legacy_ksh_single_quoted_stays_literal() {
+    // Single quotes suppress expansion, so the ksh form is plain text.
+    let mut sh = shell();
+    let r = sh.exec("echo '${ echo hi; }'; echo ok").unwrap();
+    assert_eq!(
+        r.stdout,
+        "${ echo hi; }
+ok
+"
+    );
+}
+
+#[test]
+fn legacy_ksh_double_quoted_is_bad_substitution() {
+    // bash expands ${...} inside double quotes, so the ksh form errors.
+    let mut sh = shell();
+    let r = sh.exec(r#"echo "${ echo hi; }"; echo after"#).unwrap();
+    assert_eq!(r.exit_code, 1);
+    assert_eq!(
+        r.stderr,
+        "rust-bash: ${ echo hi; }: bad substitution
+"
     );
 }
 
