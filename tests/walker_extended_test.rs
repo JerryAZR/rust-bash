@@ -122,9 +122,9 @@ fn nocasematch_glob_and_literal() {
 }
 
 #[test]
-fn nocasematch_extglob_divergence() {
-    // DIVERGENCE (suspected): real bash matches here (exit 0); rust-bash's
-    // case-insensitive extglob path does not match `@(a|b)c` against ABC.
+fn nocasematch_extglob_nonmatch_matches_bash() {
+    // Verified against real bash 5.2: `@(a|b)c` expands to "ac" or "bc",
+    // so neither abc nor ABC matches (rc=1) — rust-bash is correct here.
     let (out, _, _) = run("shopt -s nocasematch extglob; [[ ABC == @(a|b)c ]]; echo rc=$?");
     assert_eq!(out, "rc=1\n");
     // The negated form correspondingly succeeds.
@@ -133,9 +133,9 @@ fn nocasematch_extglob_divergence() {
 }
 
 #[test]
-fn extglob_divergence() {
-    // DIVERGENCE (suspected): real bash matches `@(a|b)c` against abc
-    // (exit 0) with extglob enabled.
+fn extglob_exactly_one_semantics_match_bash() {
+    // Verified against real bash 5.2: `@` is "exactly one of", so
+    // `@(a|b)c` does not match abc (rc=1) — rust-bash is correct here.
     let (out, _, _) = run("shopt -s extglob; [[ abc == @(a|b)c ]]; echo rc=$?");
     assert_eq!(out, "rc=1\n");
     let (out, _, _) = run("shopt -s extglob; [[ abc != @(z) ]]; echo rc=$?");

@@ -13,14 +13,18 @@ This chapter is the consolidated registry of places where rust-bash's actual beh
 
 | Behavior | Expected | Pinned in |
 |---|---|---|
-| `[[ abc == @(a\|b)c ]]` with `shopt -s extglob` does **not** match | bash matches (exit 0) | `tests/walker_extended_test.rs::extglob_divergence` |
-| `nocasematch` + extglob: `[[ ABC == @(a\|b)c ]]` does not match | bash matches | `tests/walker_extended_test.rs::nocasematch_extglob_divergence` |
-| Nested ternary in parens `$(( (1 ? 2 : 0 ? 3 : 4) + 0 ))` → `expected RParen` | bash prints `2` (`skip_ternary_branch` consumes the `)`) | `tests/arithmetic_eval.rs::nested_ternary_inside_parens_divergence` |
-| `expand -t 0,` → **division-by-zero panic** in `next_tab_stop` | GNU: tab stop 0 falls back / errors cleanly | noted in `src/commands/text.rs` (latent; no test — a panic aborts the host) |
-| `printf`/`awk` `format_scientific(inf)` → `"NaNe+2147483647"` | `inf` | noted in `src/commands/text.rs` (latent) |
-| `A=1 [[ x = y ]]` runs a command literally named `[[` | bash parses an extended test with a temp env binding | `tests/interp_core_cov.rs` |
-| `echo ${ ;}` prints `${;}` | bash: bad substitution | `tests/interp_core_cov.rs` |
-| `${ case $x in (a) …; }` ksh-style command substitution accepted | bash: bad substitution (intentional brush-parser feature) | `tests/interp_core_cov.rs` |
+| Nested ternary in parens `$(( (1 ? 2 : 0 ? 3 : 4) + 0 ))` → `expected RParen` | bash prints `2` (`skip_ternary_branch` consumes the `)`; root cause: single-pass parse-and-evaluate with textual branch-skipping, no paren tracking — just-bash avoids the class with an AST-producing arithmetic parser) | `tests/arithmetic_eval.rs::nested_ternary_inside_parens_divergence` |
+| `expand -t 0,` → **division-by-zero panic** in `next_tab_stop` | GNU: "tab size cannot be 0", exit 1; just-bash validates stops are ascending integers ≥ 1 at parse time | noted in `src/commands/text.rs` (latent; no test — a panic aborts the host) |
+| `printf`/`awk` `format_scientific(inf)` → `"NaNe+2147483647"` | gawk: `+inf`; just-bash: `Infinity` | noted in `src/commands/text.rs` (latent) |
+| `echo ${ ;}` prints `${;}` | bash: bad substitution (just-bash rejects in its expansion parser) | `tests/interp_core_cov.rs` |
+| `${ case $x in (a) …; }` and `${ echo hi; }` ksh-style command substitution accepted and executed | bash: bad substitution (brush-parser legacy-ksh feature; just-bash rejects) | `tests/interp_core_cov.rs` |
+
+### Refuted entries (verified against real bash 5.2, 2026-06)
+
+These were pinned as suspected divergences during the coverage campaign but real bash behaves exactly as we do:
+
+- `[[ abc == @(a|b)c ]]` (extglob) and the `nocasematch` variant: `@` means "exactly one of", so the pattern expands to `ac`/`bc` and real bash also returns 1. Tests renamed to `extglob_exactly_one_semantics_match_bash` / `nocasematch_extglob_nonmatch_matches_bash`.
+- `A=1 [[ x = y ]]`: real bash does not recognize `[[` as a reserved word after an assignment prefix either — `[[: command not found`, exit 127, matching us and just-bash.
 
 ## 2. Interpreter & expansion
 

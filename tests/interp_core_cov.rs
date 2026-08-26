@@ -73,9 +73,10 @@ fn digit_leading_assignment_token_is_not_a_simple_assignment_word() {
 
 #[test]
 fn assignment_prefixed_dbracket_is_rewritten_to_quoted_command() {
-    // DIVERGENCE? Real bash parses `A=1 [[ x = y ]]` as an extended test
-    // with a command-scoped assignment. rust-bash rewrites the brackets to
-    // quoted words up front, so it dispatches a command named `[[`.
+    // Verified against real bash 5.2: `[[` after an assignment prefix is
+    // NOT recognized as a reserved word — bash also reports
+    // `[[: command not found` (exit 127). rust-bash rewrites the brackets
+    // to quoted words up front and matches that behavior.
     let (out, err, code) = run("A=1 [[ x = y ]]");
     assert_eq!(
         (out.as_str(), err.as_str(), code),
