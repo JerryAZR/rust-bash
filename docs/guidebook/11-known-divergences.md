@@ -11,13 +11,18 @@ This chapter is the consolidated registry of places where rust-bash's actual beh
 
 ## 1. Functional bugs (best fix candidates)
 
-| Behavior | Expected | Pinned in |
-|---|---|---|
-| Nested ternary in parens `$(( (1 ? 2 : 0 ? 3 : 4) + 0 ))` → `expected RParen` | bash prints `2` (`skip_ternary_branch` consumes the `)`; root cause: single-pass parse-and-evaluate with textual branch-skipping, no paren tracking — just-bash avoids the class with an AST-producing arithmetic parser) | `tests/arithmetic_eval.rs::nested_ternary_inside_parens_divergence` |
-| `expand -t 0,` → **division-by-zero panic** in `next_tab_stop` | GNU: "tab size cannot be 0", exit 1; just-bash validates stops are ascending integers ≥ 1 at parse time | noted in `src/commands/text.rs` (latent; no test — a panic aborts the host) |
-| `printf`/`awk` `format_scientific(inf)` → `"NaNe+2147483647"` | gawk: `+inf`; just-bash: `Infinity` | noted in `src/commands/text.rs` (latent) |
-| `echo ${ ;}` prints `${;}` | bash: bad substitution (just-bash rejects in its expansion parser) | `tests/interp_core_cov.rs` |
-| `${ case $x in (a) …; }` and `${ echo hi; }` ksh-style command substitution accepted and executed | bash: bad substitution (brush-parser legacy-ksh feature; just-bash rejects) | `tests/interp_core_cov.rs` |
+Fix priority, just-bash-style: **Critical** = host crash / wrong output on common agent paths; **High** = visible wrong behavior on realistic scripts; **Medium** = edge-case fidelity; **Low** = cosmetic.
+
+| Priority | Behavior | Expected | Pinned in |
+|---|---|---|---|
+| High | Nested ternary in parens `$(( (1 ? 2 : 0 ? 3 : 4) + 0 ))` → `expected RParen` | bash prints `2` (`skip_ternary_branch` consumes the `)`; root cause: single-pass parse-and-evaluate with textual branch-skipping, no paren tracking — just-bash avoids the class with an AST-producing arithmetic parser) | `tests/arithmetic_eval.rs::nested_ternary_inside_parens_divergence` |
+| Medium | `echo ${ ;}` prints `${;}` | bash: bad substitution (just-bash rejects in its expansion parser) | `tests/interp_core_cov.rs` |
+| Medium | `${ case $x in (a) …; }` and `${ echo hi; }` ksh-style command substitution accepted and executed | bash: bad substitution (brush-parser legacy-ksh feature; just-bash rejects) | `tests/interp_core_cov.rs` |
+
+### Fixed and retired
+
+- ~~`expand -t 0,` host panic~~ — fixed: GNU-mirror `-t` validation (`parse_tab_stops`): integer ≥ 1, ascending, GNU's exact error messages, for both `expand` and `unexpand`. `unexpand` list support remains pinned (see §4).
+- ~~`format_scientific(inf)` → `"NaNe+2147483647"`~~ — fixed: non-finite guard in both formatter families prints C/glibc `inf`/`INF`/`nan` (gawk's `"+inf"` remains a minor divergence, see §5).
 
 ### Refuted entries (verified against real bash 5.2, 2026-06)
 
@@ -71,7 +76,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 
 **Systematic patterns** (pinned across `tests/fixtures/comparison/text/*.toml`):
 
-- **Silently-ignored flags GNU rejects**: `sort -f/-s` (also wrong order under `-f`), `sort -k` without value, `tr -z`, `tr` single-set, `tr` reversed range, `uniq -z`, `cut -z`, `fmt -x`, `expand/unexpand -t` empty/garbage/0, `tail -n` without value, `basename -a`, `uname -z` / `uname <operand>`.
+- **Silently-ignored flags GNU rejects**: `sort -f/-s` (also wrong order under `-f`), `sort -k` without value, `tr -z`, `tr` single-set, `tr` reversed range, `uniq -z`, `cut -z`, `fmt -x`, `tail -n` without value, `basename -a`, `uname -z` / `uname <operand>`. (Retired from this list: `expand/unexpand -t` garbage/0 — now GNU-mirrored errors.)
 - **Doubled-path error messages**: `cmd: /path: No such file or directory: /path` (no command prefix, path repeated) — grep-family, base64/sha sums, bc, file, realpath, xargs/find.
 
 | Behavior | Expected | Pinned in |
@@ -82,6 +87,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 | `printf`: empty numeric arg → 0 silently; trailing `\` dropped; `\777` → U+01FF; `%q` emits `é` literally | bash: error/mask to byte/octal-quote | `text/printf.toml` |
 | grep missing-arg message includes the dash (`-- '-A'`) | GNU: `-- 'A'` | `text/grep.toml` |
 | `join`: garbage `-o` spec skipped; out-of-range join field → empty keys → no output | GNU: error; joins all pairs | `text/comm_join.toml` |
+| `unexpand -t 2,4` (valid tab-stop list) silently falls back to width 8 | GNU honors the list | `text/expand_unexpand.toml::unexpand_tab_list_falls_back_to_8` |
 | `du /file` without `-s` prints nothing | GNU prints `1\t/file` | `tests/file_ops_cov.rs` |
 | `xargs` treats unknown options as the command name (127) | GNU: invalid option, exit 1 | `tests/exec_cmds_cov.rs` |
 | `which ./q` → `/tmp/./q` (unresolved `./` component) | normalized | `tests/cmd_utils_cov.rs` |
@@ -103,6 +109,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 | `sqrt(-1)` → `nan`, no warning | gawk warns, prints `-nan` | `tests/awk_cov.rs` |
 | `sprintf("%+d", 5)` → `5` (flag accepted, ignored) | gawk: `+5` | `tests/awk_cov.rs` |
 | `%g` keeps trailing zeros in scientific (`1.23450e-05`) *(suspected)* | C/gawk strip to `1.2345e-05` | `tests/awk_cov.rs` |
+| Non-finite floats print libc-style `inf`/`INF` | gawk prints `+inf` | `tests/awk_cov.rs::awk_non_finite_float_formats` |
 | `getline` is a stub returning 0 | real getline | `tests/awk_cov.rs` |
 
 ## 6. sed / diff / compression

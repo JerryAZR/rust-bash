@@ -1159,3 +1159,14 @@ fn sprintf_backslash_escapes() {
     assert_eq!(r.exit_code, 0);
     assert_eq!(r.stdout, "abc\\");
 }
+
+#[test]
+fn awk_non_finite_float_formats() {
+    // f64 overflows on 1e999 → non-finite. C/glibc convention (inf/INF);
+    // gawk prints "+inf" — registered divergence. Previously this produced
+    // the garbage string "NaNe+2147483647".
+    let r = run(r#"awk 'BEGIN{printf "%e|%E|%g\n", 1e999, 1e999, 1e999}'"#);
+    assert_eq!((r.stdout.as_str(), r.exit_code), ("inf|INF|inf\n", 0));
+    let r = run(r#"awk 'BEGIN{printf "%e|%g\n", -1e999, -1e999}'"#);
+    assert_eq!(r.stdout, "-inf|-inf\n");
+}

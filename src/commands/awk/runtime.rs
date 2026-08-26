@@ -1521,7 +1521,27 @@ fn awk_sprintf(fmt: &str, args: &[AwkValue]) -> String {
     result
 }
 
+/// C/glibc rendering of non-finite floats (gawk prints "+inf"; we follow
+/// libc's "inf" — registered divergence).
+fn format_non_finite(n: f64, upper: bool) -> String {
+    let word = if n.is_nan() {
+        if upper { "NAN" } else { "nan" }
+    } else if upper {
+        "INF"
+    } else {
+        "inf"
+    };
+    if n.is_sign_negative() && !n.is_nan() {
+        format!("-{word}")
+    } else {
+        word.to_string()
+    }
+}
+
 fn format_scientific(n: f64, prec: usize, upper: bool) -> String {
+    if !n.is_finite() {
+        return format_non_finite(n, upper);
+    }
     if n == 0.0 {
         let e_char = if upper { 'E' } else { 'e' };
         return format!("{:.prec$}{e_char}+00", 0.0);
@@ -1533,6 +1553,9 @@ fn format_scientific(n: f64, prec: usize, upper: bool) -> String {
 }
 
 fn format_g(n: f64, prec: usize) -> String {
+    if !n.is_finite() {
+        return format_non_finite(n, false);
+    }
     if n == 0.0 {
         return "0".to_string();
     }

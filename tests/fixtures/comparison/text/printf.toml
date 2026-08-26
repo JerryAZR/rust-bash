@@ -457,3 +457,20 @@ script = "printf '%q\\n' $'\\xc3\\xa9 x'"
 stdout = "$'é x'\n"
 stderr = ""
 exit_code = 0
+
+[[cases]]
+name = "printf_scientific_infinity"
+# f64 overflows on 1e999 (bash printf uses long double and prints
+# 1.000000e+999; matching that would need >64-bit floats). C/glibc
+# convention: inf.
+script = "printf '%e|%g\n' 1e999 1e999"
+stdout = "inf|inf\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "printf_scientific_negative_infinity_upper"
+script = "printf '%E\n' -1e999"
+stdout = "-INF\n"
+stderr = ""
+exit_code = 0

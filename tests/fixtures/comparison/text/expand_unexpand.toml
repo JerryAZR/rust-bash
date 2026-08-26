@@ -28,29 +28,61 @@ exit_code = 1
 
 [[cases]]
 name = "expand_empty_tab_list_falls_back_to_8"
-# GNU expand errors on an empty -t list; rust-bash falls back to tab width 8.
-# Suspected divergence.
+# Verified against GNU expand: an all-empty -t list means the default of 8
+# (empty elements are skipped), NOT an error.
 script = 'printf "\tx\n" | expand -t ,'
 stdout = "        x\n"
 stderr = ""
 exit_code = 0
 
 [[cases]]
-name = "expand_nonnumeric_tab_falls_back_to_8"
-# GNU expand errors on a non-numeric -t value; rust-bash falls back to 8.
-# Suspected divergence.
-script = 'printf "\tx\n" | expand -t abc'
-stdout = "        x\n"
+name = "expand_trailing_comma_is_accepted"
+# GNU: empty elements are skipped, so -t 3, == -t 3.
+script = 'printf "\tx\n" | expand -t 3,'
+stdout = "   x\n"
 stderr = ""
 exit_code = 0
 
 [[cases]]
-name = "expand_zero_tab_falls_back_to_8"
-# GNU expand errors on -t 0; rust-bash falls back to 8. Suspected divergence.
+name = "expand_nonnumeric_tab_errors"
+# GNU: invalid specs are an error, matching this message and exit code.
+script = 'printf "\tx\n" | expand -t abc'
+stdout = ""
+stderr = "expand: tab size contains invalid character(s): 'abc'\n"
+exit_code = 1
+
+[[cases]]
+name = "expand_zero_tab_errors"
+# GNU: "expand: tab size cannot be 0", exit 1. This input previously
+# PANICKED the host via a division by zero in next_tab_stop.
 script = 'printf "\tx\n" | expand -t 0'
-stdout = "        x\n"
-stderr = ""
-exit_code = 0
+stdout = ""
+stderr = "expand: tab size cannot be 0\n"
+exit_code = 1
+
+[[cases]]
+name = "expand_zero_in_list_errors"
+# The original host-panic trigger: -t 0, built TabStops::List([0]).
+script = 'printf "\tx\n" | expand -t 0,'
+stdout = ""
+stderr = "expand: tab size cannot be 0\n"
+exit_code = 1
+
+[[cases]]
+name = "expand_descending_stops_error"
+# GNU: "expand: tab sizes must be ascending", exit 1 (also covers 2,2).
+script = 'printf "\tx\n" | expand -t 3,2'
+stdout = ""
+stderr = "expand: tab sizes must be ascending\n"
+exit_code = 1
+
+[[cases]]
+name = "expand_missing_t_argument_errors"
+# GNU: "expand: option requires an argument -- t", exit 1.
+script = 'printf "\tx\n" | expand -t'
+stdout = ""
+stderr = "expand: option requires an argument -- t\n"
+exit_code = 1
 
 [[cases]]
 name = "expand_past_last_explicit_stop_repeats_interval"
@@ -89,9 +121,26 @@ exit_code = 0
 files = { "/t/u.txt" = "        x\n" }
 
 [[cases]]
-name = "unexpand_zero_tab_width_falls_back_to_8"
-# GNU unexpand errors on -t 0; rust-bash falls back to 8. Suspected divergence.
+name = "unexpand_zero_tab_width_errors"
+# GNU: "unexpand: tab size cannot be 0", exit 1.
 script = 'printf "        x\n" | unexpand -t 0'
+stdout = ""
+stderr = "unexpand: tab size cannot be 0\n"
+exit_code = 1
+
+[[cases]]
+name = "unexpand_nonnumeric_tab_errors"
+# GNU: "unexpand: tab size contains invalid character(s): 'abc'", exit 1.
+script = 'printf "        x\n" | unexpand -t abc'
+stdout = ""
+stderr = "unexpand: tab size contains invalid character(s): 'abc'\n"
+exit_code = 1
+
+[[cases]]
+name = "unexpand_tab_list_falls_back_to_8"
+# PINNED DIVERGENCE: GNU unexpand honors -t lists; our converter only
+# handles a uniform width and silently falls back to 8 for a valid list.
+script = 'printf "        x\n" | unexpand -t 2,4'
 stdout = "\tx\n"
 stderr = ""
 exit_code = 0

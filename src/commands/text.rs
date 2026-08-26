@@ -3413,6 +3413,12 @@ fn exported_printf_tz<'a>(context: PrintfContext<'a>) -> Option<&'a str> {
 
 /// Format a float in scientific notation matching C printf %e (e.g., "3.140000e+00").
 fn format_scientific(val: f64, prec: usize, upper: bool) -> String {
+    // Non-finite (e.g. 1e999 overflowing f64): C/glibc convention. bash
+    // printf uses long double and never overflows here — matching that
+    // would need >64-bit floats, so inf/nan it is.
+    if !val.is_finite() {
+        return format_non_finite(val, upper);
+    }
     if val == 0.0 {
         let letter = if upper { 'E' } else { 'e' };
         return if prec == 0 {
@@ -3436,9 +3442,28 @@ fn format_scientific(val: f64, prec: usize, upper: bool) -> String {
     }
 }
 
+/// C/glibc rendering of non-finite floats for %e/%f/%g-style conversions.
+fn format_non_finite(val: f64, upper: bool) -> String {
+    let word = if val.is_nan() {
+        if upper { "NAN" } else { "nan" }
+    } else if upper {
+        "INF"
+    } else {
+        "inf"
+    };
+    if val.is_sign_negative() && !val.is_nan() {
+        format!("-{word}")
+    } else {
+        word.to_string()
+    }
+}
+
 /// Format a float using %g rules: use %e if exponent < -4 or >= precision,
 /// otherwise use %f. Trailing zeros are removed unless # flag is set.
 fn format_g(val: f64, prec: usize, upper: bool, alt_form: bool) -> String {
+    if !val.is_finite() {
+        return format_non_finite(val, upper);
+    }
     let prec = if prec == 0 { 1 } else { prec };
     if val == 0.0 {
         if alt_form {
@@ -4662,10 +4687,34 @@ impl super::VirtualCommand for ExpandCommand {
             if !opts_done && arg == "-t" {
                 i += 1;
                 if i < args.len() {
-                    tab_stops = parse_tab_stops(&args[i]);
+                    match parse_tab_stops(&args[i]) {
+                        Ok(ts) => tab_stops = ts,
+                        Err(e) => {
+                            return CommandResult {
+                                stderr: format!("expand: {e}\n"),
+                                exit_code: 1,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                } else {
+                    return CommandResult {
+                        stderr: "expand: option requires an argument -- t\n".into(),
+                        exit_code: 1,
+                        ..Default::default()
+                    };
                 }
             } else if !opts_done && arg.starts_with("-t") {
-                tab_stops = parse_tab_stops(&arg[2..]);
+                match parse_tab_stops(&arg[2..]) {
+                    Ok(ts) => tab_stops = ts,
+                    Err(e) => {
+                        return CommandResult {
+                            stderr: format!("expand: {e}\n"),
+                            exit_code: 1,
+                            ..Default::default()
+                        };
+                    }
+                }
             } else {
                 files.push(arg);
             }
@@ -4753,20 +4802,48 @@ impl super::VirtualCommand for UnexpandCommand {
             } else if !opts_done && arg == "-t" {
                 i += 1;
                 if i < args.len() {
-                    tab_width = args[i].parse().unwrap_or(8);
+                    match parse_unexpand_tab_width(&args[i]) {
+                        Ok(w) => tab_width = w,
+                        Err(e) => {
+                            return CommandResult {
+                                stderr: format!(
+                                    "unexpand: {e}
+"
+                                ),
+                                exit_code: 1,
+                                ..Default::default()
+                            };
+                        }
+                    }
                     convert_all = true;
+                } else {
+                    return CommandResult {
+                        stderr: "unexpand: option requires an argument -- t
+"
+                        .into(),
+                        exit_code: 1,
+                        ..Default::default()
+                    };
                 }
             } else if !opts_done && arg.starts_with("-t") {
-                tab_width = arg[2..].parse().unwrap_or(8);
+                match parse_unexpand_tab_width(&arg[2..]) {
+                    Ok(w) => tab_width = w,
+                    Err(e) => {
+                        return CommandResult {
+                            stderr: format!(
+                                "unexpand: {e}
+"
+                            ),
+                            exit_code: 1,
+                            ..Default::default()
+                        };
+                    }
+                }
                 convert_all = true;
             } else {
                 files.push(arg);
             }
             i += 1;
-        }
-
-        if tab_width == 0 {
-            tab_width = 8;
         }
 
         let (content, stderr, err_code) = read_all_input(&files, ctx);
@@ -4798,19 +4875,60 @@ enum TabStops {
     List(Vec<usize>),
 }
 
-fn parse_tab_stops(s: &str) -> TabStops {
-    if s.contains(',') {
-        let stops: Vec<usize> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
-        if stops.is_empty() {
-            TabStops::Uniform(8)
-        } else {
-            TabStops::List(stops)
+/// Parse a `-t` tab-stop spec, mirroring GNU validation: empty elements are
+/// skipped (so `-t ,` and `-t 3,` are fine, an all-empty spec means the
+/// default of 8), every stop must be all digits, nonzero, and strictly
+/// ascending. Error messages match GNU's wording (without the command
+/// prefix, which the caller adds).
+fn parse_tab_stops(s: &str) -> Result<TabStops, String> {
+    let parts: Vec<&str> = s
+        .split(',')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return Ok(TabStops::Uniform(8));
+    }
+    let mut stops: Vec<usize> = Vec::with_capacity(parts.len());
+    for part in parts {
+        if let Some(idx) = part.find(|c: char| !c.is_ascii_digit()) {
+            // GNU reports the spec from the first invalid character onward
+            // (so "2x" -> 'x', "abc" -> 'abc', "-1" -> '-1').
+            return Err(format!(
+                "tab size contains invalid character(s): '{}'",
+                &part[idx..]
+            ));
         }
+        let n: usize = part
+            .parse()
+            .map_err(|_| format!("tab size contains invalid character(s): '{part}'"))?;
+        if n == 0 {
+            return Err("tab size cannot be 0".to_string());
+        }
+        if let Some(&prev) = stops.last()
+            && n <= prev
+        {
+            return Err("tab sizes must be ascending".to_string());
+        }
+        stops.push(n);
+    }
+    if stops.len() == 1 {
+        Ok(TabStops::Uniform(stops[0]))
     } else {
-        match s.parse::<usize>() {
-            Ok(n) if n > 0 => TabStops::Uniform(n),
-            _ => TabStops::Uniform(8),
-        }
+        Ok(TabStops::List(stops))
+    }
+}
+
+/// Validate an unexpand `-t` spec. GNU supports tab-stop lists for
+/// unexpand too, but our converter only handles a uniform width: a valid
+/// list falls back to 8 (pinned divergence — unexpand list support is a
+/// rarely-used path), while invalid input gets GNU's exact errors.
+fn parse_unexpand_tab_width(s: &str) -> Result<usize, String> {
+    match parse_tab_stops(s) {
+        Ok(TabStops::Uniform(n)) => Ok(n),
+        // DIVERGENCE (pinned): GNU honors the list; we fall back to 8.
+        Ok(TabStops::List(_)) => Ok(8),
+        Err(e) => Err(e),
     }
 }
 
