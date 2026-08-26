@@ -134,6 +134,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 | Behavior | Expected | Pinned in |
 |---|---|---|
 | `[[ 65#a -eq 5 ]]` / invalid base-N literal → silently 0 | bash: "value too great for base" + exit 1 | `tests/test_cmd_cov.rs` |
+| `$RANDOM` sequences after an explicit `RANDOM=N` seed are stable but not bit-identical to bash's sbrand generator (we use xorshift32; semantics — entropy seeding, `RANDOM=N` reseed with arithmetic evaluation, subshell/cmdsubst reseed, 15-bit range — mirror bash 5.2, tested in `tests/random_semantics.rs`) | bit-identical sequences | `tests/random_semantics.rs` |
 | `test -o errtrace` tracks the `errexit` flag; `set -o errtrace` doesn't enable it | bash: distinct `-E` option | `tests/test_cmd_cov.rs` |
 | `test foo =~ bar` → false, exit 1 | bash: "binary operator expected", exit 2 | `tests/test_cmd_cov.rs` |
 | `jq -n 'infinite'` → `null` (`nan` → `null` matches jq) | real jq: `1.7976931348623157e+308` | `tests/jq_cov.rs` |

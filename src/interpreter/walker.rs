@@ -3211,7 +3211,7 @@ fn execute_subshell(
         last_background_status: None,
         interactive_shell: state.interactive_shell,
         invoked_with_c: state.invoked_with_c,
-        random_seed: state.random_seed,
+        random_seed: crate::interpreter::entropy_seed(),
         local_scopes: state.local_scopes.clone(),
         temp_binding_scopes: state.temp_binding_scopes.clone(),
         in_function_depth: state.in_function_depth,
@@ -3299,7 +3299,7 @@ fn make_pipeline_stage_state(state: &mut InterpreterState) -> InterpreterState {
         last_background_status: None,
         interactive_shell: state.interactive_shell,
         invoked_with_c: state.invoked_with_c,
-        random_seed: state.random_seed,
+        random_seed: crate::interpreter::entropy_seed(),
         local_scopes: state.local_scopes.clone(),
         temp_binding_scopes: state.temp_binding_scopes.clone(),
         in_function_depth: state.in_function_depth,
@@ -3440,7 +3440,7 @@ pub(crate) fn make_exec_callback(
     let limits = state.limits.clone();
     let positional_params = state.positional_params.clone();
     let shell_name = state.shell_name.clone();
-    let random_seed = state.random_seed;
+    let random_seed = crate::interpreter::entropy_seed();
     let start_time = state.counters.start_time;
     let shell_start_time = state.shell_start_time;
     let last_argument = state.last_argument.clone();
@@ -5139,7 +5139,7 @@ fn make_proc_sub_state(state: &mut InterpreterState) -> InterpreterState {
         last_background_status: None,
         interactive_shell: state.interactive_shell,
         invoked_with_c: state.invoked_with_c,
-        random_seed: state.random_seed,
+        random_seed: crate::interpreter::entropy_seed(),
         local_scopes: Vec::new(),
         temp_binding_scopes: Vec::new(),
         in_function_depth: 0,

@@ -494,7 +494,7 @@ impl RustBashBuilder {
             last_background_status: None,
             interactive_shell: false,
             invoked_with_c: false,
-            random_seed: 0,
+            random_seed: crate::interpreter::entropy_seed(),
             local_scopes: Vec::new(),
             temp_binding_scopes: Vec::new(),
             in_function_depth: 0,

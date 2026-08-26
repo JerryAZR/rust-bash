@@ -560,7 +560,7 @@ fn execute_command_substitution(
         last_background_status: None,
         interactive_shell: state.interactive_shell,
         invoked_with_c: state.invoked_with_c,
-        random_seed: state.random_seed,
+        random_seed: crate::interpreter::entropy_seed(),
         local_scopes: Vec::new(),
         temp_binding_scopes: Vec::new(),
         in_function_depth: 0,

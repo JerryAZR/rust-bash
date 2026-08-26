@@ -1895,6 +1895,7 @@ dependencies = [
  "chrono-tz",
  "datatest-stable",
  "flate2",
+ "getrandom 0.4.2",
  "insta",
  "jaq-core",
  "jaq-json",

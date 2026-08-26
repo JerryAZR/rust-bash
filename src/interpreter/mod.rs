@@ -1331,6 +1331,15 @@ pub(crate) fn set_variable(
         return Ok(());
     }
 
+    // RANDOM assignment reseeds the PRNG with the arithmetic value of the
+    // RHS (bash semantics: RANDOM=abc → 0, RANDOM=1+2 → 3). Reads of
+    // $RANDOM always go through next_random, so nothing is stored.
+    if target == "RANDOM" {
+        let seed = crate::interpreter::arithmetic::eval_arithmetic(&value, state).unwrap_or(0);
+        state.random_seed = seed as u32;
+        return Ok(());
+    }
+
     // SECONDS assignment resets the shell timer.
     if target == "SECONDS" {
         if let Ok(offset) = value.parse::<u64>() {
@@ -1565,6 +1574,22 @@ pub(crate) fn set_assoc_element(
 }
 
 /// Generate next pseudo-random number (xorshift32, range 0..32767).
+/// Seed the PRNG from OS entropy (interpreter creation and bash-semantics
+/// subshell reseeding). Falls back to a time/PID mix if getrandom fails
+/// (native platforms: effectively never).
+pub(crate) fn entropy_seed() -> u32 {
+    let mut bytes = [0u8; 4];
+    if getrandom::fill(&mut bytes).is_ok() {
+        return u32::from_le_bytes(bytes);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(0);
+    let mix = nanos ^ ((std::process::id() as u64) << 32);
+    (mix as u32) ^ ((mix >> 32) as u32)
+}
+
 pub(crate) fn next_random(state: &mut InterpreterState) -> u16 {
     let mut s = state.random_seed;
     if s == 0 {
@@ -1724,7 +1749,7 @@ mod tests {
             last_background_status: None,
             interactive_shell: false,
             invoked_with_c: false,
-            random_seed: 42,
+            random_seed: entropy_seed(),
             local_scopes: Vec::new(),
             temp_binding_scopes: Vec::new(),
             in_function_depth: 0,
