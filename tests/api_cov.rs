@@ -4,6 +4,7 @@
 
 use rust_bash::{
     CommandContext, CommandResult, NodeType, RustBash, RustBashBuilder, VirtualCommand,
+    env_from_host,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -31,6 +32,49 @@ fn set_positional_params_exposes_dollar_n() {
     sh.set_positional_params(vec!["alpha".into(), "beta".into()]);
     let r = sh.exec("echo $1-$2; echo $#").unwrap();
     assert_eq!(r.stdout, "alpha-beta\n2\n");
+}
+
+#[test]
+fn set_env_sets_exported_var_visible_to_exec() {
+    let mut sh = shell();
+    sh.set_env("FOO", "bar");
+    assert_eq!(sh.exec("echo $FOO").unwrap().stdout, "bar\n");
+    // Exported: commands see it in their environment, `export -p` lists it.
+    assert!(sh.exec("env").unwrap().stdout.contains("FOO=bar"));
+    assert!(
+        sh.exec("export -p")
+            .unwrap()
+            .stdout
+            .contains("declare -x FOO=\"bar\""),
+        "export -p should list FOO as exported"
+    );
+}
+
+#[test]
+fn set_env_overwrites_and_unset_env_removes() {
+    let mut sh = shell();
+    sh.set_env("FOO", "one");
+    sh.set_env("FOO", "two");
+    assert_eq!(sh.exec("echo $FOO").unwrap().stdout, "two\n");
+    sh.unset_env("FOO");
+    assert_eq!(sh.exec("echo [$FOO]").unwrap().stdout, "[]\n");
+}
+
+#[test]
+fn env_from_host_reports_found_and_missing() {
+    // PATH is effectively always set on host machines (Linux, macOS, Windows).
+    let (found, missing) = env_from_host(&["PATH", "RUST_BASH_DEFINITELY_UNSET_XYZZY"]);
+    assert!(found.contains_key("PATH"));
+    assert!(!found.contains_key("RUST_BASH_DEFINITELY_UNSET_XYZZY"));
+    assert_eq!(missing, ["RUST_BASH_DEFINITELY_UNSET_XYZZY"]);
+}
+
+#[test]
+fn env_from_host_reports_invalid_names_instead_of_panicking() {
+    // `std::env::var` would panic on these; they must be reported as missing.
+    let (found, missing) = env_from_host(&["", "A=B"]);
+    assert!(found.is_empty());
+    assert_eq!(missing, ["", "A=B"]);
 }
 
 #[test]
