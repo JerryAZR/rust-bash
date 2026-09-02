@@ -124,6 +124,43 @@ The interpreter evaluates these `brush_parser::word::WordPiece` variants:
 
 Variables use the `Variable` struct with `VariableValue` (Scalar, IndexedArray, or AssociativeArray) and `VariableAttrs` bitflags (EXPORTED, READONLY, etc.). Scalars accessed with `[0]` return their value. Arrays are sparse (BTreeMap-backed) — `unset arr[N]` removes an element without reindexing. `declare -a` creates indexed arrays; `declare -A` creates associative arrays.
 
+### Initial Environment
+
+The library never touches the host process environment implicitly — the
+sole `std::env` read in the library (`src/`) is `env_from_host()`, which runs only at
+the caller's explicit request. A shell starts with synthetic defaults;
+caller-provided values (`RustBashBuilder::env()`) always win:
+
+| Var | Default | Notes |
+|---|---|---|
+| `PATH` | `/usr/bin:/bin` | matches the default VFS layout |
+| `USER` | `user` | cosmetic; set to real name or `agent` per provenance policy |
+| `HOSTNAME` | `rust-bash` | |
+| `OSTYPE` | `linux-gnu` | on all platforms |
+| `SHELL`, `BASH` | `/bin/bash` | |
+| `BASH_VERSION` | crate version | |
+| `OLDPWD` | empty | |
+| `TERM` | `xterm-256color` | |
+| `PWD` | initial cwd | kept in sync by `cd` |
+| `HOME` | `/home/user` | **conditional:** filled only when no explicit `env()` map was passed — passing an explicit map is how a bash-faithful HOME-less shell is expressed (the oils spec runner relies on this). `RustBash::unset_env()` removes any other default post-build |
+
+Non-exported shell variables also get defaults (`OPTIND=1`, `OPTERR=1`);
+nested shells re-fill `PATH`/`SHELL`/`BASH`/`BASH_VERSION`/`PWD`, and
+interactive shells add `HISTFILE`. When `HOME` is set, the build seeds it
+as a directory in the VFS — pointing `HOME` at a nonexistent path in an overlay creates a
+shadow dir in the upper layer (shows up in `diff()`).
+
+At runtime the harness composes env explicitly: `env()` at construction,
+`set_env()`/`unset_env()` on a live shell, per-exec temporary overrides via
+`exec_with_overrides()`. `env_from_host(&[names])` pulls named
+vars from the host environment as an explicit, auditable grant and returns
+them alongside the names that were not set; blanket host-env pass-through
+is an anti-pattern
+(secret leakage, per-machine nondeterminism, non-POSIX names on Windows).
+The full cross-tool contract (bash + Python) lives in
+[docs/design/python-sandbox-shared-fs.md](../design/python-sandbox-shared-fs.md)
+§7.
+
 ### Special Variables
 
 | Variable | Value |

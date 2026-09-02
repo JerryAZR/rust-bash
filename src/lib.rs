@@ -43,7 +43,7 @@ pub mod python;
 mod shell_bytes;
 pub mod vfs;
 
-pub use api::{CommandAnalysis, RustBash, RustBashBuilder};
+pub use api::{CommandAnalysis, RustBash, RustBashBuilder, env_from_host};
 pub use commands::{CommandContext, CommandMeta, CommandResult, ExecCallback, VirtualCommand};
 pub use error::{RustBashError, VfsError};
 pub use interpreter::{

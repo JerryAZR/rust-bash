@@ -151,6 +151,18 @@ impl RustBash {
         self.state.positional_params = params;
     }
 
+    /// Sets an environment variable (exported), visible to subsequent
+    /// `exec()` calls on this shell instance.
+    pub fn set_env(&mut self, name: &str, value: &str) {
+        self.state.env.insert(
+            name.to_string(),
+            Variable {
+                value: VariableValue::Scalar(value.to_string()),
+                attrs: VariableAttrs::EXPORTED,
+            },
+        );
+    }
+
     /// Removes a variable from the environment.
     pub fn unset_env(&mut self, name: &str) {
         self.state.env.remove(name);
@@ -302,6 +314,42 @@ impl RustBash {
             }
         }
     }
+}
+
+/// Pulls the named variables from the host process environment.
+///
+/// This is the only host-env read in the library (`src/`), and it happens
+/// solely at the caller's explicit request: an auditable grant list at the
+/// call site, e.g. passing tokens the agent is meant to have into
+/// [`RustBashBuilder::env()`] or `python::PythonInterpreter::run()`.
+///
+/// Returns `(found, missing)`: the vars that were set, and the requested
+/// names that could not be granted (in input order) — absence is reported,
+/// never silently skipped. `missing` also covers unusable entries: invalid
+/// names (empty, or containing `=` or NUL) and values that are not valid
+/// Unicode (both consumers need string pairs). Note that granted values
+/// become readable by agent scripts and may appear in model-visible
+/// output. Blanket pass-through of the whole host environment is an
+/// anti-pattern (secret leakage, per-machine nondeterminism, non-POSIX
+/// names on Windows); grant named vars only.
+pub fn env_from_host(names: &[&str]) -> (HashMap<String, String>, Vec<String>) {
+    let mut found = HashMap::new();
+    let mut missing = Vec::new();
+    for name in names {
+        // std::env::var panics on invalid names; report them instead.
+        let value = if name.is_empty() || name.contains(['=', '\0']) {
+            None
+        } else {
+            std::env::var(name).ok()
+        };
+        match value {
+            Some(value) => {
+                found.insert((*name).to_string(), value);
+            }
+            None => missing.push((*name).to_string()),
+        }
+    }
+    (found, missing)
 }
 
 /// Builder for configuring a [`RustBash`] instance.

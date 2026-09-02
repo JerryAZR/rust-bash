@@ -298,3 +298,66 @@ deletion; write-then-delete within one op → absent from the diff).
 5. **Symlink policy** — VFS semantics (implemented in `VfsDir`: the
    workspace preopen *is* the whole overlay, so WASI's escape-prevention is
    moot).
+
+## 7. Environment contract (decided)
+
+**Host isolation.** The only `std::env` access in `src/` is
+`env_from_host()` (below), invoked solely at the caller's explicit request.
+Exports are never synced to the host — bash `export` mutates only the
+in-memory `InterpreterState.env` (per-exec overrides are restored after the
+call), and Python `os.environ` mutations die with the per-run `WasiCtx`.
+Unlike the filesystem, env has **no commit path**, not even an opt-in one.
+
+**No shared env layer.** Sharing follows reality: the FS is shared because
+real processes share filesystems; env is *copy-at-spawn* in reality, so the
+only faithful sharing unit would be a spawn-time snapshot. A live-shared
+env map (the `Arc<OverlayFs>` pattern) was considered and rejected:
+cross-process env visibility has no real-world analog (less faithful, not
+more), it is racy under parallel runs, and bash's variable store is richer
+than `os.environ` (arrays, assoc, attrs, non-exported vars), so sharing
+would force invasive surgery for a wrong semantic. The snapshot direction
+(an `exported_env()` getter + harness forwarding to `python.run()`) is
+sketched here but **deferred as low-priority**: files in the shared
+overlay are the blessed channel for structured cross-tool state.
+
+**Instance lifecycle facts.** Documented behavior, stated as facts — what a
+harness tells its model about them is harness policy, not the library's
+business:
+
+- Bash env persists across `exec()` calls on one `RustBash` instance;
+  recreating the shell resets it (the per-call-shell pattern is a harness
+  choice with known trade-offs).
+- Each Python run is a fresh process: env is exactly the caller's list, no
+  defaults (no `HOME`/`PATH`/`LANG` unless passed), and nothing persists to
+  the next run.
+- Nothing carries over between the bash and python tools.
+
+**Env composition is harness policy; the library provides mechanisms:**
+
+- *Name+value* (exists): `RustBashBuilder::env()`, `PythonInterpreter::run(env)`;
+  `RustBash::set_env()`/`unset_env()`.
+- *Name-only host grants*: `env_from_host(&["GH_TOKEN", ...])`
+  returns the found pairs plus the **missing names** — grants are explicit
+  and auditable at the call site, and absence is reported, never silently
+  skipped. Blanket `std::env::vars()` pass-through is documented as wrong:
+  secret leakage, per-machine nondeterminism, and a non-POSIX namespace on
+  Windows.
+- *Recommended fixed baseline*: bash's synthetic defaults as-is; for Python
+  runs add `LANG=C.UTF-8` (or `PYTHONUTF8=1`) and `TMPDIR=/tmp` for
+  encoding/path determinism. Deliberate secret grants are visible to agent
+  scripts and may appear in model-visible output — grant knowingly.
+
+**Default env vars** are specified in guidebook ch. 4 (initial-environment
+table). Two contract points ratified from that discussion:
+
+- `HOME` is the one default an explicit `builder.env()` opts out of — this
+  is how a bash-faithful HOME-less shell is expressed (the oils spec runner
+  depends on it). `unset_env()` removes any other default post-build.
+- `HOME`/`USER` defaults (`/home/user`, `user`) serve the hermetic
+  in-memory case. In the synthetic-root + home-overlay-mount pattern they
+  are **required harness configuration**: the library cannot know the mount
+  point and will not read the host for them. Traps, both documented in the
+  table: `HOME` pointing into the synthetic root makes `~` writes evaporate
+  untracked; `HOME` pointing at a nonexistent path creates a shadow dir in
+  the overlay upper (diff noise). `USER` is cosmetic — real name vs. agent
+  identity is a provenance-policy choice.

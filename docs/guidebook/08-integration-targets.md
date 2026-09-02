@@ -108,7 +108,9 @@ Key points for embedders:
   share pending writes and one `diff()`; see
   [`examples/python_overlay.rs`](../../examples/python_overlay.rs). Python is
   stdlib-only glue by design; `python` stays an unresolved command in bash
-  so project Python work offloads to the host. **Caveat:** guest execution
-  limits are opt-in (`PythonLimits` — fuel, `max_file_size`); without them
-  the guest runs unbounded. The feature requires the CPython artifact:
-  `scripts/fetch-python-wasm.sh`.
+  so project Python work offloads to the host. Each run is a fresh process:
+  the guest env is exactly the caller-supplied list (no defaults, nothing
+  persists between runs, nothing crosses between the bash and python tools).
+  **Caveat:** guest execution limits are opt-in (`PythonLimits` — fuel,
+  `max_file_size`); without them the guest runs unbounded. The feature
+  requires the CPython artifact: `scripts/fetch-python-wasm.sh`.
