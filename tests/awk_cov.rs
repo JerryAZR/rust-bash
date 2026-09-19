@@ -17,13 +17,15 @@ fn run(script: &str) -> ExecResult {
     shell().exec(script).unwrap()
 }
 
-fn run_with_limits(script: &str, limits: ExecutionLimits) -> ExecResult {
+fn run_with_limits_result(
+    script: &str,
+    limits: ExecutionLimits,
+) -> Result<ExecResult, rust_bash::RustBashError> {
     RustBashBuilder::new()
         .execution_limits(limits)
         .build()
         .unwrap()
         .exec(script)
-        .unwrap()
 }
 
 // ── mod.rs: command-line handling ────────────────────────────────────
@@ -665,9 +667,10 @@ fn while_loop_iteration_limit() {
         max_loop_iterations: 100,
         ..Default::default()
     };
-    let r = run_with_limits("awk 'BEGIN{while(1) i++}'", limits);
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stderr, "awk: loop iteration limit exceeded\n");
+    let r = run_with_limits_result("awk 'BEGIN{while(1) i++}'", limits);
+    // Limit trips surface as Err(LimitExceeded), never as exit 0.
+    let e = r.unwrap_err();
+    assert!(e.to_string().contains("max_loop_iterations"), "{e}");
 }
 
 #[test]
@@ -676,9 +679,10 @@ fn do_while_loop_iteration_limit() {
         max_loop_iterations: 100,
         ..Default::default()
     };
-    let r = run_with_limits("awk 'BEGIN{do i++ while(1)}'", limits);
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stderr, "awk: loop iteration limit exceeded\n");
+    let r = run_with_limits_result("awk 'BEGIN{do i++ while(1)}'", limits);
+    // Limit trips surface as Err(LimitExceeded), never as exit 0.
+    let e = r.unwrap_err();
+    assert!(e.to_string().contains("max_loop_iterations"), "{e}");
 }
 
 #[test]
@@ -687,9 +691,10 @@ fn for_loop_iteration_limit() {
         max_loop_iterations: 100,
         ..Default::default()
     };
-    let r = run_with_limits("awk 'BEGIN{for(;;) i++}'", limits);
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stderr, "awk: loop iteration limit exceeded\n");
+    let r = run_with_limits_result("awk 'BEGIN{for(;;) i++}'", limits);
+    // Limit trips surface as Err(LimitExceeded), never as exit 0.
+    let e = r.unwrap_err();
+    assert!(e.to_string().contains("max_loop_iterations"), "{e}");
 }
 
 #[test]
@@ -704,9 +709,9 @@ fn for_in_loop_iteration_limit() {
         "awk 'BEGIN{{ n=split(\"{}\", a); for(k in a) j++ }}'",
         words.join(" ")
     );
-    let r = run_with_limits(&script, limits);
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stderr, "awk: loop iteration limit exceeded\n");
+    let r = run_with_limits_result(&script, limits);
+    let e = r.unwrap_err();
+    assert!(e.to_string().contains("max_loop_iterations"), "{e}");
 }
 
 #[test]

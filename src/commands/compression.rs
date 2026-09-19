@@ -164,6 +164,7 @@ fn gzip_execute(
         stderr,
         exit_code,
         stdout_bytes,
+        limit_exceeded: None,
     }
 }
 
@@ -193,6 +194,7 @@ fn gzip_compress_stdin(ctx: &CommandContext, level: u32) -> CommandResult {
         stderr: String::new(),
         exit_code: 0,
         stdout_bytes: Some(compressed),
+        limit_exceeded: None,
     }
 }
 
@@ -220,6 +222,7 @@ fn gzip_decompress_stdin(ctx: &CommandContext, _to_stdout: bool) -> CommandResul
         stderr: String::new(),
         exit_code: 0,
         stdout_bytes: Some(decompressed),
+        limit_exceeded: None,
     }
 }
 
@@ -894,6 +897,7 @@ fn tar_create(
                 stderr,
                 exit_code: i32::from(has_errors),
                 stdout_bytes: Some(final_data),
+                limit_exceeded: None,
             }
         }
         Some(name) => {
@@ -910,6 +914,7 @@ fn tar_create(
                 stderr,
                 exit_code: i32::from(has_errors),
                 stdout_bytes: None,
+                limit_exceeded: None,
             }
         }
     }
@@ -1071,6 +1076,7 @@ fn tar_extract(
         stderr,
         exit_code: i32::from(has_errors),
         stdout_bytes: None,
+        limit_exceeded: None,
     }
 }
 
@@ -1179,6 +1185,7 @@ fn tar_list(
         stderr: String::new(),
         exit_code: 0,
         stdout_bytes: None,
+        limit_exceeded: None,
     }
 }
 

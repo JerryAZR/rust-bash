@@ -37,11 +37,12 @@ fn sed_output_size_limit_stops_output_then_interpreter_aborts() {
         .expect_err("output exceeds the configured max_output_size");
     let msg = err.to_string();
     assert!(msg.contains("max_output_size"), "unexpected error: {msg}");
-    // The abort happened far below the ~1200 bytes an unlimited run yields,
-    // proving sed's internal truncation guard fired (actual_value was 139).
+    // sed's internal guard fires at the first push past the limit (107
+    // bytes), and surfaces directly as Err — a limit trip is a guardrail
+    // event, never exit 0.
     assert!(
-        msg.contains("139"),
-        "expected truncated actual_value in error: {msg}"
+        msg.contains("107"),
+        "expected sed-internal actual_value in error: {msg}"
     );
 }
 
@@ -81,17 +82,12 @@ fn sed_output_guard_first_fires_on_exact_boundary() {
 
 #[test]
 fn sed_branch_loop_hits_cycle_limit() {
-    // `:a;ba` is an infinite branch loop; the per-command cycle counter
-    // aborts at max_loop_iterations.
+    // `:a;ba` is an infinite branch loop; the cycle counter trips at
+    // max_loop_iterations and surfaces as Err(LimitExceeded).
     let mut sh = limited_shell(10 * 1024 * 1024, 100);
-    let r = sh.exec("printf 'x\\n' | sed ':a;ba'").unwrap();
+    let err = sh.exec("printf 'x\\n' | sed ':a;ba'").unwrap_err();
     assert!(
-        r.stderr.contains("sed: cycle limit exceeded"),
-        "stderr: {:?}",
-        r.stderr
+        err.to_string().contains("max_loop_iterations"),
+        "error: {err}"
     );
-    // Like q, the abort flushes the in-flight pattern space; the pipeline's
-    // exit code is sed's (0 — the limit is only reported on stderr).
-    assert_eq!(r.stdout, "x\n");
-    assert_eq!(r.exit_code, 0);
 }

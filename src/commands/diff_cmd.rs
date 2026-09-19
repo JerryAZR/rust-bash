@@ -908,6 +908,7 @@ impl super::VirtualCommand for DiffCommand {
                 stderr,
                 exit_code,
                 stdout_bytes: None,
+                limit_exceeded: None,
             };
         }
 

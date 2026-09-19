@@ -3601,6 +3601,7 @@ pub(crate) fn make_exec_callback(
             stderr: result.stderr,
             exit_code: result.exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         })
     }
 }

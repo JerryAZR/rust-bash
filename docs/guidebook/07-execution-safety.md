@@ -140,6 +140,12 @@ what a script *can* affect):
 | No network code in the crate | No HTTP client and no network command; a script that needs the network fails command resolution and is rerun natively by the host (a curl may return if a faithful-enough design is ever found — see `docs/design/fork-scope.md`) |
 | Panics don't kill the VFS | `parking_lot::RwLock` (non-poisoning) |
 | Runaway scripts terminate | The execution limits above |
+| Limit trips are never silent successes | a limit hit inside awk/sed/jq surfaces as `Err(LimitExceeded)`, not exit 0 |
+
+**Limit granularity caveats** (honest edges of the guardrail):
+- jq's stream is bounded by `max_output_size` (result count), but CPU time *inside* jaq cannot be interrupted — `jq -n 'def f: f; f'` runs until the walker-level wall-clock check, which only fires between commands.
+- awk checks the wall-clock budget every 4096 loop iterations; a single monstrous expression can exceed it between checks.
+- The interpreter checks limits between commands; output redirected to files is not counted in `max_output_size`.
 
 ## Configuration
 
@@ -154,4 +160,4 @@ let mut shell = RustBashBuilder::new()
     .unwrap();
 ```
 
-All limits have sensible defaults. You only need to configure limits you want to change.
+All limits are **unbounded by default** (`Default::default()` = no guardrails). The library makes no policy: the harness opts into the budgets it wants. Two commands carry small *architectural* caps regardless (`yes` 10k lines, `seq` 1M items) because our pipelines are buffered — real bash relies on SIGPIPE, which a synchronous in-process pipeline cannot deliver; an unbounded `yes` would otherwise never return. See ch.11.

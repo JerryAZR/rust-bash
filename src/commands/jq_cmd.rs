@@ -74,13 +74,25 @@ fn execute_jq(args: &[String], ctx: &CommandContext) -> Result<CommandResult, Co
     let mut outputs: Vec<Val> = Vec::new();
     let mut stderr = String::new();
     let mut had_error = false;
+    let mut limit_hit: Option<(&'static str, usize, usize)> = None;
 
-    for input in inputs {
+    'outer: for input in inputs {
         let var_vals: Vec<Val> = opts.variables.iter().map(|(_, v)| v.clone()).collect();
         let vars = Vars::new(var_vals);
         let run_ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, vars);
-        let results: Vec<_> = filter.id.run((run_ctx, input)).collect();
-        for result in results {
+        // Stream results lazily, bounding the count by the output budget:
+        // `jq -n 'range(1; 1e12)'` must trip max_output_size instead of
+        // collecting an unbounded Vec. (CPU time inside jaq cannot be
+        // interrupted — documented non-promise in guidebook ch.7.)
+        for result in filter.id.run((run_ctx, input)) {
+            if outputs.len() >= ctx.limits.max_output_size {
+                limit_hit = Some((
+                    "max_output_size",
+                    ctx.limits.max_output_size,
+                    outputs.len() + 1,
+                ));
+                break 'outer;
+            }
             match unwrap_valr(result) {
                 Ok(val) => outputs.push(val),
                 Err(err) => {
@@ -112,6 +124,7 @@ fn execute_jq(args: &[String], ctx: &CommandContext) -> Result<CommandResult, Co
         stderr,
         exit_code,
         stdout_bytes: None,
+        limit_exceeded: limit_hit,
     })
 }
 

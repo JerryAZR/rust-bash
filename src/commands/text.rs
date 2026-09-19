@@ -817,6 +817,7 @@ impl super::VirtualCommand for GrepCommand {
                                 stderr,
                                 exit_code: 0,
                                 stdout_bytes: None,
+                                limit_exceeded: None,
                             };
                         }
 
@@ -885,6 +886,7 @@ impl super::VirtualCommand for GrepCommand {
             stderr,
             exit_code: if exit_match { 0 } else { 1 },
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -1186,6 +1188,7 @@ impl super::VirtualCommand for SortCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -1315,6 +1318,7 @@ impl super::VirtualCommand for UniqCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -1463,6 +1467,7 @@ impl super::VirtualCommand for CutCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -2302,6 +2307,7 @@ impl super::VirtualCommand for RevCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -2411,6 +2417,7 @@ impl super::VirtualCommand for FoldCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -2478,6 +2485,7 @@ impl super::VirtualCommand for NlCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -2531,6 +2539,7 @@ impl super::VirtualCommand for PrintfCommand {
             stderr: result.stderr,
             exit_code: if result.had_error { 1 } else { 0 },
             stdout_bytes,
+            limit_exceeded: None,
         }
     }
 }
@@ -3931,6 +3940,7 @@ impl super::VirtualCommand for TacCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -4458,6 +4468,7 @@ impl super::VirtualCommand for FmtCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -4609,6 +4620,7 @@ impl super::VirtualCommand for ColumnCommand {
                 stderr,
                 exit_code: 0,
                 stdout_bytes: None,
+                limit_exceeded: None,
             }
         } else {
             // Fill columns mode (newspaper style)
@@ -4644,6 +4656,7 @@ impl super::VirtualCommand for ColumnCommand {
                 stderr,
                 exit_code: 0,
                 stdout_bytes: None,
+                limit_exceeded: None,
             }
         }
     }
@@ -4754,6 +4767,7 @@ impl super::VirtualCommand for ExpandCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -4866,6 +4880,7 @@ impl super::VirtualCommand for UnexpandCommand {
             stderr,
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -5129,6 +5144,7 @@ impl super::VirtualCommand for StringsCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }

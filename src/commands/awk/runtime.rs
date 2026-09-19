@@ -143,6 +143,14 @@ pub struct AwkRuntime<'a> {
     max_loop_iterations: usize,
     max_output_size: usize,
     max_field_index: usize,
+    max_execution_time: std::time::Duration,
+    start_time: std::time::Instant,
+    /// Run-wide loop iteration counter: the guardrail budget concerns
+    /// total work, so all loops in one run share a single counter.
+    loop_iterations: usize,
+    /// First limit tripped during this run (the caller surfaces it as
+    /// Err(LimitExceeded) — a guardrail trip must not look like exit 0).
+    limit_exceeded: Option<(&'static str, usize, usize)>,
     // Input stream state (shared cursor for the main loop and bare getline)
     pending_inputs: std::collections::VecDeque<(String, String)>,
     current_records: Vec<String>,
@@ -190,6 +198,10 @@ impl<'a> AwkRuntime<'a> {
             max_loop_iterations: 10_000_000,
             max_output_size: 10 * 1024 * 1024,
             max_field_index: 10_000,
+            max_execution_time: std::time::Duration::MAX,
+            start_time: std::time::Instant::now(),
+            loop_iterations: 0,
+            limit_exceeded: None,
             pending_inputs: std::collections::VecDeque::new(),
             current_records: Vec::new(),
             record_pos: 0,
@@ -224,6 +236,7 @@ impl<'a> AwkRuntime<'a> {
     pub fn apply_limits(&mut self, limits: &crate::interpreter::ExecutionLimits) {
         self.max_loop_iterations = limits.max_loop_iterations;
         self.max_output_size = limits.max_output_size;
+        self.max_execution_time = limits.max_execution_time;
     }
 
     pub fn set_var(&mut self, name: &str, value: &str) {
@@ -604,6 +617,9 @@ impl<'a> AwkRuntime<'a> {
     // ── Block / statement execution ──────────────────────────────────
 
     fn execute_block(&mut self, stmts: &[AwkStatement]) -> Signal {
+        if self.limit_exceeded.is_some() {
+            return Signal::None;
+        }
         for stmt in stmts {
             let sig = self.execute_statement(stmt);
             match sig {
@@ -639,11 +655,8 @@ impl<'a> AwkRuntime<'a> {
                 }
             }
             AwkStatement::While { cond, body } => {
-                let mut iterations = 0usize;
                 loop {
-                    iterations += 1;
-                    if iterations > self.max_loop_iterations {
-                        self.stderr.push_str("awk: loop iteration limit exceeded\n");
+                    if !self.loop_guard() {
                         break;
                     }
                     let val = self.eval_expr(cond);
@@ -661,11 +674,8 @@ impl<'a> AwkRuntime<'a> {
                 Signal::None
             }
             AwkStatement::DoWhile { body, cond } => {
-                let mut iterations = 0usize;
                 loop {
-                    iterations += 1;
-                    if iterations > self.max_loop_iterations {
-                        self.stderr.push_str("awk: loop iteration limit exceeded\n");
+                    if !self.loop_guard() {
                         break;
                     }
                     match self.execute_statement(body) {
@@ -694,11 +704,8 @@ impl<'a> AwkRuntime<'a> {
                         return sig;
                     }
                 }
-                let mut iterations = 0usize;
                 loop {
-                    iterations += 1;
-                    if iterations > self.max_loop_iterations {
-                        self.stderr.push_str("awk: loop iteration limit exceeded\n");
+                    if !self.loop_guard() {
                         break;
                     }
                     if let Some(cond) = cond {
@@ -726,11 +733,8 @@ impl<'a> AwkRuntime<'a> {
                     .get(array.as_str())
                     .map(|a| a.keys().cloned().collect())
                     .unwrap_or_default();
-                let mut iterations = 0usize;
                 for key in keys {
-                    iterations += 1;
-                    if iterations > self.max_loop_iterations {
-                        self.stderr.push_str("awk: loop iteration limit exceeded\n");
+                    if !self.loop_guard() {
                         break;
                     }
                     self.set_variable(var, AwkValue::Str(key));
@@ -775,12 +779,53 @@ impl<'a> AwkRuntime<'a> {
 
     // ── Print / printf ───────────────────────────────────────────────
 
+    /// Record the first limit trip of this run.
+    fn trip_limit(&mut self, name: &'static str, limit: usize, actual: usize) {
+        if self.limit_exceeded.is_none() {
+            self.limit_exceeded = Some((name, limit, actual));
+        }
+    }
+
+    /// Take the first limit trip, if any (the caller maps it to
+    /// Err(LimitExceeded)).
+    pub fn take_limit_exceeded(&mut self) -> Option<(&'static str, usize, usize)> {
+        self.limit_exceeded.take()
+    }
+
+    /// Run-wide loop guard: returns false (and trips the limit) when the
+    /// iteration or wall-clock budget is exhausted. Checked once per loop
+    /// iteration of any kind.
+    fn loop_guard(&mut self) -> bool {
+        self.loop_iterations += 1;
+        if self.loop_iterations > self.max_loop_iterations {
+            self.trip_limit(
+                "max_loop_iterations",
+                self.max_loop_iterations,
+                self.loop_iterations,
+            );
+            return false;
+        }
+        if self.loop_iterations.is_multiple_of(4096)
+            && self.max_execution_time != std::time::Duration::MAX
+            && self.start_time.elapsed() > self.max_execution_time
+        {
+            self.trip_limit(
+                "max_execution_time",
+                self.max_execution_time.as_secs() as usize,
+                self.start_time.elapsed().as_secs() as usize,
+            );
+            return false;
+        }
+        true
+    }
+
     fn output_limit_reached(&self) -> bool {
         self.stdout.len() > self.max_output_size
     }
 
     fn exec_print(&mut self, exprs: &[Expr], redirect: Option<&(RedirectKind, Expr)>) {
         if self.output_limit_reached() {
+            self.trip_limit("max_output_size", self.max_output_size, self.stdout.len());
             return;
         }
         let ors = self.get_var("ORS").to_string_val();
@@ -807,6 +852,7 @@ impl<'a> AwkRuntime<'a> {
         redirect: Option<&(RedirectKind, Expr)>,
     ) {
         if self.output_limit_reached() {
+            self.trip_limit("max_output_size", self.max_output_size, self.stdout.len());
             return;
         }
         let fmt = self.eval_expr(format_expr).to_string_val();
@@ -839,11 +885,14 @@ impl<'a> AwkRuntime<'a> {
                     self.redirect_targets
                         .insert(target.clone(), (truncate_at_open, String::new()));
                 }
-                if let Some((_, data)) = self.redirect_targets.get_mut(&target) {
+                let new_len = if let Some((_, data)) = self.redirect_targets.get_mut(&target) {
                     data.push_str(&text);
-                    if data.len() > self.max_output_size {
-                        self.stderr.push_str("awk: output size limit exceeded\n");
-                    }
+                    data.len()
+                } else {
+                    0
+                };
+                if new_len > self.max_output_size {
+                    self.trip_limit("max_output_size", self.max_output_size, new_len);
                 }
             }
         }

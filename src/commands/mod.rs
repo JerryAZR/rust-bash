@@ -28,6 +28,12 @@ pub struct CommandResult {
     /// Binary output for commands that produce non-text data (e.g. gzip).
     /// When set, pipeline propagation uses this instead of `stdout`.
     pub stdout_bytes: Option<Vec<u8>>,
+    /// Set when the command tripped an opt-in execution limit internally
+    /// (long loops, output budgets): `(limit_name, limit_value, actual)`.
+    /// A limit trip is a guardrail event, not a successful command — the
+    /// interpreter converts this to `Err(RustBashError::LimitExceeded)` so
+    /// it can never masquerade as exit 0.
+    pub limit_exceeded: Option<(&'static str, usize, usize)>,
 }
 
 /// Callback type for sub-command execution (e.g. `xargs`, `find -exec`).
@@ -209,6 +215,7 @@ impl VirtualCommand for EchoCommand {
             stderr: String::new(),
             exit_code: 0,
             stdout_bytes,
+            limit_exceeded: None,
         }
     }
 }
@@ -466,6 +473,7 @@ impl VirtualCommand for CatCommand {
             } else {
                 Some(output_bytes)
             },
+            limit_exceeded: None,
         }
     }
 }
@@ -497,6 +505,7 @@ impl VirtualCommand for PwdCommand {
             stderr: String::new(),
             exit_code: 0,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -548,6 +557,7 @@ impl VirtualCommand for TouchCommand {
                 stderr: "touch: missing file operand\n".to_string(),
                 exit_code: 1,
                 stdout_bytes: None,
+                limit_exceeded: None,
             };
         }
 
@@ -580,6 +590,7 @@ impl VirtualCommand for TouchCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -627,6 +638,7 @@ impl VirtualCommand for MkdirCommand {
                 stderr: "mkdir: missing operand\n".to_string(),
                 exit_code: 1,
                 stdout_bytes: None,
+                limit_exceeded: None,
             };
         }
 
@@ -657,6 +669,7 @@ impl VirtualCommand for MkdirCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -786,6 +799,7 @@ impl VirtualCommand for LsCommand {
             stderr: out.stderr,
             exit_code: out.exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }

@@ -126,6 +126,7 @@ impl super::VirtualCommand for CpCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -240,6 +241,7 @@ impl super::VirtualCommand for MvCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -352,6 +354,7 @@ impl super::VirtualCommand for RmCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -421,6 +424,7 @@ impl super::VirtualCommand for TeeCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -503,6 +507,7 @@ impl super::VirtualCommand for StatCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -594,6 +599,7 @@ impl super::VirtualCommand for ChmodCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -941,6 +947,7 @@ impl super::VirtualCommand for ReadlinkCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -1159,6 +1166,7 @@ impl super::VirtualCommand for DuCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }

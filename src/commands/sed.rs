@@ -168,6 +168,7 @@ impl super::VirtualCommand for SedCommand {
             }
             let mut stderr = String::new();
             let mut has_errors = false;
+            let mut limit_hit = None;
             for file in &opts.files {
                 let path = resolve_path(file, ctx.cwd);
                 let content = match ctx.fs.read_file(&path) {
@@ -178,7 +179,7 @@ impl super::VirtualCommand for SedCommand {
                         continue;
                     }
                 };
-                let (result, sed_err) = execute_sed(
+                let (result, sed_err, limit) = execute_sed(
                     &script,
                     &labels,
                     &content,
@@ -187,6 +188,9 @@ impl super::VirtualCommand for SedCommand {
                     ctx.limits.max_output_size,
                 );
                 stderr.push_str(&sed_err);
+                if limit_hit.is_none() {
+                    limit_hit = limit;
+                }
                 // Coverage note: the file was just read successfully, so
                 // write_file cannot fail on the in-memory VFS (a host-backed
                 // OverlayFs could in principle surface this).
@@ -198,15 +202,17 @@ impl super::VirtualCommand for SedCommand {
             CommandResult {
                 stderr,
                 exit_code: if has_errors { 2 } else { 0 },
+                limit_exceeded: limit_hit,
                 ..Default::default()
             }
         } else {
             let mut stdout = String::new();
             let mut stderr = String::new();
             let mut exit_code = 0;
+            let mut limit_hit = None;
 
             if opts.files.is_empty() {
-                let (out, err) = execute_sed(
+                let (out, err, limit) = execute_sed(
                     &script,
                     &labels,
                     ctx.stdin,
@@ -216,10 +222,11 @@ impl super::VirtualCommand for SedCommand {
                 );
                 stdout = out;
                 stderr.push_str(&err);
+                limit_hit = limit;
             } else {
                 for file in &opts.files {
                     if *file == "-" {
-                        let (out, err) = execute_sed(
+                        let (out, err, limit) = execute_sed(
                             &script,
                             &labels,
                             ctx.stdin,
@@ -229,12 +236,15 @@ impl super::VirtualCommand for SedCommand {
                         );
                         stdout.push_str(&out);
                         stderr.push_str(&err);
+                        if limit_hit.is_none() {
+                            limit_hit = limit;
+                        }
                     } else {
                         let path = resolve_path(file, ctx.cwd);
                         match ctx.fs.read_file(&path) {
                             Ok(bytes) => {
                                 let content = String::from_utf8_lossy(&bytes).to_string();
-                                let (out, err) = execute_sed(
+                                let (out, err, limit) = execute_sed(
                                     &script,
                                     &labels,
                                     &content,
@@ -244,6 +254,9 @@ impl super::VirtualCommand for SedCommand {
                                 );
                                 stdout.push_str(&out);
                                 stderr.push_str(&err);
+                                if limit_hit.is_none() {
+                                    limit_hit = limit;
+                                }
                             }
                             Err(e) => {
                                 stderr.push_str(&format!("sed: {}: {}\n", file, e));
@@ -259,6 +272,7 @@ impl super::VirtualCommand for SedCommand {
                 stderr,
                 exit_code,
                 stdout_bytes: None,
+                limit_exceeded: limit_hit,
             }
         }
     }
@@ -908,15 +922,16 @@ struct SedState {
     cycle_count: usize,
     max_cycles: usize,
     max_output_size: usize,
-    output_truncated: bool,
+    /// First limit tripped (surfaced as Err(LimitExceeded) by the caller —
+    /// a guardrail trip must not look like exit 0).
+    limit: Option<(&'static str, usize, usize)>,
 }
 
 impl SedState {
     fn push_output(&mut self, s: &str) {
         if self.output.len() > self.max_output_size {
-            if !self.output_truncated {
-                self.stderr.push_str("sed: output size limit exceeded\n");
-                self.output_truncated = true;
+            if self.limit.is_none() {
+                self.limit = Some(("max_output_size", self.max_output_size, self.output.len()));
             }
             return;
         }
@@ -925,9 +940,8 @@ impl SedState {
 
     fn push_output_char(&mut self, c: char) {
         if self.output.len() > self.max_output_size {
-            if !self.output_truncated {
-                self.stderr.push_str("sed: output size limit exceeded\n");
-                self.output_truncated = true;
+            if self.limit.is_none() {
+                self.limit = Some(("max_output_size", self.max_output_size, self.output.len()));
             }
             return;
         }
@@ -942,7 +956,7 @@ fn execute_sed(
     quiet: bool,
     max_cycles: usize,
     max_output_size: usize,
-) -> (String, String) {
+) -> (String, String, Option<(&'static str, usize, usize)>) {
     let lines: Vec<&str> = input.split('\n').collect();
     // Remove trailing empty element from trailing newline
     let total = if !lines.is_empty() && lines.last() == Some(&"") {
@@ -966,7 +980,7 @@ fn execute_sed(
         cycle_count: 0,
         max_cycles,
         max_output_size,
-        output_truncated: false,
+        limit: None,
     };
 
     let mut line_idx = 0;
@@ -1013,7 +1027,7 @@ fn execute_sed(
         line_idx += 1;
     }
 
-    (state.output, state.stderr)
+    (state.output, state.stderr, state.limit)
 }
 
 /// Execute the command list. Returns a flow control signal.
@@ -1030,7 +1044,9 @@ fn execute_commands(
     while ip < script.len() {
         state.cycle_count += 1;
         if state.cycle_count > state.max_cycles {
-            state.stderr.push_str("sed: cycle limit exceeded\n");
+            if state.limit.is_none() {
+                state.limit = Some(("max_loop_iterations", state.max_cycles, state.cycle_count));
+            }
             state.quit = true;
             return;
         }

@@ -4758,6 +4758,15 @@ pub(crate) fn execute_registered_command_by_name(
         };
 
         let cmd_result = cmd.execute(cmd_args, &ctx);
+        // A limit trip inside a command (awk/sed/jq internal budgets) is a
+        // guardrail event: surface it as Err, never as exit 0.
+        if let Some((limit_name, limit_value, actual_value)) = cmd_result.limit_exceeded {
+            return Err(RustBashError::LimitExceeded {
+                limit_name,
+                limit_value,
+                actual_value,
+            });
+        }
         // Fold exec-callback children usage (`find -exec`, `xargs`) into this
         // shell's counters — the children run in-process against the same fs,
         // so their work counts against this shell's limits.

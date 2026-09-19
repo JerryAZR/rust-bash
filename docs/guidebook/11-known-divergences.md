@@ -147,9 +147,11 @@ File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through t
 | `test -o errtrace` tracks the `errexit` flag; `set -o errtrace` doesn't enable it | bash: distinct `-E` option | `tests/test_cmd_cov.rs` |
 | `test foo =~ bar` → false, exit 1 | bash: "binary operator expected", exit 2 | `tests/test_cmd_cov.rs` |
 | `jq -n 'infinite'` → `null` (`nan` → `null` matches jq) | real jq: `1.7976931348623157e+308` | `tests/jq_cov.rs` |
+| `yes` caps at 10,000 lines; `seq` caps at 1M items (architectural: pipelines are buffered — real bash relies on SIGPIPE, which a synchronous in-process pipeline cannot deliver; an unbounded `yes` would never return) | unbounded until killed by SIGPIPE | `src/commands/utils.rs` |
+| Limit trips inside awk/sed/jq surface as `Err(LimitExceeded)` (guardrail event), losing partial output | bash has no limits; a harness-killed process yields partial output | `tests/awk_cov.rs`, `tests/filecmds_cov.rs`, `tests/jq_cov.rs` |
 
 ## Maintenance
 
 1. New pinned divergences discovered during development must be added here with their pinning test.
 2. Fixing a divergence means: behavior change + updated test + removed registry entry, one commit.
-3. Section 1 entries are the recommended starting point for fidelity work; `expand -t 0,` is the only known **host-panic** path and should be fixed first.
+3. Section 1 entries are the recommended starting point for fidelity work.

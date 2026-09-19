@@ -248,6 +248,7 @@ impl super::VirtualCommand for XargsCommand {
             stderr,
             exit_code: last_exit,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }
@@ -383,6 +384,7 @@ impl super::VirtualCommand for FindCommand {
             stderr: out.stderr,
             exit_code: out.exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }

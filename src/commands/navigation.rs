@@ -78,6 +78,7 @@ impl super::VirtualCommand for RealpathCommand {
             stderr,
             exit_code,
             stdout_bytes: None,
+            limit_exceeded: None,
         }
     }
 }

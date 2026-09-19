@@ -143,3 +143,19 @@ fn non_string_object_keys_are_stringified() {
     assert_eq!(stderr, "");
     assert_eq!(stdout, "{\n  \"1\": 2\n}\n");
 }
+
+#[test]
+fn jq_output_stream_is_bounded_by_max_output_size() {
+    // `jq -n 'range(...)'` is a lazy stream: it must trip the output budget
+    // instead of collecting an unbounded Vec. Surfaces as Err(LimitExceeded).
+    use rust_bash::ExecutionLimits;
+    let mut sh = rust_bash::RustBashBuilder::new()
+        .execution_limits(ExecutionLimits {
+            max_output_size: 100,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let err = sh.exec("jq -n 'range(1; 1000000)'").unwrap_err();
+    assert!(err.to_string().contains("max_output_size"), "{err}");
+}

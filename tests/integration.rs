@@ -1222,6 +1222,7 @@ fn exec_callback_available_to_commands() {
                         stderr: r.stderr,
                         exit_code: r.exit_code,
                         stdout_bytes: None,
+                        limit_exceeded: None,
                     },
                     Err(e) => CommandResult {
                         stderr: format!("{e}\n"),
@@ -4105,6 +4106,7 @@ fn builder_custom_command_overrides_builtin() {
                 stderr: String::new(),
                 exit_code: 0,
                 stdout_bytes: None,
+                limit_exceeded: None,
             }
         }
     }

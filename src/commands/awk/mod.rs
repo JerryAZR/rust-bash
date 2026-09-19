@@ -40,6 +40,7 @@ impl VirtualCommand for AwkCommand {
                 stderr: format!("awk: {e}\n"),
                 exit_code: 2,
                 stdout_bytes: None,
+                limit_exceeded: None,
             },
         }
     }
@@ -199,12 +200,14 @@ fn run_awk(args: &[String], ctx: &CommandContext) -> Result<CommandResult, Strin
 
     // Execute
     let (exit_code, stdout, stderr) = runtime.execute(&program, &inputs);
+    let limit_exceeded = runtime.take_limit_exceeded();
 
     let mut result = CommandResult {
         stdout,
         stderr,
         exit_code,
         stdout_bytes: None,
+        limit_exceeded,
     };
 
     // Apply deferred output-redirection writes (first-open mode decides
