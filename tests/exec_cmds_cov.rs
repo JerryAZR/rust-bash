@@ -368,3 +368,54 @@ fn find_exec_batch_inside_and_or_not_expressions() {
     assert_eq!(r.stdout, "not: /t/a\n");
     assert_eq!(r.exit_code, 0);
 }
+
+// ── Exec-callback children: shared fs + folded counters ───────────────
+
+#[test]
+fn find_exec_writes_persist() {
+    // Exec-callback children are subprocesses in bash: isolated state, but
+    // the SAME filesystem. rm through find -exec must actually delete.
+    let r = run("touch /victim; find / -name victim -exec rm {} \\; ; test -e /victim; echo rc=$?");
+    assert_eq!(r.stdout, "rc=1\n");
+    let r = run("printf 'a b c' | xargs -n 1 touch; ls /a /b /c");
+    assert_eq!(r.stdout, "/a\n\n/b\n\n/c\n");
+}
+
+#[test]
+fn exec_callback_children_count_against_limits() {
+    // Counter fold-back: 200 xargs children exceed max_command_count = 50.
+    use rust_bash::ExecutionLimits;
+    let mut sh = RustBashBuilder::new()
+        .execution_limits(ExecutionLimits {
+            max_command_count: 50,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let r = sh.exec("seq 200 | xargs -n 1 echo > /dev/null; echo done");
+    match r {
+        Err(e) => assert!(e.to_string().contains("max_command_count"), "{e}"),
+        Ok(res) => panic!(
+            "expected limit error, got rc={} out={:?}",
+            res.exit_code, res.stdout
+        ),
+    }
+}
+
+#[test]
+fn exec_callback_children_get_fresh_random_sequences() {
+    // Each child invocation reseeds from entropy (bash: each subprocess
+    // draws its own RANDOM sequence). Distinctness could flake at
+    // ~3/32768; treat a collision as a retry-worthy event by drawing 4.
+    let r = run("printf 'a b c d' | xargs -n 1 eval 'echo $RANDOM'");
+    // xargs appends the arg to the eval string, so each line is "<n> <arg>".
+    let nums: Vec<&str> = r
+        .stdout
+        .lines()
+        .map(|l| l.split_whitespace().next().unwrap())
+        .collect();
+    assert_eq!(nums.len(), 4);
+    assert!(nums.iter().all(|n| n.parse::<u16>().is_ok()));
+    let distinct: std::collections::HashSet<_> = nums.iter().collect();
+    assert!(distinct.len() >= 3, "suspiciously correlated: {nums:?}");
+}

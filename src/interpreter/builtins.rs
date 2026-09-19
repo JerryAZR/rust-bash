@@ -4731,7 +4731,9 @@ pub(crate) fn execute_registered_command_by_name(
         let cwd = state.cwd.clone();
         let limits = state.limits.clone();
         let binary_stdin = state.pipe_stdin_bytes.take();
-        let exec_callback = crate::interpreter::walker::make_exec_callback(state);
+        let exec_delta = Arc::new(crate::interpreter::walker::ExecCallbackDelta::default());
+        let exec_callback =
+            crate::interpreter::walker::make_exec_callback(state, Arc::clone(&exec_delta));
 
         let ctx = crate::commands::CommandContext {
             fs: &*fs,
@@ -4756,6 +4758,11 @@ pub(crate) fn execute_registered_command_by_name(
         };
 
         let cmd_result = cmd.execute(cmd_args, &ctx);
+        // Fold exec-callback children usage (`find -exec`, `xargs`) into this
+        // shell's counters — the children run in-process against the same fs,
+        // so their work counts against this shell's limits.
+        state.counters.command_count += exec_delta.command_count();
+        state.counters.output_size += exec_delta.output_size();
         return Ok(ExecResult {
             stdout: cmd_result.stdout,
             stderr: cmd_result.stderr,

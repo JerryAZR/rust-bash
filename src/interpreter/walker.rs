@@ -3424,17 +3424,42 @@ pub(crate) fn clone_commands(
     commands.clone()
 }
 
+/// Accumulates resource usage of exec-callback children (`find -exec`,
+/// `xargs`) so the parent shell can fold it into its own counters: the
+/// children run in-process against the SAME sandbox fs, so their budgets
+/// must count against the parent's limits.
+#[derive(Default)]
+pub(crate) struct ExecCallbackDelta {
+    command_count: std::sync::atomic::AtomicUsize,
+    output_size: std::sync::atomic::AtomicUsize,
+}
+
+impl ExecCallbackDelta {
+    pub(crate) fn command_count(&self) -> usize {
+        self.command_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn output_size(&self) -> usize {
+        self.output_size.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Create an exec callback that commands can use to invoke sub-commands.
-/// The callback parses and executes a command string in an isolated subshell state.
+/// The callback parses and executes a command string in an isolated child state.
 ///
-/// Note: The callback captures `start_time` so wall-clock limits apply globally.
-/// Per-invocation `command_count` resets because the `Fn` closure signature cannot
-/// fold counters back to the parent. The parent's `dispatch_command` still counts
-/// the top-level command (e.g., `xargs`/`find`) itself.
+/// Bash semantics: exec-callback children are *subprocesses*, not subshells —
+/// they get isolated state (env, cwd) but operate on the SAME filesystem, so
+/// the child shares the parent's fs (writes persist and land in the sandbox
+/// overlay for the host to review). Wall-clock limits apply globally via the
+/// shared `start_time`; per-invocation command/output usage accumulates into
+/// `delta` for the caller to fold into its own counters.
 pub(crate) fn make_exec_callback(
     state: &InterpreterState,
-) -> impl Fn(&str, Option<&HashMap<String, String>>) -> Result<CommandResult, RustBashError> {
-    let cloned_fs = state.fs.deep_clone();
+    delta: Arc<ExecCallbackDelta>,
+) -> impl Fn(&str, Option<&HashMap<String, String>>) -> Result<CommandResult, RustBashError> + 'static
+{
+    let shared_fs = Arc::clone(&state.fs);
     let env = state.env.clone();
     let cwd = state.cwd.clone();
     let functions = state.functions.clone();
@@ -3445,7 +3470,6 @@ pub(crate) fn make_exec_callback(
     let limits = state.limits.clone();
     let positional_params = state.positional_params.clone();
     let shell_name = state.shell_name.clone();
-    let random_seed = crate::interpreter::entropy_seed();
     let start_time = state.counters.start_time;
     let shell_start_time = state.shell_start_time;
     let last_argument = state.last_argument.clone();
@@ -3464,7 +3488,7 @@ pub(crate) fn make_exec_callback(
     move |cmd_str: &str, env_override: Option<&HashMap<String, String>>| {
         let program = parse(cmd_str)?;
 
-        let sub_fs = cloned_fs.deep_clone();
+        let sub_fs = Arc::clone(&shared_fs);
         let sub_env = env_override.map_or_else(
             || env.clone(),
             |override_env| {
@@ -3483,6 +3507,9 @@ pub(crate) fn make_exec_callback(
             },
         );
 
+        // Fresh entropy per invocation (bash: each subprocess draws its own
+        // RANDOM sequence).
+        let random_seed = crate::interpreter::entropy_seed();
         let mut sub_state = InterpreterState {
             fs: sub_fs,
             env: sub_env,
@@ -3556,7 +3583,19 @@ pub(crate) fn make_exec_callback(
         };
         ensure_shell_internal_vars(&mut sub_state);
 
-        let result = execute_program(&program, &mut sub_state)?;
+        let result = execute_program(&program, &mut sub_state);
+        // Fold the child's resource usage into the shared delta (even on
+        // error — the work happened) so the parent can charge its own
+        // counters: the child ran against the parent's fs, so its work must
+        // count against the parent's limits.
+        use std::sync::atomic::Ordering;
+        delta
+            .command_count
+            .fetch_add(sub_state.counters.command_count, Ordering::Relaxed);
+        delta
+            .output_size
+            .fetch_add(sub_state.counters.output_size, Ordering::Relaxed);
+        let result = result?;
         Ok(CommandResult {
             stdout: result.stdout,
             stderr: result.stderr,
