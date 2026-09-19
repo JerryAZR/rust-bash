@@ -589,12 +589,40 @@ fn remove_dir_nonempty_merged_directory() {
 }
 
 #[test]
-fn append_file_nonexistent_returns_not_found() {
+fn append_file_creates_missing_file() {
+    // POSIX O_APPEND|O_CREAT: appending to a nonexistent file creates it.
     let tmp = setup_lower();
     let ov = make_overlay(tmp.path());
 
-    let result = ov.append_file(Path::new("/no_such_file.txt"), b"data");
-    assert!(result.is_err());
+    ov.append_file(Path::new("/no_such_file.txt"), b"data")
+        .unwrap();
+    assert_eq!(
+        ov.read_file(Path::new("/no_such_file.txt")).unwrap(),
+        b"data"
+    );
+    // The create is an upper-layer write, so it shows up in the diff.
+    assert!(
+        ov.diff()
+            .writes
+            .iter()
+            .any(|w| w.path == Path::new("/no_such_file.txt"))
+    );
+}
+
+#[test]
+fn append_file_recreates_whiteouted_file() {
+    // rm + >> recreates the file fresh (POSIX), without resurrecting any
+    // lower content of the same path.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_file(Path::new("/data/config.toml")).unwrap();
+    ov.append_file(Path::new("/data/config.toml"), b"new")
+        .unwrap();
+    assert_eq!(
+        ov.read_file(Path::new("/data/config.toml")).unwrap(),
+        b"new"
+    );
 }
 
 #[test]
@@ -1157,4 +1185,122 @@ fn overlay_usable_without_a_shell_and_across_shell_recreations() {
         .find(|w| w.path == Path::new("/notes.md"))
         .unwrap();
     assert_eq!(notes.content, b"from harness toolsandbox\n");
+}
+
+// -----------------------------------------------------------------------
+// Lazy resurrection whiteouts + upper shadowing (perf rework)
+// -----------------------------------------------------------------------
+
+#[test]
+fn rm_dir_all_then_mkdir_rehides_lower_children_lazily() {
+    // rm -rf is a single top-most whiteout; recreating the directory must
+    // lazily re-hide the lower children (one level at a time).
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    ov.mkdir(Path::new("/data")).unwrap();
+    ov.write_file(Path::new("/data/new.txt"), b"x").unwrap();
+
+    let names: Vec<String> = ov
+        .readdir(Path::new("/data"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec!["new.txt"]);
+    assert!(!ov.exists(Path::new("/data/config.toml")));
+
+    // The diff reports the deletions of the hidden lower children plus the
+    // recreated directory and new file — applying it to the real directory
+    // reproduces exactly the sandbox state.
+    let diff = ov.diff();
+    assert_eq!(diff.deletions, vec![PathBuf::from("/data/config.toml")]);
+    let write_paths: Vec<&Path> = diff.writes.iter().map(|w| w.path.as_path()).collect();
+    assert!(write_paths.contains(&Path::new("/data")));
+    assert!(write_paths.contains(&Path::new("/data/new.txt")));
+}
+
+#[test]
+fn rm_dir_all_then_write_inside_rehides_lower_children() {
+    // Resurrection through write_file's parent handling (no explicit mkdir).
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    ov.write_file(Path::new("/data/new.txt"), b"x").unwrap();
+
+    let names: Vec<String> = ov
+        .readdir(Path::new("/data"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec!["new.txt"]);
+    assert!(!ov.exists(Path::new("/data/config.toml")));
+}
+
+#[test]
+fn rm_dir_all_deep_resurrection_populates_level_by_level() {
+    // rm -rf /data, then mkdir -p /data/deep/nested: each resurrected level
+    // re-hides its own lower children; untouched lower subtrees stay hidden.
+    let tmp = setup_lower();
+    let base = tmp.path();
+    std::fs::create_dir_all(base.join("data/sub/leaf")).unwrap();
+    std::fs::write(base.join("data/sub/leaf/old.txt"), b"old").unwrap();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    ov.mkdir_p(Path::new("/data/sub/newdir")).unwrap();
+
+    assert!(ov.exists(Path::new("/data/sub/newdir")));
+    // /data/sub was resurrected by mkdir_p: its lower children are hidden…
+    assert!(!ov.exists(Path::new("/data/sub/leaf")));
+    assert!(!ov.exists(Path::new("/data/config.toml")));
+    // …until /data/sub/leaf is itself resurrected, revealing a fresh empty dir.
+    ov.mkdir_p(Path::new("/data/sub/leaf")).unwrap();
+    assert!(ov.exists(Path::new("/data/sub/leaf")));
+    assert!(!ov.exists(Path::new("/data/sub/leaf/old.txt")));
+}
+
+#[test]
+fn upper_dir_shadows_lower_symlink_without_following_it() {
+    // Overlay semantics: an upper entry shadows the lower entry at the same
+    // path whatever its type. A lower symlink shadowed by an upper directory
+    // must NOT be followed during path resolution.
+    let tmp = setup_lower();
+    let base = tmp.path();
+    std::fs::create_dir_all(base.join("target")).unwrap();
+    std::fs::write(base.join("target/secret.txt"), b"secret").unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(base.join("target"), base.join("link")).unwrap();
+        let ov = make_overlay(base);
+        // Create an upper DIRECTORY at /link (shadowing the lower symlink).
+        ov.write_file(Path::new("/link/file.txt"), b"new").unwrap();
+        // Resolution must treat /link as the upper directory, not follow
+        // the lower symlink into /target.
+        assert_eq!(ov.read_file(Path::new("/link/file.txt")).unwrap(), b"new");
+        assert!(!ov.exists(Path::new("/link/secret.txt")));
+        assert!(ov.exists(Path::new("/target/secret.txt")));
+    }
+}
+
+#[test]
+fn diff_topmost_filter_with_many_whiteouts() {
+    // Many individual deletions: every file is its own top-most whiteout;
+    // a subsequent rm -rf collapses them to the directory whiteout.
+    let tmp = setup_lower();
+    let base = tmp.path();
+    for i in 0..50 {
+        std::fs::write(base.join(format!("data/f{i}.txt")), b"x").unwrap();
+    }
+    let ov = make_overlay(tmp.path());
+    for i in 0..50 {
+        ov.remove_file(Path::new(&format!("/data/f{i}.txt")))
+            .unwrap();
+    }
+    assert_eq!(ov.diff().deletions.len(), 50);
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    assert_eq!(ov.diff().deletions, vec![PathBuf::from("/data")]);
 }

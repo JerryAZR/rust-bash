@@ -113,7 +113,7 @@ struct OverlayFs {
 
 **Write operations**: Always go to `upper`. The `lower` directory is never modified.
 
-**Delete operations**: Add path to `whiteouts`. If the file exists in `upper`, also remove it from there.
+**Delete operations**: Add path to `whiteouts`. If the file exists in `upper`, also remove it from there. `rm -rf` of a directory records a *single* top-most whiteout (descendants stay hidden through an ancestor walk); recreating a whiteouted directory lazily re-hides the lower children one level at a time (resurrection whiteouts), so deleted content never reappears.
 
 **Subshell isolation** (`deep_clone`): Clones the upper layer and whiteout set. The lower directory reference is shared (it's read-only anyway).
 

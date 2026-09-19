@@ -992,7 +992,7 @@ fn execute_sed(
                 state.push_output(&state.pattern_space.clone());
                 state.push_output_char('\n');
             }
-            let queued: Vec<String> = state.append_queue.drain(..).collect();
+            let queued: Vec<String> = std::mem::take(&mut state.append_queue);
             for text in queued {
                 state.push_output(&text);
                 state.push_output_char('\n');
@@ -1004,7 +1004,7 @@ fn execute_sed(
             state.push_output(&state.pattern_space.clone());
             state.push_output_char('\n');
         }
-        let queued: Vec<String> = state.append_queue.drain(..).collect();
+        let queued: Vec<String> = std::mem::take(&mut state.append_queue);
         for text in queued {
             state.push_output(&text);
             state.push_output_char('\n');
