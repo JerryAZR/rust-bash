@@ -340,7 +340,12 @@ pub trait VirtualFs: Send + Sync {
     fn copy(&self, src: &Path, dst: &Path) -> Result<(), VfsError>;
     fn rename(&self, src: &Path, dst: &Path) -> Result<(), VfsError>;
 
-    // Glob expansion (stub for now)
+    /// Glob expansion. `pattern` is a single path pattern (absolute or
+    /// relative to `cwd`); returns the matching paths.
+    ///
+    /// Backends that can honor shopt options (dotglob, nocaseglob, globstar)
+    /// should override [`VirtualFs::glob_with_opts`] as well — its default
+    /// implementation ignores the options and delegates here.
     fn glob(&self, pattern: &str, cwd: &Path) -> Result<Vec<PathBuf>, VfsError>;
 
     /// Glob expansion with shopt-controlled options (dotglob, nocaseglob, globstar).

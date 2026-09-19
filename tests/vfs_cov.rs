@@ -313,6 +313,25 @@ fn memory_mkdir_p_through_symlink_component_errors() {
 }
 
 #[test]
+fn memory_hardlink_copies_content_and_diverges_after_append() {
+    // PINNED DIVERGENCE: hardlink clones the file content (keeping the same
+    // file_id) instead of sharing storage, so a later append through one
+    // name is not visible through the other; real hard links share content.
+    // OverlayFs::hardlink behaves the same way (copy-up), pinned in
+    // src/vfs/overlay_tests.rs::hardlink_from_lower.
+    let fs = mem_fs(&[("/a", b"x")]);
+    fs.hardlink(p("/a"), p("/b")).unwrap();
+    fs.append_file(p("/a"), b"y").unwrap();
+    assert_eq!(fs.read_file(p("/a")).unwrap(), b"xy");
+    assert_eq!(fs.read_file(p("/b")).unwrap(), b"x");
+    // …while still reporting a shared file_id for the diverged contents.
+    assert_eq!(
+        fs.stat(p("/a")).unwrap().file_id,
+        fs.stat(p("/b")).unwrap().file_id
+    );
+}
+
+#[test]
 fn memory_remove_dir_nonexistent_errors() {
     let fs = mem_fs(&[]);
     let r = fs.remove_dir(p("/nope"));
@@ -573,6 +592,49 @@ fn mountable_symlink_absolute_target_beyond_all_mounts_kept() {
 }
 
 #[test]
+fn mountable_cross_mount_absolute_symlink_never_resolves() {
+    // PINNED DIVERGENCE: an absolute symlink target that lives on a
+    // different mount is stored verbatim in the link's backend (see
+    // mountable_symlink_absolute_target_on_other_mount_kept), where nothing
+    // can ever resolve it — reads through the link fail with NotFound even
+    // though the target exists in the merged view. readlink even reports
+    // the target remapped into the link mount's (wrong) namespace.
+    let mfs = MountableFs::new()
+        .mount("/", mem_fs(&[("/real.txt", b"real")]))
+        .mount("/project", mem_fs(&[]));
+    mfs.symlink(p("/real.txt"), p("/project/link")).unwrap();
+    assert_eq!(
+        mfs.readlink(p("/project/link")).unwrap(),
+        PathBuf::from("/project/real.txt")
+    );
+    assert!(
+        matches!(
+            mfs.read_file(p("/project/link")),
+            Err(VfsError::NotFound(_))
+        ),
+        "expected NotFound, got {:?}",
+        mfs.read_file(p("/project/link"))
+    );
+}
+
+#[test]
+fn mountable_mkdir_at_mount_point_returns_invalid_path() {
+    // PINNED DIVERGENCE: the mount point exists (as a synthetic directory),
+    // so mkdir should report AlreadyExists; instead the lookup strips the
+    // mount prefix down to the backend root, which InMemoryFs rejects with
+    // InvalidPath.
+    let mfs = MountableFs::new()
+        .mount("/", mem_fs(&[]))
+        .mount("/project", mem_fs(&[]));
+    assert!(mfs.exists(p("/project")));
+    let r = mfs.mkdir(p("/project"));
+    assert!(
+        matches!(r, Err(VfsError::InvalidPath(_))),
+        "expected InvalidPath, got {r:?}"
+    );
+}
+
+#[test]
 fn mountable_symlink_relative_target_kept() {
     let project_fs = mem_fs(&[]);
     let mfs = MountableFs::new().mount("/project", project_fs.clone());
@@ -819,6 +881,20 @@ mod overlay {
             matches!(r, Err(VfsError::NotFound(_))),
             "expected NotFound, got {r:?}"
         );
+    }
+
+    #[test]
+    fn symlink_onto_existing_lower_file_succeeds() {
+        // PINNED POSIX DIVERGENCE: symlink(2) on an existing path fails with
+        // EEXIST; OverlayFs::symlink only checks the upper layer (and clears
+        // whiteouts), so a symlink can be created over a lower-layer file,
+        // silently shadowing it.
+        let tmp = lower_tree();
+        let o = OverlayFs::new(tmp.path()).unwrap();
+        o.symlink(p("/elsewhere"), p("/top.txt")).unwrap();
+        assert_eq!(o.readlink(p("/top.txt")).unwrap(), p("/elsewhere"));
+        // Disk untouched — the shadowing lives in the upper layer only.
+        assert_eq!(std::fs::read(tmp.path().join("top.txt")).unwrap(), b"top");
     }
 
     #[test]

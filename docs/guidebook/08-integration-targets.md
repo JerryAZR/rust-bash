@@ -43,7 +43,7 @@ RustBashBuilder::new()
     .cwd("/path")                        // Set working directory (created automatically)
     .execution_limits(limits)            // Configure limits
     .fs(Arc<dyn VirtualFs>)              // Use a custom filesystem backend
-    .command(Box::new(custom_cmd))       // Register a custom command
+    .command(Arc::new(custom_cmd))       // Register a custom command
     .abort_on_unresolved_commands(bool)  // Stop the script at the first unknown command
                                          // (default false: bash-fidelity continue, exit 127)
     .build()                             // Returns Result<RustBash, RustBashError>

@@ -1189,3 +1189,41 @@ fn awk_non_finite_float_formats() {
     let r = run(r#"awk 'BEGIN{printf "%e|%g\n", -1e999, -1e999}'"#);
     assert_eq!(r.stdout, "-inf|-inf\n");
 }
+
+// ── Pinned divergences ────────────────────────────────────────────
+
+#[test]
+fn print_then_getline_same_file_reads_stale_content() {
+    // PINNED DIVERGENCE: output-redirection writes are deferred until after
+    // the awk run finishes, so a `getline <` on the same path within one run
+    // reads the pre-run content; gawk sees the just-written record.
+    let r = run(
+        "echo old > /f; awk 'BEGIN{print \"new\" > \"/f\"; getline l < \"/f\"; print \"got:\" l}'; cat /f",
+    );
+    assert_eq!(r.stdout, "got:old\nnew\n");
+    assert_eq!(r.exit_code, 0);
+}
+
+#[test]
+fn assignment_operand_misdiagnosed_as_missing_file() {
+    // PINNED DIVERGENCE: gawk treats `var=value` operands as assignments
+    // applied when reached in ARGV order; rust-bash treats every operand as
+    // an input file, so the assignment errors out as a missing file.
+    let r = run("echo hi > /f; awk '{print x}' x=1 /f");
+    assert_eq!(r.exit_code, 2);
+    assert!(
+        r.stderr.contains("awk: can't open file 'x=1'"),
+        "stderr: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn string_constants_compare_numerically_without_strnum() {
+    // PINNED DIVERGENCE: awk has no strnum attribute tracking, so two
+    // numeric-looking string constants compare numerically ("10" < "9" →
+    // false); gawk compares string constants lexically (true → 1).
+    let r = run("awk 'BEGIN{print (\"10\" < \"9\")}'");
+    assert_eq!(r.stdout, "0\n");
+    assert_eq!(r.exit_code, 0);
+}

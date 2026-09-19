@@ -55,6 +55,15 @@ These were pinned as suspected divergences during the coverage campaign but real
 | Assoc subscripts containing unquoted whitespace (`$((m[k + 1]))`) render compacted (`k+1`) as the key | bash uses the verbatim text (`k + 1`); brush's AST drops whitespace. Quoted keys (`m["k + 1"]`) are exact | `tests/arithmetic_eval.rs` (operator-rich subscript test) |
 | `echo x 1<>/missing` fails input collection; file created empty during error handling | bash creates the file and writes | `tests/walker_redirects.rs::readwrite_redirect_missing_file_divergence` |
 | `exec {fd}<> /missing` fails before exec runs | bash creates the file | `tests/walker_redirects.rs::exec_fd_variable_alloc_readwrite_missing_file_divergence` |
+| `exec {fd}>&2` allocates the fd number but the dup is unsupported; writing to it fails with "Bad file descriptor" | bash dups the fd | `tests/walker_redirects.rs::exec_fd_variable_alloc_dup_output_is_ignored` |
+| Cross-class brace ranges: `{z..A}` errors "bad brace expansion"; `{1..a}` / `{z..3}` stay literal | bash expands cross-class ranges by code point | `src/interpreter/brace.rs` (`mixed_case_char_range_errors`, `mixed_numeric_char_ranges_are_literal`) |
+| 11-hop arithmetic name indirection bottoms out at 0; the two guards disagree — `value_from_string` errors at depth 10 while `resolve_var_recursive` silently zeroes | bash allows ~1024 hops | `tests/arithmetic_eval.rs::deep_variable_indirection_chain_bottoms_out` |
+| `echo hi 10>/f` (fd>2 output redirect without a persistent fd) is silently ignored — the file is never created | bash creates the file | `tests/walker_redirects.rs::high_fd_output_redirect_without_persistent_fd_is_ignored` |
+| `cat foo > foo` preserves the content (stdout buffered before truncation); only compound commands / `[[ ]]` pre-truncate (`pre_truncate_output_files`), so `{ cat foo; } > foo` empties it | bash empties the file in both forms | `tests/walker_redirects.rs::self_redirect_simple_command_preserves_content`, `compound_self_redirect_truncates_like_bash` |
+| Redirect words get brace-expanded: `echo > {a,b}` → "ambiguous redirect" | bash creates a file literally named `{a,b}` | `tests/walker_redirects.rs::redirect_word_is_brace_expanded` |
+| `set -u` arithmetic read of an unset element of a declared-but-empty array (`declare -a a; echo $((a[0]))`) yields 0 (nounset checks only the variable, not the element) | bash: "unbound variable" | `tests/arithmetic_eval.rs::nounset_declared_empty_array_element_reads_zero` |
+| Negative shift counts wrap (`$((1 << -1))` masks the count to 63) | bash errors | `tests/arithmetic_eval.rs::negative_shift_count_wraps` |
+| Subshell/cmdsubst writes through inherited persistent fds vanish (fs is deep-cloned): `exec > /f; (echo sub); echo main` loses "sub" | bash appends through the shared open file description | `tests/walker_redirects.rs::subshell_write_through_inherited_persistent_fd_vanishes` |
 
 ## 3. Builtins
 
@@ -77,7 +86,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 
 **Systematic patterns** (pinned across `tests/fixtures/comparison/text/*.toml`):
 
-- **Silently-ignored flags GNU rejects**: `sort -f/-s` (also wrong order under `-f`), `sort -k` without value, `tr -z`, `tr` single-set, `tr` reversed range, `uniq -z`, `cut -z`, `fmt -x`, `tail -n` without value, `basename -a`, `uname -z` / `uname <operand>`. (Retired from this list: `expand/unexpand -t` garbage/0 — now GNU-mirrored errors.)
+- **Silently-ignored flags GNU rejects**: `sort -f/-s` (also wrong order under `-f`), `sort -k` without value, `tr -z`, `tr` single-set, `tr` reversed range, `uniq -z`, `cut -z`, `fmt -x` (and any unknown `fmt` option), `tail -n` without value, `basename -a`, `uname -z` / `uname <operand>`. Also ignored by arg parsers (no comparison fixture; ignore branches in `src/commands/`): `cp` drops all non-`-r/-R` flags (`file_ops.rs`), `mv` and `rm` drop non-`-r/-R/-f` flags, `stat` drops all flags, `cat`, `touch`, and `mkdir` skip any dash-arg (`mod.rs`), `realpath`, `basename`, `dirname`, `tree` skip any dash-arg (`navigation.rs`), `seq` skips non-numeric flags (`utils.rs`), `md5sum`/`sha1sum`/`sha256sum` skip any dash-arg (`utils.rs`), `nl` skips any dash-arg (`text.rs`). (Retired from this list: `expand/unexpand -t` garbage/0 — now GNU-mirrored errors.)
 - **Doubled-path error messages**: `cmd: /path: No such file or directory: /path` (no command prefix, path repeated) — grep-family, base64/sha sums, bc, file, realpath, xargs/find.
 
 | Behavior | Expected | Pinned in |
@@ -91,6 +100,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 | `unexpand -t 2,4` (valid tab-stop list) silently falls back to width 8 | GNU honors the list | `text/expand_unexpand.toml::unexpand_tab_list_falls_back_to_8` |
 | `du /file` without `-s` prints nothing | GNU prints `1\t/file` | `tests/file_ops_cov.rs` |
 | `xargs` treats unknown options as the command name (127) | GNU: invalid option, exit 1 | `tests/exec_cmds_cov.rs` |
+| `xargs` joined flag forms unsupported (`xargs -n1` → `-n1: command not found`); only the separated form (`-n 1`) works | GNU accepts joined forms | `tests/exec_cmds_cov.rs::xargs_joined_flag_form_unsupported` |
 | `which ./q` → `/tmp/./q` (unresolved `./` component) | normalized | `tests/cmd_utils_cov.rs` |
 | `bc quit` skips the line instead of exiting; f64 arithmetic (`1/3` at scale 20 → `0.33333333333333331483`); `scale` var prints `2.00` | real bc exits; arbitrary precision | `tests/cmd_utils_cov.rs` |
 
@@ -113,6 +123,9 @@ File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through t
 | `%g` keeps trailing zeros in scientific (`1.23450e-05`) *(suspected)* | C/gawk strip to `1.2345e-05` | `tests/awk_cov.rs` |
 | Non-finite floats print libc-style `inf`/`INF` | gawk prints `+inf` | `tests/awk_cov.rs::awk_non_finite_float_formats` |
 | No user-defined functions (`function f(a,b) …` → "unknown function" warning, exit 0) | gawk supports them | `tests/awk_cov.rs` |
+| Deferred-write blind spot: `print > "/f"` then `getline < "/f"` in one run reads the stale pre-run content (writes are applied after the run finishes) | gawk sees the just-written record | `tests/awk_cov.rs::print_then_getline_same_file_reads_stale_content` |
+| Assignment operands (`awk '{print x}' x=1 /f`) misdiagnosed as missing files (exit 2) | gawk applies the assignment when reached in ARGV order | `tests/awk_cov.rs::assignment_operand_misdiagnosed_as_missing_file` |
+| No strnum tracking: numeric-looking string constants compare numerically (`("10" < "9")` → 0) | gawk compares string constants lexically (→ 1) | `tests/awk_cov.rs::string_constants_compare_numerically_without_strnum` |
 
 ## 6. sed / diff / compression
 
@@ -137,6 +150,11 @@ File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through t
 | `InMemoryFs::rename` loses the source node when destination navigation fails (src extracted before dst validation) | atomic rename | `tests/vfs_cov.rs::memory_rename_dst_parent_errors` |
 | `OverlayFs::remove_dir("/")` succeeds on an empty merged root and whiteouts `/` | rmdir("/") → EBUSY | `tests/vfs_cov.rs::mkdir_root_after_rmdir_root_reports_already_exists` |
 | Overlay glob does not traverse an upper symlink pointing into the lower layer | merged view would | `tests/vfs_cov.rs::glob_through_upper_symlink_to_lower_dir_finds_nothing` |
+| MountableFs: cross-mount absolute symlinks are stored verbatim in the link's backend and can never resolve on read (`ln -s /real.txt /project/link` where `/real.txt` lives on another mount → reads fail NotFound) | merged view resolves the target | `tests/vfs_cov.rs::mountable_cross_mount_absolute_symlink_never_resolves` |
+| MountableFs: `mkdir` at a mount point returns InvalidPath (lookup strips the prefix to the backend root) | AlreadyExists (the mount point exists) | `tests/vfs_cov.rs::mountable_mkdir_at_mount_point_returns_invalid_path` |
+| `InMemoryFs::hardlink` / overlay hardlink copy content: later appends through one name are invisible through the other, while `file_id` stays shared | real hard links share content | `tests/vfs_cov.rs::memory_hardlink_copies_content_and_diverges_after_append`, `src/vfs/overlay_tests.rs::hardlink_from_lower` |
+| `InMemoryFs::mkdir_p` errors NotADirectory through an existing symlink component | bash follows the symlink | `tests/vfs_cov.rs::memory_mkdir_p_through_symlink_component_errors` |
+| `OverlayFs::symlink` doesn't EEXIST-check the merged view (`ln -s t /existing_lower_file` succeeds, shadowing the lower file) | EEXIST | `tests/vfs_cov.rs::overlay::symlink_onto_existing_lower_file_succeeds` |
 
 ## 8. Misc
 

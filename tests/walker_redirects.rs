@@ -702,3 +702,60 @@ fn exec_command_limit_error_propagates() {
         "unexpected error: {err:?}"
     );
 }
+
+// ── Pinned redirect divergences ─────────────────────────────────────
+
+#[test]
+fn high_fd_output_redirect_without_persistent_fd_is_ignored() {
+    // PINNED DIVERGENCE: bash creates /f (empty) for `echo hi 10>/f`;
+    // rust-bash silently ignores write redirects on fds > 2 that have no
+    // persistent fd mapping (write_to_persistent_fd is a no-op), so the
+    // file is never created. The command's own stdout is unaffected.
+    let (out, err, code) = run("echo hi 10>/f; test -e /f; echo exists=$?");
+    assert_eq!(out, "hi\nexists=1\n");
+    assert_eq!(err, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn self_redirect_simple_command_preserves_content() {
+    // PINNED DIVERGENCE: bash truncates /f before cat runs, so
+    // `cat /f > /f` empties the file; rust-bash buffers the command's
+    // stdout first and applies the write redirect only afterwards, so the
+    // content survives. (Only compound commands and [[ ]] pre-truncate —
+    // see pre_truncate_output_files.)
+    let (out, _, _) = run("echo data > /f; cat /f > /f; cat /f");
+    assert_eq!(out, "data\n");
+}
+
+#[test]
+fn compound_self_redirect_truncates_like_bash() {
+    // Contrast pin for the inconsistency: compound commands DO pre-truncate
+    // their output redirect targets before the body runs, so the compound
+    // form of the same script empties the file like bash.
+    let (out, _, _) = run("echo data > /f; { cat /f; } > /f; echo rc=$?; wc -c < /f");
+    assert_eq!(out, "rc=0\n0\n");
+}
+
+#[test]
+fn redirect_word_is_brace_expanded() {
+    // PINNED DIVERGENCE: bash does not brace-expand redirect words, so
+    // `echo > {a,b}` creates a file literally named {a,b}; rust-bash runs
+    // full word expansion on the redirect target (expand_redirect_word →
+    // expand_word_mut), producing two words → "ambiguous redirect".
+    let (out, err, code) = run("echo hi > {a,b}");
+    assert_eq!(out, "");
+    assert_eq!(err, "rust-bash: a b: ambiguous redirect\n");
+    assert_eq!(code, 1);
+}
+
+#[test]
+fn subshell_write_through_inherited_persistent_fd_vanishes() {
+    // PINNED DIVERGENCE: bash appends "sub" to /f (the subshell shares the
+    // open file description); rust-bash deep-clones the fs for the subshell,
+    // so the write through the inherited persistent fd 1 lands in the clone
+    // and is lost. The parent's own offset never advanced, so "main" is
+    // written at offset 0.
+    let (out, _, _) = run("exec > /f; (echo sub); echo main; exec > /dev/stdout; cat /f");
+    assert_eq!(out, "main\n");
+}

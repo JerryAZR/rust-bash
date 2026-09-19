@@ -94,6 +94,7 @@ let strict_limits = ExecutionLimits {
     max_substitution_depth: 5,
     max_heredoc_size: 64 * 1024,        // 64 KB
     max_brace_expansion: 100,
+    max_array_elements: 100,
 };
 
 let mut shell = RustBashBuilder::new()
@@ -119,6 +120,7 @@ let agent_limits = ExecutionLimits {
     max_substitution_depth: 20,
     max_heredoc_size: 1024 * 1024,       // 1 MB
     max_brace_expansion: 1_000,
+    max_array_elements: 10_000,
 };
 
 let mut shell = RustBashBuilder::new()
@@ -167,6 +169,9 @@ Each simple command execution increments the counter. This includes:
 - Pipeline stages: `echo hello | grep hello` = 2 commands
 - Commands inside loops, functions, and subshells
 - Commands in `$(...)` substitutions
+- Commands spawned through exec callbacks: every child run by `find -exec`
+  or `xargs` folds its command/output counters back into this shell, so a
+  `find / -exec cmd {} \;` fan-out counts against the same budget
 
 Builtins like `cd`, `export`, `set`, and variable assignments also count as commands.
 

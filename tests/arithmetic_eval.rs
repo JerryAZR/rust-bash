@@ -514,3 +514,31 @@ fn brace_sequence_limit_fires_before_materialization() {
     assert!(t0.elapsed().as_secs() < 10, "took {:?}", t0.elapsed());
     assert!(r.is_err() || r.as_ref().map(|e| e.exit_code != 0).unwrap_or(false));
 }
+
+// ── Pinned divergences ────────────────────────────────────────────
+
+#[test]
+fn nounset_declared_empty_array_element_reads_zero() {
+    // PINNED DIVERGENCE: bash reports "unbound variable" when set -u reads
+    // an unset array element; rust-bash's nounset check only tests whether
+    // the *variable* exists (env.contains_key), so an element read of a
+    // declared-but-empty array silently yields 0 (read_indexed_element /
+    // read_assoc_element unwrap_or_default).
+    let (out, err, _) = run("declare -a a; set -u; echo $(( a[0] ))");
+    assert_eq!(out, "0\n");
+    assert_eq!(err, "");
+    let (out, err, _) = run("declare -A m; set -u; echo $(( m[k] ))");
+    assert_eq!(out, "0\n");
+    assert_eq!(err, "");
+}
+
+#[test]
+fn negative_shift_count_wraps() {
+    // PINNED DIVERGENCE: bash errors on negative shift counts; rust-bash
+    // applies wrapping_shl/shr, which mask the count to 0..=63
+    // (1 << -1 shifts by 63).
+    let (out, err, code) = run("echo $(( 1 << -1 )) $(( 8 >> -1 ))");
+    assert_eq!(out, "-9223372036854775808 0\n");
+    assert_eq!(err, "");
+    assert_eq!(code, 0);
+}

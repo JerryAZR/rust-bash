@@ -419,3 +419,15 @@ fn exec_callback_children_get_fresh_random_sequences() {
     let distinct: std::collections::HashSet<_> = nums.iter().collect();
     assert!(distinct.len() >= 3, "suspiciously correlated: {nums:?}");
 }
+
+#[test]
+fn xargs_joined_flag_form_unsupported() {
+    // PINNED DIVERGENCE: GNU xargs accepts joined flag forms like `-n1`;
+    // rust-bash only recognizes the separated form (`-n 1`) and treats the
+    // joined form as the start of the command name, which then fails to
+    // resolve (a special case of xargs_unknown_option_becomes_command_name).
+    let r = run("printf 'a b\n' | xargs -n1 echo");
+    assert_eq!(r.stdout, "");
+    assert_eq!(r.stderr, "-n1: command not found\n");
+    assert_eq!(r.exit_code, 127);
+}

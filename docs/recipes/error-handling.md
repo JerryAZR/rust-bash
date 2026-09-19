@@ -6,17 +6,24 @@ Handle the different error types returned by rust-bash, distinguish between scri
 
 ## Error Types
 
-`exec()` returns `Result<ExecResult, RustBashError>`. It's important to understand what's an error vs. a normal result:
+`exec()` returns `Result<ExecResult, RustBashError>`. The most important thing to understand is that **`Err` is reserved for guardrails and host-side failures**. Everything a script can do to itself — including syntax errors — comes back as `Ok(ExecResult)` with a non-zero exit code, mirroring how bash reports failures through `$?`:
 
 | Situation | Return type | Example |
 |-----------|------------|---------|
 | Command exits non-zero | `Ok(ExecResult { exit_code: 1, .. })` | `grep pattern /no-match` |
 | Command not found | `Ok(ExecResult { exit_code: 127, .. })` | `nonexistent_cmd` |
-| Parse error | `Err(RustBashError::Parse(_))` | `echo 'unterminated` |
-| Readonly variable | `Err(RustBashError::Execution(_))` | `readonly X=1; X=2` |
+| Parse error | `Ok(ExecResult { exit_code: 2, .. })` | `echo 'unterminated` |
+| Readonly variable assignment | `Ok(ExecResult { exit_code: 1, .. })` | `readonly X=1; X=2` |
+| Unset variable (`set -u`, `${VAR:?}`) | `Ok(ExecResult { exit_code: 1, .. })` | `set -u; echo $X` |
 | Limit exceeded | `Err(RustBashError::LimitExceeded { .. })` | Infinite loop with low limit |
-| FS error (builder) | `Err(RustBashError::Vfs(_))` | Invalid path in builder |
 | Timeout | `Err(RustBashError::Timeout)` | Script exceeds time limit |
+| FS error (builder) | `Err(RustBashError::Vfs(_))` | Invalid path in builder |
+| Host-side / internal failure | `Err(RustBashError::Execution(_))` | Rare; e.g. an error that escapes conversion |
+
+Two consequences worth internalizing:
+
+- **`Err(RustBashError::Parse)` is practically unreachable from `exec()`.** Parse errors are converted to `Ok` with `exit_code: 2` (bash's syntax-error status) and the message on stderr. (One exception: the parse-time rejection of legacy ksh `${ ...; }` command substitution carries bash's exit code 1 instead of 2 — it is classified as an expansion error.) The `Parse` variant is only returned by `analyze_commands()`, which parses without executing; in theory a word re-parse failure during runtime expansion could also surface it, but no known script triggers that path.
+- **Script-level failures abort the script but stay `Ok`.** `set -u` violations and `${VAR:?message}` failures set `should_exit` (like bash's non-interactive shell), skip the remaining commands, and return `Ok` with `exit_code: 1`.
 
 ## Matching on Error Variants
 
@@ -31,23 +38,21 @@ match shell.exec(input) {
         if result.exit_code == 0 {
             println!("Success: {}", result.stdout);
         } else {
+            // Covers command failures, parse errors (exit 2), readonly
+            // violations, set -u trips, ${VAR:?} failures, etc.
             eprintln!("Command failed (exit {}): {}", result.exit_code, result.stderr);
         }
     }
-    Err(RustBashError::Parse(msg)) => {
-        eprintln!("Syntax error: {msg}");
-    }
     Err(RustBashError::LimitExceeded { limit_name, limit_value, actual_value }) => {
         eprintln!("Limit '{limit_name}' exceeded: {actual_value} > {limit_value}");
-    }
-    Err(RustBashError::Execution(msg)) => {
-        eprintln!("Runtime error: {msg}");
     }
     Err(RustBashError::Timeout) => {
         eprintln!("Script timed out");
     }
     Err(e) => {
-        eprintln!("Other error: {e}");
+        // Vfs / Execution / other host-side failures. `Parse` cannot occur
+        // here from exec(); it is only returned by analyze_commands().
+        eprintln!("Sandbox error: {e}");
     }
 }
 ```
@@ -94,9 +99,11 @@ let mut shell = RustBashBuilder::new().build().unwrap();
 let result = shell.exec("echo \"$UNDEFINED\"").unwrap();
 assert_eq!(result.stdout, "\n");
 
-// With set -u: unset variables cause an error
-let result = shell.exec("set -u; echo $UNDEFINED");
-assert!(result.is_err());
+// With set -u: the expansion fails, the rest of the script is skipped, and
+// the failure is reported as Ok with exit code 1 (not Err)
+let result = shell.exec("set -u; echo $UNDEFINED").unwrap();
+assert_eq!(result.exit_code, 1);
+assert!(result.stderr.contains("UNDEFINED: unbound variable"));
 ```
 
 ### set -o pipefail
@@ -147,9 +154,10 @@ let mut shell = RustBashBuilder::new().build().unwrap();
 // Set up some state
 shell.exec("FOO=hello").unwrap();
 
-// A parse error doesn't corrupt state
-let result = shell.exec("echo 'unterminated");
-assert!(result.is_err());
+// A parse error doesn't corrupt state (and comes back as Ok with exit 2)
+let result = shell.exec("echo 'unterminated").unwrap();
+assert_eq!(result.exit_code, 2);
+assert!(!result.stderr.is_empty());
 
 // Previous state is intact
 let result = shell.exec("echo $FOO").unwrap();
@@ -158,16 +166,17 @@ assert_eq!(result.stdout, "hello\n");
 
 ## The ${VAR:?message} Pattern
 
-Use parameter expansion to fail with a clear message on missing variables:
+Use parameter expansion to fail with a clear message on missing variables. The failure aborts the rest of the script and is reported as `Ok` with exit code 1 and your message on stderr — not as `Err`:
 
 ```rust
 use rust_bash::RustBashBuilder;
 
 let mut shell = RustBashBuilder::new().build().unwrap();
 
-// Fails with a descriptive error
-let result = shell.exec("echo ${DB_HOST:?DB_HOST must be set}");
-assert!(result.is_err());
+// Fails with a descriptive message on stderr, exit code 1
+let result = shell.exec("echo ${DB_HOST:?DB_HOST must be set}").unwrap();
+assert_eq!(result.exit_code, 1);
+assert!(result.stderr.contains("DB_HOST must be set"));
 
 // Works when set
 shell.exec("DB_HOST=localhost").unwrap();
