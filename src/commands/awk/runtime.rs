@@ -260,19 +260,23 @@ impl<'a> AwkRuntime<'a> {
         // consumes the first record(s) of the main input.
         self.pending_inputs = inputs.to_vec().into();
 
-        // Execute BEGIN rules
+        // Execute BEGIN rules. gawk (and POSIX.1-2024): `exit` in BEGIN
+        // still runs the END rules; the exit code carries over unless an
+        // END rule exits with its own.
+        let mut begin_exit: Option<i32> = None;
         for rule in &program.rules {
             if matches!(rule.pattern, Some(AwkPattern::Begin))
                 && let Some(action) = &rule.action
                 && let Signal::Exit(code) = self.execute_block(action)
             {
-                return (code, self.stdout.clone(), self.stderr.clone());
+                begin_exit = Some(code);
+                break;
             }
         }
 
         // Process input records through the shared cursor (bare getline and
-        // the main loop consume the same stream).
-        'record: while self.next_input_record() {
+        // the main loop consume the same stream). Skipped after BEGIN-exit.
+        'record: while begin_exit.is_none() && self.next_input_record() {
             for (rule_idx, rule) in program.rules.iter().enumerate() {
                 if matches!(rule.pattern, Some(AwkPattern::Begin | AwkPattern::End)) {
                     continue;
@@ -302,6 +306,9 @@ impl<'a> AwkRuntime<'a> {
         }
 
         // Execute END rules
+        if let Some(code) = begin_exit {
+            self.exit_code = code;
+        }
         for rule in &program.rules {
             if matches!(rule.pattern, Some(AwkPattern::End))
                 && let Some(action) = &rule.action
@@ -1069,16 +1076,15 @@ impl<'a> AwkRuntime<'a> {
                     .first()
                     .map(|e| self.eval_expr(e).to_string_val())
                     .unwrap_or_default();
-                let mut closed = false;
                 if let Some(i) = self.redirect_order.iter().position(|p| p == &target) {
                     self.redirect_order.remove(i);
                     self.redirect_targets.remove(&target);
-                    closed = true;
                 }
-                if self.getline_files.remove(&target).is_some() {
-                    closed = true;
-                }
-                AwkValue::Num(if closed { 1.0 } else { 0.0 })
+                self.getline_files.remove(&target);
+                // gawk: close() returns 0 on success — including closing a
+                // target that was never open (a no-op success). Nonzero is
+                // reserved for real failures.
+                AwkValue::Num(0.0)
             }
             "length" => {
                 if args.is_empty() {

@@ -706,8 +706,13 @@ fn execute_pipeline(
                 pipe_data = r.stdout;
                 pipe_data_bytes = None;
             } else {
+                // Text-oriented stages read only `pipe_data` (their
+                // ctx.stdin): give them a lossy-decode view so e.g.
+                // `zcat f.gz | grep x` sees the decompressed text instead
+                // of an empty stream. Byte-oriented stages keep the raw
+                // bytes via pipe_stdin_bytes.
+                pipe_data = String::from_utf8_lossy(&bytes).into_owned();
                 pipe_data_bytes = Some(bytes);
-                pipe_data = String::new();
             }
         } else {
             pipe_data = r.stdout;

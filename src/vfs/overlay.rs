@@ -161,23 +161,41 @@ impl OverlayFs {
         }
 
         let whiteouts = self.whiteouts.read().clone();
-        let mut deletions: Vec<PathBuf> = whiteouts
-            .iter()
+        // Top-most filter first (pure path math): a whiteout is redundant
+        // iff one of its ancestors is itself a whiteout that survives the
+        // existence filters. The disk-touching filters run only on the
+        // top-most survivors.
+        let mut sorted: Vec<PathBuf> = whiteouts.iter().cloned().collect();
+        sorted.sort();
+        let mut kept: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+        let mut deletions: Vec<PathBuf> = Vec::new();
+        for path in &sorted {
             // Only lower-layer paths are real deletions; upper-only paths
             // have nothing to delete on disk.
-            .filter(|p| self.lower_exists(p))
+            if !self.lower_exists(path) {
+                continue;
+            }
             // A whiteout shadowed by a recreated upper entry is not a deletion.
-            .filter(|p| !self.upper_has_entry(p))
+            if self.upper_has_entry(path) {
+                continue;
+            }
             // Keep only top-most whiteouts; children of a removed directory
-            // are redundant.
-            .filter(|p| {
-                !whiteouts
-                    .iter()
-                    .any(|other| other != *p && p.starts_with(other))
-            })
-            .cloned()
-            .collect();
-        deletions.sort();
+            // are redundant. O(depth) ancestor probe against kept survivors.
+            let mut covered = false;
+            let mut ancestor = path.parent();
+            while let Some(a) = ancestor {
+                if kept.contains(a) {
+                    covered = true;
+                    break;
+                }
+                ancestor = a.parent();
+            }
+            if covered {
+                continue;
+            }
+            kept.insert(path);
+            deletions.push(path.clone());
+        }
 
         OverlayDiff { writes, deletions }
     }

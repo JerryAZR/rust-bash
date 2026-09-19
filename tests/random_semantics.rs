@@ -112,3 +112,44 @@ fn command_substitution_reseeds_and_parent_is_unaffected() {
         "command substitution disturbed the parent sequence"
     );
 }
+
+#[test]
+fn random_works_in_arithmetic_context() {
+    // $((RANDOM)) must draw from the same PRNG as $RANDOM (bash semantics):
+    // nonzero eventually, advances the sequence, and deterministic under
+    // RANDOM=N reseeding.
+    let (out, _, _) = run("RANDOM=42; a=$((RANDOM)); b=$((RANDOM)); echo $a $b");
+    let (a, b) = out.split_once(' ').unwrap();
+    assert_ne!(a, "0");
+    assert_ne!(a.trim(), b.trim());
+    let (out2, _, _) = run("RANDOM=42; a=$((RANDOM)); b=$((RANDOM)); echo $a $b");
+    assert_eq!(out, out2, "same seed must reproduce the arithmetic draws");
+}
+
+#[test]
+fn random_survives_nounset() {
+    // RANDOM is dynamically computed and always "set" — set -u must not
+    // reject it (bash behavior).
+    let (out, err, code) = run("set -u; echo $RANDOM; echo rc=$?");
+    assert_eq!(code, 0, "stderr: {err}");
+    let first = out.lines().next().unwrap();
+    assert!(first.parse::<u16>().is_ok(), "RANDOM value: {first}");
+    assert!(out.contains("rc=0"));
+}
+
+#[test]
+fn random_arithmetic_respects_reseed_in_subshell() {
+    // Subshells reseed from entropy (pinned elsewhere); inside a subshell,
+    // arithmetic reads must participate in that fresh sequence.
+    let (out, _, _) = run("RANDOM=42; ( echo $((RANDOM)) ); echo $((RANDOM))");
+    let mut lines = out.lines();
+    let sub = lines.next().unwrap();
+    let parent = lines.next().unwrap();
+    let (ref_out, _, _) = run("RANDOM=42; echo $((RANDOM))");
+    assert_eq!(
+        parent,
+        ref_out.trim(),
+        "subshell arithmetic draw must not disturb the parent sequence"
+    );
+    assert!(sub.parse::<u16>().is_ok());
+}

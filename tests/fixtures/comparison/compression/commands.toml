@@ -367,3 +367,21 @@ stdout = "data\n"
 stderr = ""
 exit_code = 0
 files = { "/f.txt" = "data\n" }
+
+[[cases]]
+name = "zcat_pipes_into_text_commands"
+# Regression pin: a stage emitting binary-channel output (gzip/zcat) must
+# hand a lossy-decoded text view to the next stage's stdin — previously the
+# text stream was silently empty (zcat | grep matched nothing).
+script = 'echo hello-world | gzip > /f.gz; zcat /f.gz | grep hello; zcat /f.gz | wc -l; zcat /f.gz | awk "{print \$1}"'
+stdout = "hello-world\n1\nhello-world\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "binary_stage_roundtrip_through_byte_consumer"
+# Byte-oriented stages keep the raw bytes (no lossy decode in between).
+script = 'echo payload | gzip | gunzip'
+stdout = "payload\n"
+stderr = ""
+exit_code = 0

@@ -95,10 +95,26 @@ fn substitute_quoted_assoc_subscripts(
             out.push_str(name);
             continue;
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Non-ASCII bytes are UTF-8 continuation bytes — copy verbatim
+        // (byte→char widening would mojibake multi-byte sequences).
+        let ch_len = utf8_len(bytes[i]);
+        out.push_str(&expr[i..i + ch_len]);
+        i += ch_len;
     }
     (out, placeholders)
+}
+
+/// UTF-8 sequence length from a leading byte (1 for ASCII).
+fn utf8_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
 }
 
 /// Read a quoted key starting at `bytes[start]` (a quote char), returning the
@@ -109,19 +125,20 @@ fn take_quoted_key(expr: &str, start: usize) -> Option<(String, usize)> {
     let quote = bytes[start];
     let mut i = start + 1;
     // Double quotes unescape \" \\ \$ and \` per bash; single quotes
-    // are verbatim.
-    let mut inner = String::new();
+    // are verbatim. Bytes are collected verbatim and decoded at the end so
+    // multi-byte UTF-8 keys survive (byte→char widening would corrupt them).
+    let mut inner: Vec<u8> = Vec::new();
     while i < bytes.len() && bytes[i] != quote {
         if quote == b'"'
             && bytes[i] == b'\\'
             && i + 1 < bytes.len()
             && matches!(bytes[i + 1], b'"' | b'\\' | b'$' | b'`')
         {
-            inner.push(bytes[i + 1] as char);
+            inner.push(bytes[i + 1]);
             i += 2;
             continue;
         }
-        inner.push(bytes[i] as char);
+        inner.push(bytes[i]);
         i += 1;
     }
     if i >= bytes.len() {
@@ -132,7 +149,10 @@ fn take_quoted_key(expr: &str, start: usize) -> Option<(String, usize)> {
         i += 1;
     }
     if i < bytes.len() && bytes[i] == b']' {
-        Some((inner, i + 1))
+        // The input is valid UTF-8 and only ASCII escapes are rewritten, so
+        // the result is valid UTF-8; lossy conversion is just the typesafe
+        // way to say that.
+        Some((String::from_utf8_lossy(&inner).into_owned(), i + 1))
     } else {
         None
     }
@@ -877,6 +897,8 @@ fn read_var(state: &mut InterpreterState, name: &str) -> Result<i64, RustBashErr
         "?" => return Ok(state.last_exit_code as i64),
         "LINENO" => return Ok(state.current_lineno as i64),
         "SECONDS" => return Ok(state.shell_start_time.elapsed().as_secs() as i64),
+        // $RANDOM reads advance the PRNG (bash semantics) and are always set.
+        "RANDOM" => return Ok(crate::interpreter::next_random(state) as i64),
         _ => {}
     }
     // Handle positional parameters ($0, $1, $2, ...)

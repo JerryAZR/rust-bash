@@ -162,8 +162,28 @@ stderr = ""
 exit_code = 0
 
 [[cases]]
-name = "close_returns_one_for_open_target_zero_otherwise"
+name = "close_returns_zero_on_success_and_for_unopened"
+# gawk: close() returns 0 on success — including closing a target that was
+# never open (a no-op success).
 script = 'awk "BEGIN{print \"a\" > \"/f\"; print close(\"/f\"), close(\"/never\")}"'
-stdout = "1 0\n"
+stdout = "0 0\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "exit_in_begin_still_runs_end_rules"
+# gawk (and POSIX.1-2024): exit in BEGIN does NOT skip END rules.
+script = 'awk "BEGIN{print 1; exit}; END{print 2}" </dev/null'
+stdout = "1\n2\n"
+stderr = ""
+exit_code = 0
+
+[[cases]]
+name = "print_function_arg_with_comparison"
+# awk grammar: function-call arguments are full expressions, so a bare `>`
+# inside call parens is a comparison, not redirection.
+script = "awk '{print substr($0, 1, NF > 1)}' /f"
+files = { "/f" = "hello world\n" }
+stdout = "h\n"
 stderr = ""
 exit_code = 0

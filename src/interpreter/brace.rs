@@ -27,7 +27,7 @@ fn expand_recursive(input: &str, max_results: usize) -> Result<Vec<String>, Rust
     let suffix = &input[close + 1..];
 
     // Try sequence expansion first: {a..b} or {a..b..c}
-    if let Some(seq) = try_sequence_expansion(body)? {
+    if let Some(seq) = try_sequence_expansion(body, max_results)? {
         let mut results = Vec::new();
         for item in &seq {
             let expanded_suffixes = expand_recursive(suffix, max_results)?;
@@ -261,7 +261,14 @@ fn split_alternatives(body: &str) -> Vec<String> {
 }
 
 /// Try to parse and expand a sequence expression: `a..b` or `a..b..step`.
-fn try_sequence_expansion(body: &str) -> Result<Option<Vec<String>>, RustBashError> {
+///
+/// `max_results` bounds the materialized sequence *before* allocation: a
+/// huge range (`{1..999999999999}`) must hit the limit instead of building
+/// a multi-GB Vec first.
+fn try_sequence_expansion(
+    body: &str,
+    max_results: usize,
+) -> Result<Option<Vec<String>>, RustBashError> {
     let parts: Vec<&str> = body.split("..").collect();
     if parts.len() < 2 || parts.len() > 3 {
         return Ok(None);
@@ -284,6 +291,7 @@ fn try_sequence_expansion(body: &str) -> Result<Option<Vec<String>>, RustBashErr
         if start <= end {
             let mut val = start;
             while val <= end {
+                check_limit(result.len() + 1, max_results)?;
                 result.push(format_padded(val, width));
                 val = match val.checked_add(step) {
                     Some(v) => v,
@@ -293,6 +301,7 @@ fn try_sequence_expansion(body: &str) -> Result<Option<Vec<String>>, RustBashErr
         } else {
             let mut val = start;
             while val >= end {
+                check_limit(result.len() + 1, max_results)?;
                 result.push(format_padded(val, width));
                 val = match val.checked_sub(step) {
                     Some(v) => v,
@@ -344,6 +353,7 @@ fn try_sequence_expansion(body: &str) -> Result<Option<Vec<String>>, RustBashErr
     if start_u <= end_u {
         let mut val = start_u;
         while val <= end_u {
+            check_limit(result.len() + 1, max_results)?;
             if let Some(c) = char::from_u32(val) {
                 result.push(c.to_string());
             }
@@ -356,6 +366,7 @@ fn try_sequence_expansion(body: &str) -> Result<Option<Vec<String>>, RustBashErr
         let mut val = start_u as i64;
         let end_i = end_u as i64;
         while val >= end_i {
+            check_limit(result.len() + 1, max_results)?;
             if let Some(c) = char::from_u32(val as u32) {
                 result.push(c.to_string());
             }

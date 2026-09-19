@@ -4471,6 +4471,7 @@ fn is_dynamic_special(name: &str) -> bool {
         name,
         "LINENO"
             | "SECONDS"
+            | "RANDOM"
             | "_"
             | "PPID"
             | "UID"

@@ -487,3 +487,30 @@ fn assoc_quote_unterminated_inside_arithmetic_is_an_error() {
     assert_eq!(code, 2);
     assert!(err.contains("unterminated double quote"), "stderr: {err}");
 }
+
+#[test]
+fn assoc_array_utf8_quoted_keys() {
+    // Multi-byte UTF-8 keys must survive the quoted-subscript placeholder
+    // pass verbatim (byte→char widening corrupted them pre-fix).
+    let (out, _, _) =
+        run("declare -A m; m['ké']=7; m[\"日本\"]=8; echo $(( m[\"ké\"] + m['日本'] ))");
+    assert_eq!(out, "15\n");
+}
+
+#[test]
+fn brace_sequence_limit_fires_before_materialization() {
+    // The limit must bound the sequence itself, not just the final result:
+    // a huge range must error fast instead of building a giant Vec.
+    use rust_bash::ExecutionLimits;
+    let t0 = std::time::Instant::now();
+    let mut sh = rust_bash::RustBashBuilder::new()
+        .execution_limits(ExecutionLimits {
+            max_brace_expansion: 100,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let r = sh.exec("echo {1..999999999999}");
+    assert!(t0.elapsed().as_secs() < 10, "took {:?}", t0.elapsed());
+    assert!(r.is_err() || r.as_ref().map(|e| e.exit_code != 0).unwrap_or(false));
+}

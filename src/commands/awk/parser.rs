@@ -965,8 +965,12 @@ impl Parser {
             Token::Ident(name) => {
                 self.advance();
                 if matches!(self.peek(), Token::LParen) {
-                    // Function call
+                    // Function call. Call arguments are full expressions:
+                    // reset the print-argument `>` suppression so
+                    // `print substr($0, 1, NF > 1)` parses (awk grammar).
                     self.advance();
+                    let saved = self.suppress_gt;
+                    self.suppress_gt = false;
                     let mut args = Vec::new();
                     if !matches!(self.peek(), Token::RParen) {
                         args.push(self.parse_expr()?);
@@ -975,6 +979,7 @@ impl Parser {
                             args.push(self.parse_expr()?);
                         }
                     }
+                    self.suppress_gt = saved;
                     self.expect(&Token::RParen)?;
                     Ok(Expr::FuncCall { name, args })
                 } else if matches!(self.peek(), Token::LBracket) {

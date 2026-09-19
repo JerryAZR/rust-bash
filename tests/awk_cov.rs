@@ -526,11 +526,12 @@ fn v_assignment_with_non_finite_number_stays_string() {
 // ── runtime.rs: execution flow ────────────────────────────────────────
 
 #[test]
-fn exit_in_begin_skips_end_rules() {
-    // Matches gawk, which also skips END rules after `exit` in BEGIN.
+fn exit_in_begin_still_runs_end_rules() {
+    // gawk (and POSIX.1-2024): `exit` in BEGIN does NOT skip END rules;
+    // the exit code carries over unless an END rule exits with its own.
     let r = run("awk 'BEGIN{exit 3} END{print \"end\"}'");
     assert_eq!(r.exit_code, 3);
-    assert_eq!(r.stdout, "");
+    assert_eq!(r.stdout, "end\n");
 }
 
 #[test]
