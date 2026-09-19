@@ -739,10 +739,10 @@ fn compound_self_redirect_truncates_like_bash() {
 
 #[test]
 fn redirect_word_is_brace_expanded() {
-    // PINNED DIVERGENCE: bash does not brace-expand redirect words, so
-    // `echo > {a,b}` creates a file literally named {a,b}; rust-bash runs
-    // full word expansion on the redirect target (expand_redirect_word →
-    // expand_word_mut), producing two words → "ambiguous redirect".
+    // Bash DOES brace-expand (and glob) redirect words: `echo hi > {a,b}`
+    // yields two words → ambiguous redirect (verified against bash 5.2 and
+    // the oils redirect-multi suite). A review claim that bash creates a
+    // literal `{a,b}` file was refuted empirically.
     let (out, err, code) = run("echo hi > {a,b}");
     assert_eq!(out, "");
     assert_eq!(err, "rust-bash: a b: ambiguous redirect\n");
