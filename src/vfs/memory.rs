@@ -528,6 +528,10 @@ impl VirtualFs for InMemoryFs {
     }
 
     fn append_file(&self, path: &Path, content: &[u8]) -> Result<(), VfsError> {
+        // POSIX O_APPEND|O_CREAT: create the file when missing.
+        if !self.exists(path) {
+            return self.write_file(path, content);
+        }
         self.with_node_mut(path, |node| match node {
             FsNode::File {
                 content: c,

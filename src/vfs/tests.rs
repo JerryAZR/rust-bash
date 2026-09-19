@@ -39,10 +39,12 @@ fn append_file() {
 }
 
 #[test]
-fn append_nonexistent_file_errors() {
+fn append_nonexistent_file_creates_it() {
+    // POSIX O_APPEND|O_CREAT: appending to a missing file creates it
+    // (consistent across all backends).
     let fs = fs();
-    let err = fs.append_file(Path::new("/nope.txt"), b"data").unwrap_err();
-    assert!(matches!(err, VfsError::NotFound(_)));
+    fs.append_file(Path::new("/nope.txt"), b"data").unwrap();
+    assert_eq!(fs.read_file(Path::new("/nope.txt")).unwrap(), b"data");
 }
 
 #[test]

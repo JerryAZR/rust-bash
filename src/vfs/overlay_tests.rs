@@ -6,7 +6,7 @@ use crate::platform::SystemTime;
 
 use tempfile::TempDir;
 
-use crate::vfs::{NodeType, OverlayFs, VirtualFs};
+use crate::vfs::{NodeType, OverlayFs, VfsError, VirtualFs};
 
 /// Helper: create a temp directory with some files for use as the lower layer.
 fn setup_lower() -> TempDir {
@@ -1303,4 +1303,105 @@ fn diff_topmost_filter_with_many_whiteouts() {
     assert_eq!(ov.diff().deletions.len(), 50);
     ov.remove_dir_all(Path::new("/data")).unwrap();
     assert_eq!(ov.diff().deletions, vec![PathBuf::from("/data")]);
+}
+
+#[test]
+fn mkdir_with_whiteouted_parent_resurrects_child_cleanly() {
+    // rm -rf /data then mkdir /data/sub: parent resurrection re-whiteouts
+    // /data/sub (a deleted lower child); mkdir must resurrect it in turn —
+    // a whiteout must never coexist with an upper entry.
+    let tmp = setup_lower();
+    std::fs::create_dir_all(tmp.path().join("data/sub")).unwrap();
+    std::fs::write(tmp.path().join("data/sub/inner.txt"), b"i").unwrap();
+    let ov = make_overlay(tmp.path());
+
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    ov.mkdir(Path::new("/data/sub")).unwrap();
+
+    assert!(ov.exists(Path::new("/data/sub")));
+    let names: Vec<String> = ov
+        .readdir(Path::new("/data"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec!["sub"]);
+    // The resurrected /data/sub is a fresh empty dir: lower content hidden.
+    assert!(ov.readdir(Path::new("/data/sub")).unwrap().is_empty());
+    assert!(!ov.exists(Path::new("/data/sub/inner.txt")));
+}
+
+#[test]
+fn write_file_onto_existing_directory_is_eisdir() {
+    // POSIX: open(O_CREAT|O_TRUNC) on a directory fails with EISDIR.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    let err = ov.write_file(Path::new("/data"), b"x").unwrap_err();
+    assert!(matches!(err, VfsError::IsADirectory(_)));
+    // Same through an upper-only directory.
+    ov.mkdir(Path::new("/upperdir")).unwrap();
+    let err = ov.write_file(Path::new("/upperdir"), b"x").unwrap_err();
+    assert!(matches!(err, VfsError::IsADirectory(_)));
+}
+
+#[test]
+fn write_file_onto_whiteouted_directory_stays_hidden_children() {
+    // rm -rf /data; echo x > /data — bash creates a plain file and the
+    // deleted children stay deleted.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    ov.write_file(Path::new("/data"), b"x").unwrap();
+    assert_eq!(ov.read_file(Path::new("/data")).unwrap(), b"x");
+    assert!(!ov.exists(Path::new("/data/config.toml")));
+}
+
+#[test]
+fn exists_and_readdir_follow_upper_symlink_into_lower() {
+    // An upper symlink pointing into the lower layer: exists/readdir must
+    // resolve it (previously they probed the layers by literal path).
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.symlink(Path::new("/data"), Path::new("/ln")).unwrap();
+    assert!(ov.exists(Path::new("/ln/config.toml")));
+    let names: Vec<String> = ov
+        .readdir(Path::new("/ln"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec!["config.toml"]);
+}
+
+#[test]
+fn rename_collapses_source_whiteouts_to_topmost() {
+    // Renaming a lower directory must record ONE top-most deletion in the
+    // diff, not one per descendant.
+    let tmp = setup_lower();
+    std::fs::create_dir_all(tmp.path().join("data/sub")).unwrap();
+    std::fs::write(tmp.path().join("data/sub/inner.txt"), b"i").unwrap();
+    let ov = make_overlay(tmp.path());
+    ov.rename(Path::new("/data"), Path::new("/moved")).unwrap();
+    assert_eq!(ov.diff().deletions, vec![PathBuf::from("/data")]);
+    assert!(ov.exists(Path::new("/moved/sub/inner.txt")));
+}
+
+#[test]
+fn rename_onto_whiteouted_lower_dir_hides_its_children() {
+    // mv newdir deleted-dir: the destination's deleted lower children must
+    // not reappear.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.remove_dir_all(Path::new("/data")).unwrap();
+    ov.mkdir(Path::new("/new")).unwrap();
+    ov.write_file(Path::new("/new/x.txt"), b"x").unwrap();
+    ov.rename(Path::new("/new"), Path::new("/data")).unwrap();
+    let names: Vec<String> = ov
+        .readdir(Path::new("/data"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec!["x.txt"]);
+    assert!(!ov.exists(Path::new("/data/config.toml")));
 }

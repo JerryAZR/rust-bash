@@ -742,31 +742,66 @@ impl VirtualFs for OverlayFs {
         {
             self.ensure_upper_dir_path(parent)?;
         }
-        // Remove whiteout if any (we're creating/overwriting the file)
-        self.remove_whiteout(&norm);
+        // Writing onto an existing directory is EISDIR (POSIX); only a
+        // whiteouted (deleted-from-view) path may be recreated as a file.
+        let own_whiteout = self.whiteouts.read().contains(&norm);
+        if !own_whiteout {
+            let upper_dir = self
+                .upper
+                .lstat(&norm)
+                .is_ok_and(|m| m.node_type == NodeType::Directory);
+            let lower_dir = !self.upper_has_entry(&norm)
+                && self
+                    .lstat_lower(&norm)
+                    .is_ok_and(|m| m.node_type == NodeType::Directory);
+            if upper_dir || lower_dir {
+                return Err(VfsError::IsADirectory(path.to_path_buf()));
+            }
+        }
+        // Remove whiteout if any (we're creating/overwriting the file); a
+        // resurrected lower directory's children stay hidden.
+        if self.whiteouts.write().remove(&norm) {
+            self.populate_resurrection_whiteouts(&norm);
+        }
         self.upper.write_file(&norm, content)
     }
 
     fn append_file(&self, path: &Path, content: &[u8]) -> Result<(), VfsError> {
         let norm = normalize(path)?;
-        // POSIX O_APPEND|O_CREAT: appending to a missing file creates it,
-        // and appending to a deleted-from-view (whiteouted) file recreates
-        // it FRESH — the whiteouted lower content must not be copied up.
-        let was_whiteouted = self.whiteouts.write().remove(&norm);
+        // POSIX O_APPEND|O_CREAT over a deleted-from-view file: recreate it
+        // FRESH — the whiteouted lower content must not be copied up. The
+        // whiteout is removed only after the parent setup succeeds, so a
+        // failed append never erases a pending deletion.
+        if self.whiteouts.read().contains(&norm) {
+            if let Some(parent) = norm.parent()
+                && parent != Path::new("/")
+            {
+                self.ensure_upper_dir_path(parent)?;
+            }
+            // Write FIRST: the whiteout only affects layer resolution, not
+            // the upper write itself — removing it after the successful
+            // write means a failed append never erases a pending deletion.
+            self.upper.write_file(&norm, content)?;
+            self.whiteouts.write().remove(&norm);
+            // If the recreated path shadows a deleted lower directory, its
+            // children stay hidden (populate skips the new upper entry).
+            self.populate_resurrection_whiteouts(&norm);
+            return Ok(());
+        }
         let resolved = match self.resolve_path(&norm, true) {
             Ok(resolved) => resolved,
+            // Missing target: create below (POSIX O_APPEND|O_CREAT).
             Err(VfsError::NotFound(_)) => norm.clone(),
             Err(e) => return Err(e),
         };
         match self.resolve_layer(&resolved) {
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
             LayerResult::Upper => self.upper.append_file(&resolved, content),
-            LayerResult::Lower if !was_whiteouted => {
+            LayerResult::Lower => {
                 self.copy_up_if_needed(&resolved)?;
                 self.upper.append_file(&resolved, content)
             }
-            // Missing entirely, or recreated over a whiteout: create.
-            _ => {
+            LayerResult::NotFound => {
                 if let Some(parent) = resolved.parent()
                     && parent != Path::new("/")
                 {
@@ -811,7 +846,7 @@ impl VirtualFs for OverlayFs {
         let was_whiteout = self.is_whiteout(&norm);
         // Remove exactly this path's whiteout (an ancestor's whiteout is
         // resurrected by ensure_upper_dir_path below).
-        let resurrected = self.whiteouts.write().remove(&norm);
+        let mut resurrected = self.whiteouts.write().remove(&norm);
         if !was_whiteout {
             // Check if it already exists in either layer
             let in_upper = self.upper_has_entry(&norm);
@@ -826,6 +861,11 @@ impl VirtualFs for OverlayFs {
         {
             self.ensure_upper_dir_path(parent)?;
         }
+        // Parent resurrection re-whiteouted this path (it was a deleted
+        // lower child): creating the directory resurrects it in turn.
+        // Without this the fresh whiteout and the new upper entry would
+        // coexist (a whiteout must never share a path with an upper entry).
+        resurrected |= self.whiteouts.write().remove(&norm);
         // Check if it now exists in upper (ensure_upper_dir_path might have created it)
         if self.upper_has_entry(&norm) {
             return Err(VfsError::AlreadyExists(path.to_path_buf()));
@@ -883,24 +923,27 @@ impl VirtualFs for OverlayFs {
 
     fn readdir(&self, path: &Path) -> Result<Vec<DirEntry>, VfsError> {
         let norm = normalize(path)?;
-        if self.is_whiteout(&norm) {
+        // Resolve symlinks first: an upper symlink may point into the lower
+        // layer, where the literal path has no upper entry.
+        let resolved = self.resolve_path(&norm, true)?;
+        if self.is_whiteout(&resolved) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
 
-        let in_upper = self.upper_has_entry(&norm);
-        let in_lower = self.lower_exists(&norm);
+        let in_upper = self.upper_has_entry(&resolved);
+        let in_lower = self.lower_exists(&resolved);
 
         if !in_upper && !in_lower {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
 
         // Validate directory through overlay (handles symlinks across layers)
-        let m = self.stat(&norm)?;
+        let m = self.stat(&resolved)?;
         if m.node_type != NodeType::Directory {
             return Err(VfsError::NotADirectory(path.to_path_buf()));
         }
 
-        self.readdir_merged(&norm)
+        self.readdir_merged(&resolved)
     }
 
     fn remove_dir(&self, path: &Path) -> Result<(), VfsError> {
@@ -958,6 +1001,12 @@ impl VirtualFs for OverlayFs {
 
     fn exists(&self, path: &Path) -> bool {
         let norm = match normalize(path) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        // Resolve symlinks first: an upper symlink may point into the lower
+        // layer, in which case the literal path has no upper entry.
+        let norm = match self.resolve_path(&norm, true) {
             Ok(p) => p,
             Err(_) => return false,
         };
@@ -1161,7 +1210,9 @@ impl VirtualFs for OverlayFs {
                 {
                     self.ensure_upper_dir_path(parent)?;
                 }
-                self.remove_whiteout(&norm_dst);
+                if self.whiteouts.write().remove(&norm_dst) {
+                    self.populate_resurrection_whiteouts(&norm_dst);
+                }
                 self.upper.write_file(&norm_dst, &content)?;
                 self.upper.chmod(&norm_dst, meta.mode)?;
             }
@@ -1172,7 +1223,9 @@ impl VirtualFs for OverlayFs {
                 {
                     self.ensure_upper_dir_path(parent)?;
                 }
-                self.remove_whiteout(&norm_dst);
+                if self.whiteouts.write().remove(&norm_dst) {
+                    self.populate_resurrection_whiteouts(&norm_dst);
+                }
                 self.upper.symlink(&target, &norm_dst)?;
             }
             NodeType::Directory => {
@@ -1182,7 +1235,9 @@ impl VirtualFs for OverlayFs {
                 {
                     self.ensure_upper_dir_path(parent)?;
                 }
-                self.remove_whiteout(&norm_dst);
+                if self.whiteouts.write().remove(&norm_dst) {
+                    self.populate_resurrection_whiteouts(&norm_dst);
+                }
                 self.upper.mkdir_p(&norm_dst)?;
                 let entries = self.readdir_merged(&norm_src)?;
                 for entry in entries {
@@ -1204,8 +1259,12 @@ impl VirtualFs for OverlayFs {
                 }
             }
         }
-        // Whiteout the source to hide from lower
-        self.add_whiteout(&norm_src);
+        // Whiteout the source to hide it from lower — collapse to the
+        // single top-most whiteout (recursive directory renames whiteouted
+        // each descendant along the way).
+        let mut whiteouts = self.whiteouts.write();
+        whiteouts.retain(|w| !w.starts_with(&norm_src));
+        whiteouts.insert(norm_src.clone());
         Ok(())
     }
 
