@@ -754,6 +754,43 @@ fn vfs_resolve_joins_with_forward_slash_only() {
     assert_eq!(vfs_resolve("/any", "/abs/path"), PathBuf::from("/abs/path"));
 }
 
+#[cfg(windows)]
+#[test]
+fn vfs_resolve_translates_windows_drive_paths() {
+    use super::vfs_resolve;
+    // Backslash and forward-slash forms, upper- and lowercase drives.
+    assert_eq!(
+        vfs_resolve("/home", "C:\\Users\\test\\file.txt"),
+        PathBuf::from("/c/Users/test/file.txt")
+    );
+    assert_eq!(
+        vfs_resolve("/home", "C:/Users/test/file.txt"),
+        PathBuf::from("/c/Users/test/file.txt")
+    );
+    assert_eq!(
+        vfs_resolve("/home", "D:\\work\\out.txt"),
+        PathBuf::from("/d/work/out.txt")
+    );
+    // Drive-relative paths (`C:foo`) and plain relative paths are untouched.
+    assert_eq!(vfs_resolve("/home", "C:foo"), PathBuf::from("/home/C:foo"));
+    assert_eq!(
+        vfs_resolve("/home", "foo\\bar"),
+        PathBuf::from("/home/foo\\bar")
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn vfs_resolve_does_not_translate_drive_patterns_on_posix() {
+    use super::vfs_resolve;
+    // On POSIX, `C:\foo` is a valid relative filename and must not be
+    // rewritten.
+    assert_eq!(
+        vfs_resolve("/home", "C:\\Users\\test"),
+        PathBuf::from("/home/C:\\Users\\test")
+    );
+}
+
 #[test]
 fn vfs_join_appends_single_component_with_forward_slash() {
     use super::vfs_join;

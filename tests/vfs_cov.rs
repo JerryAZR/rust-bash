@@ -1285,3 +1285,36 @@ mod overlay {
         );
     }
 }
+
+// ── Windows drive-letter path translation ─────────────────────────────
+
+/// End-to-end: on Windows, scripts referencing absolute Windows paths have
+/// them translated to the unix-like `/c/...` namespace (Git Bash
+/// convention), so drives mounted at `/c`, `/d`, … resolve naturally.
+#[cfg(windows)]
+#[test]
+fn windows_drive_paths_translate_end_to_end() {
+    let fs = mem_fs(&[("/c/work/data.txt", b"payload\n")]);
+    let mut sh = rust_bash::RustBashBuilder::new().fs(fs).build().unwrap();
+    // Quoted so word expansion keeps the backslashes literal.
+    let r = sh.exec("cat 'C:\\work\\data.txt'").unwrap();
+    assert_eq!(r.stdout, "payload\n");
+    let r = sh.exec("cat 'c:/work/data.txt'").unwrap();
+    assert_eq!(r.stdout, "payload\n");
+    // Redirect targets are translated too (interpreter resolve_path).
+    let r = sh
+        .exec("mkdir -p /d/out; echo hi > 'D:\\out\\f.txt'; cat /d/out/f.txt")
+        .unwrap();
+    assert_eq!(r.stdout, "hi\n");
+}
+
+/// On POSIX the same strings are valid relative filenames and must NOT be
+/// rewritten.
+#[cfg(not(windows))]
+#[test]
+fn windows_drive_patterns_not_translated_on_posix() {
+    let fs = mem_fs(&[("/c/work/data.txt", b"payload\n")]);
+    let mut sh = rust_bash::RustBashBuilder::new().fs(fs).build().unwrap();
+    let r = sh.exec("cat 'C:\\work\\data.txt'").unwrap();
+    assert_eq!(r.exit_code, 1);
+}

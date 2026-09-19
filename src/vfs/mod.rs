@@ -132,9 +132,38 @@ pub(crate) fn resolve_through_dangling(
     Err(VfsError::SymlinkLoop(path.to_path_buf()))
 }
 
+/// On Windows, translate a drive-letter path to the unix-like convention:
+/// `C:\foo\bar` or `C:/foo/bar` becomes `/c/foo/bar` (Git Bash style).
+///
+/// Agents running on Windows hosts inevitably emit absolute Windows paths in
+/// scripts; translating them keeps the VFS namespace unix-like — the harness
+/// can mount drives at `/c`, `/d`, … and such paths then resolve naturally.
+/// Only applies on Windows: on POSIX `C:\foo` is a valid relative filename
+/// and must not be rewritten. Drive-relative paths (`C:foo`) are never
+/// translated. Note this runs after shell word expansion, which has already
+/// processed backslash escapes in unquoted words — scripts should quote
+/// Windows paths.
+#[cfg(windows)]
+pub(crate) fn translate_windows_drive_path(path: &str) -> std::borrow::Cow<'_, str> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let rest = path[2..].replace('\\', "/");
+        std::borrow::Cow::Owned(format!("/{drive}{rest}"))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
+}
+
 /// Resolve a possibly-relative VFS path string against a cwd string, using `/`
 /// separators only (never the host separator).
 pub(crate) fn vfs_resolve(cwd: &str, path: &str) -> PathBuf {
+    #[cfg(windows)]
+    let path = &*translate_windows_drive_path(path);
     if path.starts_with('/') {
         PathBuf::from(path)
     } else {
