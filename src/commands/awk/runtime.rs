@@ -24,6 +24,11 @@ enum Signal {
 #[derive(Debug, Clone)]
 pub enum AwkValue {
     Str(String),
+    /// A string that came from input (fields, getline, FILENAME, split())
+    /// and therefore compares NUMERICALLY when it looks numeric (POSIX
+    /// "numeric string" / gawk strnum). String constants in the program
+    /// (`Str`) always force string comparison.
+    StrNum(String),
     Num(f64),
     Uninitialized,
 }
@@ -32,14 +37,14 @@ impl AwkValue {
     pub fn to_num(&self) -> f64 {
         match self {
             AwkValue::Num(n) => *n,
-            AwkValue::Str(s) => parse_awk_number(s),
+            AwkValue::Str(s) | AwkValue::StrNum(s) => parse_awk_number(s),
             AwkValue::Uninitialized => 0.0,
         }
     }
 
     pub fn to_string_val(&self) -> String {
         match self {
-            AwkValue::Str(s) => s.clone(),
+            AwkValue::Str(s) | AwkValue::StrNum(s) => s.clone(),
             AwkValue::Num(n) => format_number(*n),
             AwkValue::Uninitialized => String::new(),
         }
@@ -49,6 +54,15 @@ impl AwkValue {
         match self {
             AwkValue::Num(n) => *n != 0.0,
             AwkValue::Str(s) => !s.is_empty(),
+            // gawk: a numeric-looking strnum tests as a number ("0" is
+            // false); a non-numeric strnum tests as a string.
+            AwkValue::StrNum(s) => {
+                if looks_numeric(s) {
+                    parse_awk_number(s) != 0.0
+                } else {
+                    !s.is_empty()
+                }
+            }
             AwkValue::Uninitialized => false,
         }
     }
@@ -180,7 +194,7 @@ impl<'a> AwkRuntime<'a> {
         variables.insert("RSTART".to_string(), AwkValue::Num(0.0));
         variables.insert("RLENGTH".to_string(), AwkValue::Num(-1.0));
         variables.insert("SUBSEP".to_string(), AwkValue::Str("\x1c".to_string()));
-        variables.insert("FILENAME".to_string(), AwkValue::Str(String::new()));
+        variables.insert("FILENAME".to_string(), AwkValue::StrNum(String::new()));
 
         Self {
             variables,
@@ -347,7 +361,7 @@ impl<'a> AwkRuntime<'a> {
         self.fnr = 0;
         self.filename = filename.clone();
         self.variables
-            .insert("FILENAME".to_string(), AwkValue::Str(filename));
+            .insert("FILENAME".to_string(), AwkValue::StrNum(filename));
         let rs = self.get_var("RS").to_string_val();
         self.current_records = split_records(&content, &rs);
         self.record_pos = 0;
@@ -402,7 +416,7 @@ impl<'a> AwkRuntime<'a> {
                 Some(name) => match self.next_raw_record() {
                     Some(record) => {
                         self.variables
-                            .insert(name.to_string(), AwkValue::Str(record));
+                            .insert(name.to_string(), AwkValue::StrNum(record));
                         AwkValue::Num(1.0)
                     }
                     None => AwkValue::Num(0.0),
@@ -450,7 +464,7 @@ impl<'a> AwkRuntime<'a> {
                     }
                     Some(name) => {
                         self.variables
-                            .insert(name.to_string(), AwkValue::Str(record));
+                            .insert(name.to_string(), AwkValue::StrNum(record));
                     }
                 }
                 AwkValue::Num(1.0)
@@ -914,7 +928,8 @@ impl<'a> AwkRuntime<'a> {
             Expr::FieldRef(idx_expr) => {
                 let idx = self.eval_expr(idx_expr).to_num() as usize;
                 let val = self.get_field(idx);
-                AwkValue::Str(val)
+                // Fields are input-derived: strnum (POSIX numeric strings).
+                AwkValue::StrNum(val)
             }
             Expr::ArrayRef { name, indices } => {
                 let key = self.eval_array_key(indices);
@@ -1217,7 +1232,8 @@ impl<'a> AwkRuntime<'a> {
                 self.arrays.remove(&array_name);
                 let arr = self.arrays.entry(array_name).or_default();
                 for (i, part) in parts.iter().enumerate() {
-                    arr.insert((i + 1).to_string(), AwkValue::Str(part.clone()));
+                    // split() output is input-derived: strnum.
+                    arr.insert((i + 1).to_string(), AwkValue::StrNum(part.clone()));
                 }
                 AwkValue::Num(parts.len() as f64)
             }
@@ -1462,8 +1478,10 @@ impl<'a> AwkRuntime<'a> {
 // ── Comparison helpers ──────────────────────────────────────────────────
 
 fn compare_values(left: &AwkValue, right: &AwkValue, op: BinOp) -> bool {
-    // If both look numeric, compare as numbers; otherwise compare as strings
-    let use_numeric = is_numeric_value(left) && is_numeric_value(right);
+    // POSIX strnum rule: numeric comparison only when BOTH sides are
+    // numeric — numbers, uninitialized, or input-derived numeric strings
+    // (strnums). A string constant anywhere forces string comparison.
+    let use_numeric = is_numeric_comparable(left) && is_numeric_comparable(right);
 
     if use_numeric {
         let l = left.to_num();
@@ -1494,17 +1512,18 @@ fn compare_values(left: &AwkValue, right: &AwkValue, op: BinOp) -> bool {
     }
 }
 
-fn is_numeric_value(val: &AwkValue) -> bool {
+/// POSIX "numeric string" test (leading/trailing whitespace allowed).
+fn looks_numeric(s: &str) -> bool {
+    let trimmed = s.trim();
+    !trimmed.is_empty() && trimmed.parse::<f64>().is_ok()
+}
+
+/// Whether this value participates in numeric comparison.
+fn is_numeric_comparable(val: &AwkValue) -> bool {
     match val {
-        AwkValue::Num(_) => true,
-        AwkValue::Uninitialized => true,
-        AwkValue::Str(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-            trimmed.parse::<f64>().is_ok()
-        }
+        AwkValue::Num(_) | AwkValue::Uninitialized => true,
+        AwkValue::StrNum(s) => looks_numeric(s),
+        AwkValue::Str(_) => false,
     }
 }
 

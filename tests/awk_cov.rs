@@ -1219,11 +1219,14 @@ fn assignment_operand_misdiagnosed_as_missing_file() {
 }
 
 #[test]
-fn string_constants_compare_numerically_without_strnum() {
-    // PINNED DIVERGENCE: awk has no strnum attribute tracking, so two
-    // numeric-looking string constants compare numerically ("10" < "9" →
-    // false); gawk compares string constants lexically (true → 1).
+fn string_constants_compare_lexically_per_strnum_rules() {
+    // POSIX strnum rules: string constants are NOT numeric strings, so
+    // ("10" < "9") is a lexical comparison (true). Strnums (input-derived)
+    // compare numerically only against numbers or other numeric strnums.
     let r = run("awk 'BEGIN{print (\"10\" < \"9\")}'");
+    assert_eq!(r.stdout, "1\n");
+    let r = run("echo '10 9' | awk '{print ($1 < $2)}'");
     assert_eq!(r.stdout, "0\n");
-    assert_eq!(r.exit_code, 0);
+    let r = run("echo 10 | awk '{print ($1 < \"9\")}'");
+    assert_eq!(r.stdout, "1\n");
 }
