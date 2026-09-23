@@ -121,8 +121,10 @@ File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through t
 | `sprintf("%+d", 5)` → `5` (flag accepted, ignored) | gawk: `+5` | `tests/awk_cov.rs` |
 | `%g` keeps trailing zeros in scientific (`1.23450e-05`) *(suspected)* | C/gawk strip to `1.2345e-05` | `tests/awk_cov.rs` |
 | Non-finite floats print libc-style `inf`/`INF` | gawk prints `+inf` | `tests/awk_cov.rs::awk_non_finite_float_formats` |
+| User function named like a builtin (`function length(x)`) shadows the builtin | gawk: parse-time rejection | `tests/awk_cov.rs` |
+| awk fatal type-misuse (`attempt to use scalar as array`) prints the message + exit 2 but does NOT abort the run | gawk aborts immediately (END skipped) | `tests/awk_cov.rs` |
+| Space between a user-function name and its call paren accepted (`f (1)`) | gawk: rejected (concat ambiguity) | `tests/awk_cov.rs` |
 | Field assignments lose no strnum distinction: `$1 = "5"` reads back as a strnum (numeric comparison) since fields carry no per-field attribute | gawk: the assigned string constant is NOT a strnum (string comparison) | none (too deep to pin cheaply; fields are stored as plain strings) |
-| No user-defined functions (`function f(a,b) …` → "unknown function" warning, exit 0) | gawk supports them | `tests/awk_cov.rs` |
 | Deferred-write blind spot: `print > "/f"` then `getline < "/f"` in one run reads the stale pre-run content (writes are applied after the run finishes) | gawk sees the just-written record | `tests/awk_cov.rs::print_then_getline_same_file_reads_stale_content` |
 | Assignment operands (`awk '{print x}' x=1 /f`) misdiagnosed as missing files (exit 2) | gawk applies the assignment when reached in ARGV order | `tests/awk_cov.rs::assignment_operand_misdiagnosed_as_missing_file` |
 

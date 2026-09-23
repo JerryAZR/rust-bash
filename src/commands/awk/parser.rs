@@ -5,6 +5,17 @@ use super::lexer::Token;
 #[derive(Debug, Clone)]
 pub struct AwkProgram {
     pub rules: Vec<AwkRule>,
+    pub functions: Vec<AwkFunction>,
+}
+
+/// A user-defined function (`function name(a, b) { ... }`). Extra
+/// parameters beyond the call's arguments act as local variables (awk
+/// convention). Arrays are passed by reference, scalars by value.
+#[derive(Debug, Clone)]
+pub struct AwkFunction {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Vec<AwkStatement>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +98,7 @@ pub enum AwkStatement {
         array: String,
         indices: Option<Vec<Expr>>,
     },
+    Return(Option<Expr>),
 }
 
 #[derive(Debug, Clone)]
@@ -203,12 +215,44 @@ impl Parser {
 
     pub fn parse(mut self) -> Result<AwkProgram, String> {
         let mut rules = Vec::new();
+        let mut functions = Vec::new();
         self.skip_terminators();
         while !self.at_eof() {
-            rules.push(self.parse_rule()?);
+            if matches!(self.peek(), Token::Function) {
+                functions.push(self.parse_function()?);
+            } else {
+                rules.push(self.parse_rule()?);
+            }
             self.skip_terminators();
         }
-        Ok(AwkProgram { rules })
+        Ok(AwkProgram { rules, functions })
+    }
+
+    fn parse_function(&mut self) -> Result<AwkFunction, String> {
+        self.advance(); // `function` / `func`
+        let name = match self.advance() {
+            Token::Ident(n) => n,
+            t => return Err(format!("expected function name, got {t}")),
+        };
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                match self.advance() {
+                    Token::Ident(n) => params.push(n),
+                    t => return Err(format!("expected parameter name, got {t}")),
+                }
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.skip_newlines();
+        let body = self.parse_block_body()?;
+        Ok(AwkFunction { name, params, body })
     }
 
     fn peek(&self) -> &Token {
@@ -359,6 +403,15 @@ impl Parser {
                     None
                 };
                 Ok(AwkStatement::Exit(code))
+            }
+            Token::Return => {
+                self.advance();
+                let value = if self.is_expr_start() {
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
+                Ok(AwkStatement::Return(value))
             }
             Token::Delete => self.parse_delete(),
             _ => {

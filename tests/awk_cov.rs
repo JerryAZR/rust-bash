@@ -1230,3 +1230,90 @@ fn string_constants_compare_lexically_per_strnum_rules() {
     let r = run("echo 10 | awk '{print ($1 < \"9\")}'");
     assert_eq!(r.stdout, "1\n");
 }
+
+// ── User-defined functions ───────────────────────────────────────────
+
+#[test]
+fn user_functions_basics() {
+    let r = run("awk 'function add(a,b){return a+b} BEGIN{print add(3,4)}'");
+    assert_eq!(r.stdout, "7\n");
+    // Recursion.
+    let r = run("awk 'function fact(n){return n<=1?1:n*fact(n-1)} BEGIN{print fact(6)}'");
+    assert_eq!(r.stdout, "720\n");
+    // No return value → empty; string returns work.
+    let r = run(
+        "awk 'function hi(){return \"hey\"} function noret(){} BEGIN{print hi(); print \"[\" noret() \"]\"}'",
+    );
+    assert_eq!(r.stdout, "hey\n[]\n");
+    // func alias keyword.
+    let r = run("awk 'func d(x){return 2*x} BEGIN{print d(21)}'");
+    assert_eq!(r.stdout, "42\n");
+}
+
+#[test]
+fn user_function_locals_and_shadowing() {
+    // Extra params are locals (awk convention); globals untouched.
+    let r = run("awk 'function f(x,   tmp){tmp=x*2; return tmp} BEGIN{tmp=99; print f(5), tmp}'");
+    assert_eq!(r.stdout, "10 99\n");
+    // Writing a scalar param is by-value (caller's variable unchanged).
+    let r = run("awk 'function g(x){x=100} BEGIN{y=7; g(y); print y}'");
+    assert_eq!(r.stdout, "7\n");
+}
+
+#[test]
+fn user_function_arrays_by_reference() {
+    let r = run(
+        "awk 'function sum(arr,   k,t){for(k in arr) t+=arr[k]; return t} BEGIN{a[1]=10; a[2]=20; print sum(a)}'",
+    );
+    assert_eq!(r.stdout, "30\n");
+    // Writes through the alias land in the caller's array.
+    let r =
+        run("awk 'function bump(a,k){a[k]++} BEGIN{v[\"x\"]=1; bump(v,\"x\"); print v[\"x\"]}'");
+    assert_eq!(r.stdout, "2\n");
+    // Using an unassigned var as an array argument creates it in the caller.
+    let r = run("awk 'function fill(a){a[\"n\"]=42} BEGIN{fill(out); print out[\"n\"]}'");
+    assert_eq!(r.stdout, "42\n");
+    // Scalar passed where the callee uses an array: gawk-fatal (exit 2).
+    // Divergence: we print the message and set exit 2 but do not abort the
+    // run immediately (gawk aborts).
+    let r = run("awk 'function f(a){a[1]=2} BEGIN{x=5; f(x); print \"after\"}'");
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "after\n");
+    assert_eq!(
+        r.stderr,
+        "awk: fatal: attempt to use scalar `x' as an array\n"
+    );
+}
+
+#[test]
+fn user_functions_control_flow() {
+    // next inside a function skips the record.
+    let r = run("printf 'a\nb\nc\n' | awk 'function skip(){next} $1==\"b\"{skip()} {print}'");
+    assert_eq!(r.stdout, "a\nc\n");
+    // exit inside a function exits the run (END still runs).
+    let r = run("awk 'function die(){exit 7} BEGIN{die()}; END{print \"end\"}'; echo rc=$?");
+    assert_eq!(r.stdout, "end\nrc=7\n");
+    // return outside a function is fatal (gawk).
+    let r = run("awk 'BEGIN{return 1}'");
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stderr, "awk: fatal: `return' outside function\n");
+    // Function calls work in patterns.
+    let r = run("printf '3\n9\n' | awk 'function big(x){return x>5} big($1){print \"big:\" $1}'");
+    assert_eq!(r.stdout, "big:9\n");
+}
+
+#[test]
+fn user_function_recursion_depth_limited() {
+    use rust_bash::ExecutionLimits;
+    let mut sh = RustBashBuilder::new()
+        .execution_limits(ExecutionLimits {
+            max_call_depth: 50,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let err = sh
+        .exec("awk 'function f(n){return f(n+1)} BEGIN{f(0)}'")
+        .unwrap_err();
+    assert!(err.to_string().contains("max_call_depth"), "{err}");
+}

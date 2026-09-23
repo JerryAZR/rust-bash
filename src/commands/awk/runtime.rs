@@ -17,6 +17,8 @@ enum Signal {
     Continue,
     Next,
     Exit(i32),
+    /// `return [expr]` from a user-defined function.
+    Return(AwkValue),
 }
 
 // ── Awk value type ──────────────────────────────────────────────────────
@@ -131,6 +133,16 @@ fn parse_awk_number(s: &str) -> f64 {
 
 // ── Runtime ─────────────────────────────────────────────────────────────
 
+/// One active user-function invocation: scalar params/locals by value,
+/// array params as name aliases into the caller's (or global) array table.
+/// Only the TOP frame is in scope — awk locals are function-local, not
+/// dynamically visible to callees.
+#[derive(Default)]
+struct Frame {
+    locals: HashMap<String, AwkValue>,
+    array_aliases: HashMap<String, String>,
+}
+
 pub struct AwkRuntime<'a> {
     // Built-in variables
     pub variables: HashMap<String, AwkValue>,
@@ -165,6 +177,15 @@ pub struct AwkRuntime<'a> {
     /// First limit tripped during this run (the caller surfaces it as
     /// Err(LimitExceeded) — a guardrail trip must not look like exit 0).
     limit_exceeded: Option<(&'static str, usize, usize)>,
+    /// User-defined functions (name -> params, body), hoisted at run start.
+    functions: HashMap<String, (Vec<String>, Vec<AwkStatement>)>,
+    /// Active function-call frames (last = innermost).
+    frames: Vec<Frame>,
+    max_call_depth: usize,
+    /// A Next/Exit signal raised inside a user function (signals cannot
+    /// flow through expression evaluation, so they are delivered to the
+    /// enclosing statement loop).
+    deferred_signal: Option<Signal>,
     // Input stream state (shared cursor for the main loop and bare getline)
     pending_inputs: std::collections::VecDeque<(String, String)>,
     current_records: Vec<String>,
@@ -216,6 +237,10 @@ impl<'a> AwkRuntime<'a> {
             start_time: std::time::Instant::now(),
             loop_iterations: 0,
             limit_exceeded: None,
+            functions: HashMap::new(),
+            frames: Vec::new(),
+            max_call_depth: usize::MAX,
+            deferred_signal: None,
             pending_inputs: std::collections::VecDeque::new(),
             current_records: Vec::new(),
             record_pos: 0,
@@ -251,6 +276,7 @@ impl<'a> AwkRuntime<'a> {
         self.max_loop_iterations = limits.max_loop_iterations;
         self.max_output_size = limits.max_output_size;
         self.max_execution_time = limits.max_execution_time;
+        self.max_call_depth = limits.max_call_depth;
     }
 
     pub fn set_var(&mut self, name: &str, value: &str) {
@@ -283,6 +309,12 @@ impl<'a> AwkRuntime<'a> {
         // Initialize range_active for all range patterns
         self.range_active = vec![false; program.rules.len()];
 
+        // Hoist user-defined functions (usable from any rule, incl. BEGIN)
+        for f in &program.functions {
+            self.functions
+                .insert(f.name.clone(), (f.params.clone(), f.body.clone()));
+        }
+
         // The input stream must be live before BEGIN: bare getline in BEGIN
         // consumes the first record(s) of the main input.
         self.pending_inputs = inputs.to_vec().into();
@@ -294,10 +326,18 @@ impl<'a> AwkRuntime<'a> {
         for rule in &program.rules {
             if matches!(rule.pattern, Some(AwkPattern::Begin))
                 && let Some(action) = &rule.action
-                && let Signal::Exit(code) = self.execute_block(action)
             {
-                begin_exit = Some(code);
-                break;
+                match self.execute_block(action) {
+                    Signal::Exit(code) => {
+                        begin_exit = Some(code);
+                        break;
+                    }
+                    Signal::Return(_) => {
+                        self.return_outside_function();
+                        break;
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -326,6 +366,10 @@ impl<'a> AwkRuntime<'a> {
                         self.exit_code = code;
                         break 'record;
                     }
+                    Signal::Return(_) => {
+                        self.return_outside_function();
+                        break 'record;
+                    }
                     Signal::Break | Signal::Continue => {}
                     Signal::None => {}
                 }
@@ -341,9 +385,16 @@ impl<'a> AwkRuntime<'a> {
                 && let Some(action) = &rule.action
             {
                 self.sync_builtin_vars();
-                if let Signal::Exit(code) = self.execute_block(action) {
-                    self.exit_code = code;
-                    break;
+                match self.execute_block(action) {
+                    Signal::Exit(code) => {
+                        self.exit_code = code;
+                        break;
+                    }
+                    Signal::Return(_) => {
+                        self.return_outside_function();
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -585,13 +636,36 @@ impl<'a> AwkRuntime<'a> {
     // ── Variable access ──────────────────────────────────────────────
 
     fn get_var(&self, name: &str) -> AwkValue {
+        // Function-local scalar params/locals shadow globals (top frame only).
+        if let Some(frame) = self.frames.last()
+            && let Some(v) = frame.locals.get(name)
+        {
+            return v.clone();
+        }
         self.variables
             .get(name)
             .cloned()
             .unwrap_or(AwkValue::Uninitialized)
     }
 
+    /// Resolve an array name through the top frame's alias table (array
+    /// parameters are passed by reference).
+    fn resolve_array_name(&self, name: &str) -> String {
+        self.frames
+            .last()
+            .and_then(|f| f.array_aliases.get(name))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
     fn set_variable(&mut self, name: &str, value: AwkValue) {
+        // Writes to a function-local param/local stay in the frame.
+        if let Some(frame) = self.frames.last_mut()
+            && frame.locals.contains_key(name)
+        {
+            frame.locals.insert(name.to_string(), value);
+            return;
+        }
         self.variables.insert(name.to_string(), value);
         // If NF is set, adjust fields count
         if name == "NF" {
@@ -614,18 +688,43 @@ impl<'a> AwkRuntime<'a> {
     }
 
     fn get_array_val(&mut self, name: &str, key: &str) -> AwkValue {
+        let name = self.resolve_array_name(name);
+        if !self.arrays.contains_key(&name) && self.variables.contains_key(&name) {
+            self.fatal_type_misuse(&name, "array", "scalar");
+            return AwkValue::Uninitialized;
+        }
         self.arrays
-            .get(name)
+            .get(&name)
             .and_then(|a| a.get(key))
             .cloned()
             .unwrap_or(AwkValue::Uninitialized)
     }
 
     fn set_array_val(&mut self, name: &str, key: &str, value: AwkValue) {
+        let name = self.resolve_array_name(name);
+        if !self.arrays.contains_key(&name) && self.variables.contains_key(&name) {
+            self.fatal_type_misuse(&name, "scalar", "array");
+            return;
+        }
         self.arrays
-            .entry(name.to_string())
+            .entry(name)
             .or_default()
             .insert(key.to_string(), value);
+    }
+
+    /// gawk-fatal: use of a scalar where an array is required or vice versa.
+    fn fatal_type_misuse(&mut self, name: &str, actual: &str, attempted: &str) {
+        self.stderr.push_str(&format!(
+            "awk: fatal: attempt to use {actual} `{name}' as an {attempted}\n"
+        ));
+        self.exit_code = 2;
+    }
+
+    /// gawk-fatal: `return` at the top level (outside any function).
+    fn return_outside_function(&mut self) {
+        self.stderr
+            .push_str("awk: fatal: `return' outside function\n");
+        self.exit_code = 2;
     }
 
     // ── Block / statement execution ──────────────────────────────────
@@ -639,6 +738,10 @@ impl<'a> AwkRuntime<'a> {
             match sig {
                 Signal::None => {}
                 other => return other,
+            }
+            // A Next/Exit raised inside a user function lands here.
+            if let Some(deferred) = self.deferred_signal.take() {
+                return deferred;
             }
         }
         Signal::None
@@ -682,6 +785,7 @@ impl<'a> AwkRuntime<'a> {
                         Signal::Continue => continue,
                         Signal::Next => return Signal::Next,
                         Signal::Exit(c) => return Signal::Exit(c),
+                        Signal::Return(v) => return Signal::Return(v),
                         Signal::None => {}
                     }
                 }
@@ -697,6 +801,7 @@ impl<'a> AwkRuntime<'a> {
                         Signal::Continue => {}
                         Signal::Next => return Signal::Next,
                         Signal::Exit(c) => return Signal::Exit(c),
+                        Signal::Return(v) => return Signal::Return(v),
                         Signal::None => {}
                     }
                     let val = self.eval_expr(cond);
@@ -733,6 +838,7 @@ impl<'a> AwkRuntime<'a> {
                         Signal::Continue => {}
                         Signal::Next => return Signal::Next,
                         Signal::Exit(c) => return Signal::Exit(c),
+                        Signal::Return(v) => return Signal::Return(v),
                         Signal::None => {}
                     }
                     if let Some(step) = step {
@@ -742,6 +848,7 @@ impl<'a> AwkRuntime<'a> {
                 Signal::None
             }
             AwkStatement::ForIn { var, array, body } => {
+                let array = self.resolve_array_name(array);
                 let keys: Vec<String> = self
                     .arrays
                     .get(array.as_str())
@@ -757,6 +864,7 @@ impl<'a> AwkRuntime<'a> {
                         Signal::Continue => continue,
                         Signal::Next => return Signal::Next,
                         Signal::Exit(c) => return Signal::Exit(c),
+                        Signal::Return(v) => return Signal::Return(v),
                         Signal::None => {}
                     }
                 }
@@ -777,7 +885,15 @@ impl<'a> AwkRuntime<'a> {
                     .unwrap_or(0);
                 Signal::Exit(c)
             }
+            AwkStatement::Return(expr) => {
+                let value = expr
+                    .as_ref()
+                    .map(|e| self.eval_expr(e))
+                    .unwrap_or(AwkValue::Uninitialized);
+                Signal::Return(value)
+            }
             AwkStatement::Delete { array, indices } => {
+                let array = self.resolve_array_name(array);
                 if let Some(indices) = indices {
                     let key = self.eval_array_key(indices);
                     if let Some(arr) = self.arrays.get_mut(array.as_str()) {
@@ -933,7 +1049,7 @@ impl<'a> AwkRuntime<'a> {
             }
             Expr::ArrayRef { name, indices } => {
                 let key = self.eval_array_key(indices);
-                self.get_array_val(name, &key)
+                self.get_array_val(name, &key) // alias-resolved inside
             }
             Expr::BinaryOp { op, left, right } => self.eval_binary_op(*op, left, right),
             Expr::UnaryOp { op, expr } => {
@@ -960,6 +1076,7 @@ impl<'a> AwkRuntime<'a> {
             }
             Expr::InArray { index, array } => {
                 let key = self.eval_expr(index).to_string_val();
+                let array = self.resolve_array_name(array);
                 let exists = self
                     .arrays
                     .get(array.as_str())
@@ -1133,7 +1250,60 @@ impl<'a> AwkRuntime<'a> {
 
     // ── Built-in functions ───────────────────────────────────────────
 
+    /// Invoke a user-defined function: scalar params bind by value (extra
+    /// params are locals, awk convention); a plain-variable argument ALSO
+    /// binds an array alias, so an array used as an argument is by
+    /// reference. `next`/`exit` inside a function are delivered to the
+    /// enclosing statement loop via `deferred_signal`.
+    fn call_user_function(&mut self, name: &str, args: &[Expr]) -> AwkValue {
+        let Some((params, body)) = self.functions.get(name).cloned() else {
+            // Unreachable: the caller checked the table.
+            return AwkValue::Uninitialized;
+        };
+        if self.frames.len() + 1 >= self.max_call_depth {
+            self.trip_limit("max_call_depth", self.max_call_depth, self.frames.len() + 1);
+            return AwkValue::Uninitialized;
+        }
+        let mut frame = Frame::default();
+        for (i, param) in params.iter().enumerate() {
+            match args.get(i) {
+                Some(Expr::Var(varname)) => {
+                    frame.locals.insert(param.clone(), self.get_var(varname));
+                    let root = self.resolve_array_name(varname);
+                    frame.array_aliases.insert(param.clone(), root);
+                }
+                Some(other) => {
+                    let v = self.eval_expr(other);
+                    frame.locals.insert(param.clone(), v);
+                }
+                None => {
+                    frame.locals.insert(param.clone(), AwkValue::Uninitialized);
+                }
+            }
+        }
+        self.frames.push(frame);
+        let sig = self.execute_block(&body);
+        self.frames.pop();
+        match sig {
+            Signal::Return(v) => v,
+            // exit/next propagate through the expression boundary.
+            Signal::Exit(_) | Signal::Next => {
+                self.deferred_signal = Some(sig);
+                AwkValue::Uninitialized
+            }
+            // No return → uninitialized (awk). Break/Continue escaping a
+            // function is a parse error in gawk; here it is swallowed.
+            _ => AwkValue::Uninitialized,
+        }
+    }
+
     fn eval_func_call(&mut self, name: &str, args: &[Expr]) -> AwkValue {
+        // User-defined functions are dispatched first. (Divergence from
+        // gawk: defining a function with a builtin name shadows the builtin
+        // here; gawk rejects the definition at parse time.)
+        if self.functions.contains_key(name) {
+            return self.call_user_function(name, args);
+        }
         match name {
             "close" => {
                 let target = args
@@ -1156,10 +1326,11 @@ impl<'a> AwkRuntime<'a> {
                     AwkValue::Num(s.chars().count() as f64)
                 } else {
                     let val = self.eval_expr(&args[0]);
-                    if let Expr::Var(vname) = &args[0]
-                        && let Some(arr) = self.arrays.get(vname.as_str())
-                    {
-                        return AwkValue::Num(arr.len() as f64);
+                    if let Expr::Var(vname) = &args[0] {
+                        let vname = self.resolve_array_name(vname);
+                        if let Some(arr) = self.arrays.get(vname.as_str()) {
+                            return AwkValue::Num(arr.len() as f64);
+                        }
                     }
                     AwkValue::Num(val.to_string_val().chars().count() as f64)
                 }
@@ -1229,6 +1400,7 @@ impl<'a> AwkRuntime<'a> {
                 };
                 let parts = split_fields(&s, &fs);
                 // Clear existing array
+                let array_name = self.resolve_array_name(&array_name);
                 self.arrays.remove(&array_name);
                 let arr = self.arrays.entry(array_name).or_default();
                 for (i, part) in parts.iter().enumerate() {
