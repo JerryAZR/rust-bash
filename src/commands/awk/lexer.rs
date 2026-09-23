@@ -212,8 +212,16 @@ impl Lexer {
                     }
                 }
                 '*' => {
-                    if self.peek_char(1) == Some('=') {
+                    if self.peek_char(1) == Some('*') && self.peek_char(2) == Some('=') {
+                        // `**=` — power-assign (gawk/BWK form of `^=`)
+                        self.tokens.push(Token::CaretAssign);
+                        self.pos += 3;
+                    } else if self.peek_char(1) == Some('=') {
                         self.tokens.push(Token::StarAssign);
+                        self.pos += 2;
+                    } else if self.peek_char(1) == Some('*') {
+                        // `**` — power operator (gawk/BWK form of `^`)
+                        self.tokens.push(Token::Caret);
                         self.pos += 2;
                     } else {
                         self.tokens.push(Token::Star);
@@ -425,7 +433,9 @@ impl Lexer {
                     'v' => s.push('\x0b'),
                     '/' => s.push('/'),
                     _ => {
-                        s.push('\\');
+                        // gawk: unknown escapes keep the character and drop
+                        // the backslash (with a warning we skip — the lexer
+                        // has no stderr channel).
                         s.push(esc);
                     }
                 }

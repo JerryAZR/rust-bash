@@ -143,6 +143,9 @@ pub enum Expr {
         index: Box<Expr>,
         array: String,
     },
+    /// Parenthesized comma group as an `in` subscript: `(a, b) in arr`
+    /// (keys join with SUBSEP at eval). Only produced in `in` position.
+    ParenGroup(Vec<Expr>),
     Match {
         expr: Box<Expr>,
         regex: Box<Expr>,
@@ -196,12 +199,27 @@ pub enum AssignOp {
 
 // ── Parser ─────────────────────────────────────────────────────────────
 
+/// Names that parse as function calls when followed by `(`: awk builtins
+/// plus user functions discovered in the token stream (two-pass). An
+/// unknown identifier followed by `(` is NOT a call — `x (++i)` is
+/// concatenation (gawk requires no space before `(` for user functions,
+/// and undefined-function calls are its parse error; we choose the
+/// concatenation reading, which matches BWK behavior in practice).
+const AWK_BUILTIN_FUNCTIONS: &[&str] = &[
+    "atan2", "close", "cos", "exp", "gsub", "index", "int", "length", "log", "match", "rand",
+    "sin", "split", "sprintf", "sqrt", "srand", "sub", "substr", "system", "tolower", "toupper",
+    "fflush",
+];
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     /// While parsing print/printf arguments, `>` is redirection, not a
     /// comparison (awk grammar: only the parenthesized form is comparison).
     suppress_gt: bool,
+    /// User function names found in the token stream (parse is two-pass:
+    /// definitions are collected before parsing bodies).
+    known_functions: std::collections::HashSet<String>,
 }
 
 impl Parser {
@@ -210,10 +228,18 @@ impl Parser {
             tokens,
             pos: 0,
             suppress_gt: false,
+            known_functions: std::collections::HashSet::new(),
         }
     }
 
     pub fn parse(mut self) -> Result<AwkProgram, String> {
+        // Two-pass: collect user function names first so calls to them are
+        // recognized regardless of definition order.
+        for w in self.tokens.windows(2) {
+            if let (Token::Function, Token::Ident(name)) = (&w[0], &w[1]) {
+                self.known_functions.insert(name.clone());
+            }
+        }
         let mut rules = Vec::new();
         let mut functions = Vec::new();
         self.skip_terminators();
@@ -330,6 +356,12 @@ impl Parser {
                     // Unreachable: peek() was just matched as Token::Regex above.
                     unreachable!()
                 };
+                // Compound boolean pattern: /a/ || /b/ — rewind and parse as
+                // an expression (bare Regex in expression context is $0~re).
+                if matches!(self.peek(), Token::And | Token::Or) {
+                    self.pos -= 1;
+                    return self.parse_expr().map(|e| Some(AwkPattern::Expression(e)));
+                }
                 // Check for range pattern: /regex1/,/regex2/
                 if matches!(self.peek(), Token::Comma) {
                     self.advance(); // consume ,
@@ -421,16 +453,46 @@ impl Parser {
         }
     }
 
+    /// Parse one print/printf argument. gawk/BWK extension: a
+    /// parenthesized comma group flattens into separate arguments
+    /// (`print (a, b)` == `print a, b`); assignments are full expressions
+    /// here (`print " ", i /= 10` assigns).
+    fn parse_print_arg(&mut self) -> Result<Vec<Expr>, String> {
+        if matches!(self.peek(), Token::LParen) {
+            let save = self.pos;
+            self.advance();
+            // Inside explicit parens, `>` is a comparison (awk grammar).
+            self.suppress_gt = false;
+            let first = self.parse_expr()?;
+            if matches!(self.peek(), Token::Comma) {
+                let mut group = vec![first];
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    group.push(self.parse_expr()?);
+                }
+                self.suppress_gt = true;
+                self.expect(&Token::RParen)?;
+                return Ok(group);
+            }
+            self.suppress_gt = true;
+            self.pos = save; // not a group — reparse as a normal argument
+        }
+        Ok(vec![self.parse_expr()?])
+    }
+
     fn parse_print(&mut self) -> Result<AwkStatement, String> {
         self.advance(); // consume 'print'
         let mut exprs = Vec::new();
         self.suppress_gt = true;
         if self.is_print_expr_start() {
-            exprs.push(self.parse_non_assign_expr()?);
-            while matches!(self.peek(), Token::Comma) {
+            loop {
+                exprs.extend(self.parse_print_arg()?);
+                if !matches!(self.peek(), Token::Comma) {
+                    break;
+                }
                 self.advance();
                 self.skip_newlines();
-                exprs.push(self.parse_non_assign_expr()?);
             }
         }
         self.suppress_gt = false;
@@ -441,15 +503,17 @@ impl Parser {
     fn parse_printf(&mut self) -> Result<AwkStatement, String> {
         self.advance(); // consume 'printf'
         self.suppress_gt = true;
-        let format = self.parse_non_assign_expr()?;
-        let mut exprs = Vec::new();
+        // `printf(fmt, args)` — the whole argument list may be parenthesized
+        // (function-call form). parse_print_arg flattens paren groups.
+        let mut all = self.parse_print_arg()?;
+        let format = all.remove(0);
+        let mut exprs: Vec<Expr> = all;
         while matches!(self.peek(), Token::Comma) {
             self.advance();
             self.skip_newlines();
-            exprs.push(self.parse_non_assign_expr()?);
+            exprs.extend(self.parse_print_arg()?);
         }
         self.suppress_gt = false;
-        let (format, exprs) = (format, exprs);
         let redirect = self.parse_redirect()?;
         Ok(AwkStatement::Printf {
             format,
@@ -498,8 +562,14 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let cond = self.parse_expr()?;
         self.expect(&Token::RParen)?;
-        self.skip_terminators();
-        let body = self.parse_statement()?;
+        // A lone `;` is the empty loop body — skip only newlines here.
+        self.skip_newlines();
+        let body = if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+            AwkStatement::Expression(Expr::Number(0.0)) // empty body
+        } else {
+            self.parse_statement()?
+        };
         Ok(AwkStatement::While {
             cond,
             body: Box::new(body),
@@ -551,13 +621,15 @@ impl Parser {
             self.pos = saved;
         }
 
-        // C-style for
+        // C-style for (awk allows newlines after the header semicolons)
+        self.skip_newlines();
         let init = if matches!(self.peek(), Token::Semicolon) {
             None
         } else {
             Some(Box::new(self.parse_statement()?))
         };
         self.expect(&Token::Semicolon)?;
+        self.skip_newlines();
 
         let cond = if matches!(self.peek(), Token::Semicolon) {
             None
@@ -565,15 +637,25 @@ impl Parser {
             Some(self.parse_expr()?)
         };
         self.expect(&Token::Semicolon)?;
+        self.skip_newlines();
 
         let step = if matches!(self.peek(), Token::RParen) {
             None
         } else {
+            self.skip_newlines();
             Some(Box::new(self.parse_statement()?))
         };
+        self.skip_newlines();
         self.expect(&Token::RParen)?;
-        self.skip_terminators();
-        let body = self.parse_statement()?;
+        // A lone `;` is the empty loop body — skip only newlines here
+        // (skip_terminators would eat the `;` and steal the next statement).
+        self.skip_newlines();
+        let body = if matches!(self.peek(), Token::Semicolon) {
+            self.advance();
+            AwkStatement::Expression(Expr::Number(0.0)) // empty body
+        } else {
+            self.parse_statement()?
+        };
         Ok(AwkStatement::For {
             init,
             cond,
@@ -754,6 +836,39 @@ impl Parser {
     }
 
     fn parse_in_expr(&mut self) -> Result<Expr, String> {
+        // Multi-dimensional membership: `(a, b) in arr` — the key is a
+        // parenthesized comma list (only meaningful before `in`).
+        if matches!(self.peek(), Token::LParen) && self.peek2() != Token::RParen {
+            let save = self.pos;
+            let saved_gt = self.suppress_gt;
+            self.advance();
+            self.suppress_gt = false;
+            let first = self.parse_expr()?;
+            if matches!(self.peek(), Token::Comma) {
+                let mut group = vec![first];
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    self.skip_newlines();
+                    group.push(self.parse_expr()?);
+                }
+                self.expect(&Token::RParen)?;
+                self.suppress_gt = saved_gt;
+                if matches!(self.peek(), Token::In) {
+                    self.advance();
+                    return match self.advance() {
+                        Token::Ident(array) => Ok(Expr::InArray {
+                            index: Box::new(Expr::ParenGroup(group)),
+                            array,
+                        }),
+                        t => Err(format!("expected array name after 'in', got {t}")),
+                    };
+                }
+                // Not an `in` expression — fall through with the group as
+                // the left value (gawk errors here; we keep the first item).
+                return Ok(Expr::ParenGroup(group));
+            }
+            self.pos = save;
+        }
         let left = self.parse_match()?;
         if matches!(self.peek(), Token::In) {
             self.advance();
@@ -1017,7 +1132,10 @@ impl Parser {
             }
             Token::Ident(name) => {
                 self.advance();
-                if matches!(self.peek(), Token::LParen) {
+                if matches!(self.peek(), Token::LParen)
+                    && (AWK_BUILTIN_FUNCTIONS.contains(&name.as_str())
+                        || self.known_functions.contains(&name))
+                {
                     // Function call. Call arguments are full expressions:
                     // reset the print-argument `>` suppression so
                     // `print substr($0, 1, NF > 1)` parses (awk grammar).
@@ -1044,6 +1162,13 @@ impl Parser {
                     }
                     self.expect(&Token::RBracket)?;
                     Ok(Expr::ArrayRef { name, indices })
+                } else if name == "length" {
+                    // Bare `length` means length($0); gawk reserves the name
+                    // (`length = 5` is a syntax error there).
+                    Ok(Expr::FuncCall {
+                        name,
+                        args: Vec::new(),
+                    })
                 } else {
                     Ok(Expr::Var(name))
                 }

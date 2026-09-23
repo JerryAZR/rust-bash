@@ -344,6 +344,12 @@ impl<'a> AwkRuntime<'a> {
         // Process input records through the shared cursor (bare getline and
         // the main loop consume the same stream). Skipped after BEGIN-exit.
         'record: while begin_exit.is_none() && self.next_input_record() {
+            // A fatal raised while READING the record (e.g. invalid FS in
+            // field splitting) aborts before any action runs (gawk).
+            if let Some(Signal::Exit(code)) = self.deferred_signal.take() {
+                self.exit_code = code;
+                break;
+            }
             for (rule_idx, rule) in program.rules.iter().enumerate() {
                 if matches!(rule.pattern, Some(AwkPattern::Begin | AwkPattern::End)) {
                     continue;
@@ -572,8 +578,10 @@ impl<'a> AwkRuntime<'a> {
     fn set_record(&mut self, record: &str) {
         self.fields = vec![record.to_string()];
         let fs = self.get_var("FS").to_string_val();
-        let split_fields = split_fields(record, &fs);
-        self.fields.extend(split_fields);
+        match split_fields(record, &fs) {
+            Ok(split) => self.fields.extend(split),
+            Err(e) => self.fatal_regex(&fs, &e),
+        }
         self.variables.insert(
             "NF".to_string(),
             AwkValue::Num((self.fields.len() - 1) as f64),
@@ -620,9 +628,13 @@ impl<'a> AwkRuntime<'a> {
         if idx == 0 {
             // Re-split fields from $0
             let fs = self.get_var("FS").to_string_val();
-            let split_fields = split_fields(value, &fs);
-            self.fields.truncate(1);
-            self.fields.extend(split_fields);
+            match split_fields(value, &fs) {
+                Ok(split) => {
+                    self.fields.truncate(1);
+                    self.fields.extend(split);
+                }
+                Err(e) => self.fatal_regex(&fs, &e),
+            }
         } else {
             // Rebuild $0
             self.rebuild_record();
@@ -710,6 +722,16 @@ impl<'a> AwkRuntime<'a> {
             .entry(name)
             .or_default()
             .insert(key.to_string(), value);
+    }
+
+    /// gawk-fatal: invalid regular expression — abort the run with exit 2
+    /// (delivered at the next statement boundary via the deferred signal).
+    fn fatal_regex(&mut self, pattern: &str, err: &str) {
+        self.stderr.push_str(&format!(
+            "awk: fatal: invalid regular expression '{pattern}': {err}\n"
+        ));
+        self.exit_code = 2;
+        self.deferred_signal = Some(Signal::Exit(2));
     }
 
     /// gawk-fatal: use of a scalar where an array is required or vice versa.
@@ -972,6 +994,11 @@ impl<'a> AwkRuntime<'a> {
             text.push_str(&parts.join(&ofs));
         }
         text.push_str(&ors);
+        // A fatal raised while evaluating arguments (invalid regex in a
+        // sub() call, ...) aborts the statement: gawk prints nothing.
+        if self.deferred_signal.is_some() {
+            return;
+        }
         self.route_output(redirect, text);
     }
 
@@ -986,7 +1013,15 @@ impl<'a> AwkRuntime<'a> {
             return;
         }
         let fmt = self.eval_expr(format_expr).to_string_val();
+        // As in exec_print: a fatal during argument evaluation aborts the
+        // statement before any output (gawk).
+        if self.deferred_signal.is_some() {
+            return;
+        }
         let args: Vec<AwkValue> = arg_exprs.iter().map(|e| self.eval_expr(e)).collect();
+        if self.deferred_signal.is_some() {
+            return;
+        }
         let result = awk_sprintf(&fmt, &args);
         self.route_output(redirect, result);
     }
@@ -1073,6 +1108,15 @@ impl<'a> AwkRuntime<'a> {
                 let l = self.eval_expr(left).to_string_val();
                 let r = self.eval_expr(right).to_string_val();
                 AwkValue::Str(format!("{l}{r}"))
+            }
+            Expr::ParenGroup(members) => {
+                // Multi-dimensional key: members join with SUBSEP (gawk).
+                let subsep = self.get_var("SUBSEP").to_string_val();
+                let parts: Vec<String> = members
+                    .iter()
+                    .map(|e| self.eval_expr(e).to_string_val())
+                    .collect();
+                AwkValue::Str(parts.join(&subsep))
             }
             Expr::InArray { index, array } => {
                 let key = self.eval_expr(index).to_string_val();
@@ -1366,17 +1410,19 @@ impl<'a> AwkRuntime<'a> {
                 }
                 let s = self.eval_expr(&args[0]).to_string_val();
                 let target = self.eval_expr(&args[1]).to_string_val();
-                // Return character position, not byte position
+                // gawk: an empty needle matches at position 1.
                 if target.is_empty() {
-                    return AwkValue::Num(0.0);
+                    return AwkValue::Num(1.0);
                 }
                 let s_chars: Vec<char> = s.chars().collect();
                 let t_chars: Vec<char> = target.chars().collect();
                 let mut found = None;
-                for i in 0..=s_chars.len().saturating_sub(t_chars.len()) {
-                    if s_chars[i..i + t_chars.len()] == t_chars[..] {
-                        found = Some(i);
-                        break;
+                if s_chars.len() >= t_chars.len() {
+                    for i in 0..=s_chars.len() - t_chars.len() {
+                        if s_chars[i..i + t_chars.len()] == t_chars[..] {
+                            found = Some(i);
+                            break;
+                        }
                     }
                 }
                 match found {
@@ -1394,11 +1440,22 @@ impl<'a> AwkRuntime<'a> {
                     _ => return AwkValue::Num(0.0),
                 };
                 let fs = if args.len() >= 3 {
-                    self.eval_expr(&args[2]).to_string_val()
+                    // A regex literal passes its pattern text (evaluating it
+                    // would yield the $0-match boolean instead).
+                    match &args[2] {
+                        Expr::Regex(r) => r.clone(),
+                        other => self.eval_expr(other).to_string_val(),
+                    }
                 } else {
                     self.get_var("FS").to_string_val()
                 };
-                let parts = split_fields(&s, &fs);
+                let parts = match split_fields(&s, &fs) {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        self.fatal_regex(&fs, &e);
+                        return AwkValue::Num(0.0);
+                    }
+                };
                 // Clear existing array
                 let array_name = self.resolve_array_name(&array_name);
                 self.arrays.remove(&array_name);
@@ -1420,7 +1477,14 @@ impl<'a> AwkRuntime<'a> {
                     Expr::Regex(r) => r.clone(),
                     _ => self.eval_expr(&args[1]).to_string_val(),
                 };
-                if let Ok(re) = self.get_regex(&pattern) {
+                let re = match self.get_regex(&pattern) {
+                    Ok(re) => Some(re),
+                    Err(e) => {
+                        self.fatal_regex(&pattern, &e);
+                        None
+                    }
+                };
+                if let Some(re) = re {
                     if let Some(m) = re.find(&s) {
                         let rstart = (m.start() + 1) as f64;
                         let rlength = m.len() as f64;
@@ -1566,7 +1630,10 @@ impl<'a> AwkRuntime<'a> {
 
         let re = match self.get_regex(&pattern) {
             Ok(re) => re,
-            Err(_) => return AwkValue::Num(0.0),
+            Err(e) => {
+                self.fatal_regex(&pattern, &e);
+                return AwkValue::Num(0.0);
+            }
         };
 
         // Process replacement: & means matched text, \\ means literal backslash
@@ -1622,7 +1689,10 @@ impl<'a> AwkRuntime<'a> {
     fn regex_match(&mut self, pattern: &str, text: &str) -> bool {
         match self.get_regex(pattern) {
             Ok(re) => re.is_match(text),
-            Err(_) => false,
+            Err(e) => {
+                self.fatal_regex(pattern, &e);
+                false
+            }
         }
     }
 
@@ -1638,11 +1708,7 @@ impl<'a> AwkRuntime<'a> {
                 self.regex_cache.insert(pattern.to_string(), re.clone());
                 Ok(re)
             }
-            Err(e) => {
-                self.stderr
-                    .push_str(&format!("awk: invalid regex '{pattern}': {e}\n"));
-                Err(e.to_string())
-            }
+            Err(e) => Err(e.to_string()),
         }
     }
 }
@@ -1701,10 +1767,17 @@ fn is_numeric_comparable(val: &AwkValue) -> bool {
 
 // ── Field splitting ─────────────────────────────────────────────────────
 
-fn split_fields(record: &str, fs: &str) -> Vec<String> {
-    if fs == " " {
+/// Split a record into fields. Returns Err on an invalid FS regex (gawk
+/// treats that as fatal). An empty record has ZERO fields for any FS.
+/// Non-default splits keep leading AND trailing empty fields (gawk:
+/// `a:` with FS=: has two fields).
+fn split_fields(record: &str, fs: &str) -> Result<Vec<String>, String> {
+    if record.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fields: Vec<String> = if fs == " " {
         // Default FS: split on runs of whitespace, trim leading/trailing
-        record.split_whitespace().map(|s| s.to_string()).collect()
+        return Ok(record.split_whitespace().map(|s| s.to_string()).collect());
     } else if fs.is_empty() {
         // Empty FS: split each character
         record.chars().map(|c| c.to_string()).collect()
@@ -1715,9 +1788,10 @@ fn split_fields(record: &str, fs: &str) -> Vec<String> {
         // Multi-char FS: treat as regex
         match Regex::new(fs) {
             Ok(re) => re.split(record).map(|s| s.to_string()).collect(),
-            Err(_) => vec![record.to_string()],
+            Err(e) => return Err(format!("{e}")),
         }
-    }
+    };
+    Ok(fields)
 }
 
 fn split_records(input: &str, rs: &str) -> Vec<String> {
@@ -1848,6 +1922,11 @@ fn awk_sprintf(fmt: &str, args: &[AwkValue]) -> String {
             let zero_pad = flags.contains('0') && !left_justify;
 
             let formatted = match conv {
+                // gawk: %u formats as unsigned 64-bit (negatives wrap).
+                'u' => {
+                    let n = arg.to_num() as i64 as u64;
+                    format!("{n}")
+                }
                 'd' | 'i' => {
                     let n = arg.to_num() as i64;
                     format!("{n}")
@@ -1911,7 +1990,12 @@ fn awk_sprintf(fmt: &str, args: &[AwkValue]) -> String {
                     s
                 }
                 'c' => match &arg {
+                    // gawk: numeric values (and numeric-looking strnums)
+                    // are char CODES; other strings give their first char.
                     AwkValue::Str(s) if !s.is_empty() => s.chars().next().unwrap().to_string(),
+                    AwkValue::StrNum(s) if !s.is_empty() && !looks_numeric(s) => {
+                        s.chars().next().unwrap().to_string()
+                    }
                     _ => {
                         let n = arg.to_num() as u32;
                         char::from_u32(n).map(|c| c.to_string()).unwrap_or_default()

@@ -176,12 +176,13 @@ fn string_escape_sequences() {
 }
 
 #[test]
-fn unknown_string_escape_keeps_backslash() {
-    // Divergence: gawk strips the backslash of an unknown escape (printing
-    // "xqy" with a warning); this implementation keeps `\q` verbatim.
+fn unknown_string_escape_strips_backslash() {
+    // gawk strips the backslash of an unknown escape ("x\qy" prints "xqy",
+    // with a warning we omit — the lexer has no stderr channel). The BWK
+    // suite's t.sub0 depends on this (string-form sub replacements).
     let r = run(r#"awk 'BEGIN{print "x\qy"}'"#);
     assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "x\\qy\n");
+    assert_eq!(r.stdout, "xqy\n");
 }
 
 #[test]
@@ -835,11 +836,11 @@ fn substr_edge_cases() {
 
 #[test]
 fn index_edge_cases() {
-    // Divergence (suspected): gawk returns 1 for an empty needle; this
-    // implementation returns 0.
+    // gawk: an empty needle matches at position 1 (BWK suite t.coerce2
+    // confirmed the previously-suspected divergence).
     let r = run("awk 'BEGIN{print index(\"x\"), index(\"abc\", \"\")}'");
     assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "0 0\n");
+    assert_eq!(r.stdout, "0 1\n");
 }
 
 #[test]
@@ -861,11 +862,13 @@ fn match_edge_cases() {
     assert_eq!(r.exit_code, 0);
     assert_eq!(r.stdout, "0 4 4 3\n");
 
+    // Invalid pattern in match() is fatal (gawk), aborting the print.
     let r = run("awk 'BEGIN{print match(\"x\", \"[\")}'");
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "0\n");
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
     assert!(
-        r.stderr.starts_with("awk: invalid regex '[':"),
+        r.stderr
+            .starts_with("awk: fatal: invalid regular expression '[':"),
         "stderr: {:?}",
         r.stderr
     );
@@ -913,13 +916,19 @@ fn srand_without_argument_seeds_from_time() {
 }
 
 #[test]
-fn unknown_function_warns_and_continues() {
-    // Divergence: gawk rejects unknown functions at parse time; this
-    // implementation warns at runtime and yields the empty value.
+fn undefined_function_name_parses_as_concatenation() {
+    // Divergence: gawk rejects undefined function calls at parse time and
+    // requires no space before `(` for user functions. Our tokens carry no
+    // spacing info, so an unknown identifier before `(` is read as
+    // concatenation: `foo(1)` is `foo (1)` → the variable foo (empty)
+    // concatenated with 1.
     let r = run("awk 'BEGIN{print \"[\" foo(1) \"]\"}'");
     assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "[]\n");
-    assert_eq!(r.stderr, "awk: unknown function 'foo'\n");
+    assert_eq!(r.stdout, "[1]\n");
+    assert_eq!(r.stderr, "");
+    // Known builtins and user-defined functions are real calls.
+    let r = run("awk 'function foo(x){return x*10} BEGIN{print foo(4)}'");
+    assert_eq!(r.stdout, "40\n");
 }
 
 #[test]
@@ -938,11 +947,13 @@ fn sub_edge_cases() {
     assert_eq!(r.exit_code, 0);
     assert_eq!(r.stdout, "1 a B\n");
 
-    let r = run("awk 'BEGIN{s=\"x\"; print sub(\"[\", \"y\", s), s}'");
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "0 x\n");
+    let r = run("awk 'BEGIN{s=\"x\"; print sub(\"[\", \"y\", s), s; print \"after\"}'");
+    // gawk: invalid regex in sub/gsub is fatal (exit 2), aborting the run.
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
     assert!(
-        r.stderr.starts_with("awk: invalid regex '[':"),
+        r.stderr
+            .starts_with("awk: fatal: invalid regular expression '['"),
         "stderr: {:?}",
         r.stderr
     );
@@ -971,11 +982,14 @@ fn sub_replacement_escapes() {
 
 #[test]
 fn invalid_regex_in_pattern() {
+    // gawk rejects an invalid regex with a fatal error (exit 2); ours is
+    // detected at runtime (patterns compile lazily) but aborts the same way.
     let r = run("printf 'a\\n' | awk '/[/ {print}'");
-    assert_eq!(r.exit_code, 0);
+    assert_eq!(r.exit_code, 2);
     assert_eq!(r.stdout, "");
     assert!(
-        r.stderr.starts_with("awk: invalid regex '[':"),
+        r.stderr
+            .starts_with("awk: fatal: invalid regular expression '[':"),
         "stderr: {:?}",
         r.stderr
     );
@@ -999,10 +1013,11 @@ fn multi_character_fs_is_a_regex() {
 }
 
 #[test]
-fn invalid_regex_fs_yields_single_field() {
-    let r = run("printf 'xa[y\\n' | awk -v FS='a[' '{print NF, $1}'");
-    assert_eq!(r.exit_code, 0);
-    assert_eq!(r.stdout, "1 xa[y\n");
+fn invalid_regex_fs_is_fatal() {
+    // gawk: an invalid FS regex aborts with exit 2 (BWK t.gsub4/t.split3).
+    let r = run("printf 'xa[y\\n' | awk -v FS='a[' '{print NF, $1}'; echo rc=$?");
+    assert_eq!(r.stdout, "rc=2\n");
+    assert!(r.stderr.contains("fatal"), "stderr: {:?}", r.stderr);
 }
 
 #[test]

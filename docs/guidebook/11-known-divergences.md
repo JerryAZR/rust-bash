@@ -105,22 +105,23 @@ These were pinned as suspected divergences during the coverage campaign but real
 
 ## 5. awk
 
+The BWK conformance suite (`tests/awk_conformance.rs`, 225 programs recorded from gawk 5.0) passes 214/225; the 11 skips are implementation-defined (for-in iteration order, rand() default sequence), policy (pipe forms), or a byte-level `%c` corner — each reverse-asserted in the suite's skip list.
+
 File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through the sandbox fs, `getline` bare/var/`< file` forms with gawk cursor semantics, and `close()`. **Pipe forms (`print | "cmd"`, `"cmd" | getline`) are deliberately unimplemented** pending an explicit security decision (awk's backdoor to command execution); they fail *visibly* (stderr + exit 1), never silently. See `tests/fixtures/comparison/awk/io.toml`.
 
 | Behavior | Expected | Pinned in |
 |---|---|---|
 | `awk -- '{print}'` → "no program text" | real awk treats next arg as program | `tests/awk_cov.rs` |
-| Unknown string escape `"x\qy"` keeps the backslash | gawk strips it with a warning | `tests/awk_cov.rs` |
 | Division/modulo by zero → stderr warning, yields `0`, exit 0 | gawk: fatal error | `tests/awk_cov.rs` |
 | `1 = 2` (non-lvalue assignment) silently ignored | gawk: parse-time error | `tests/awk_cov.rs` |
 | Unknown function → runtime warning, empty value, exit 0 | gawk: parse-time fatal | `tests/awk_cov.rs` |
 | Top-level `break` silently aborts the action | gawk: fatal error | `tests/awk_cov.rs` |
 | `(a)[1]` parenthesized array-ref accepted | gawk: syntax error | `tests/awk_cov.rs` |
-| `index("abc", "")` → 0 *(suspected)* | gawk returns 1 | `tests/awk_cov.rs` |
 | `sqrt(-1)` → `nan`, no warning | gawk warns, prints `-nan` | `tests/awk_cov.rs` |
 | `sprintf("%+d", 5)` → `5` (flag accepted, ignored) | gawk: `+5` | `tests/awk_cov.rs` |
 | `%g` keeps trailing zeros in scientific (`1.23450e-05`) *(suspected)* | C/gawk strip to `1.2345e-05` | `tests/awk_cov.rs` |
 | Non-finite floats print libc-style `inf`/`INF` | gawk prints `+inf` | `tests/awk_cov.rs::awk_non_finite_float_formats` |
+| Undefined function call `foo(1)` parses as concatenation of the variable `foo` with `(1)` (no spacing info in tokens to enforce gawk's no-space rule) | gawk: parse-time error for undefined functions | `tests/awk_cov.rs::undefined_function_name_parses_as_concatenation` |
 | User function named like a builtin (`function length(x)`) shadows the builtin | gawk: parse-time rejection | `tests/awk_cov.rs` |
 | awk fatal type-misuse (`attempt to use scalar as array`) prints the message + exit 2 but does NOT abort the run | gawk aborts immediately (END skipped) | `tests/awk_cov.rs` |
 | Space between a user-function name and its call paren accepted (`f (1)`) | gawk: rejected (concat ambiguity) | `tests/awk_cov.rs` |
