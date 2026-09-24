@@ -3,6 +3,8 @@ mod mountable;
 
 #[cfg(feature = "native-fs")]
 mod overlay;
+#[cfg(feature = "native-fs")]
+mod overlay_tree;
 
 #[cfg(test)]
 mod tests;

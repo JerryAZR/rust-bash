@@ -99,23 +99,34 @@ Reads from a real directory, writes to an in-memory layer. Changes never touch d
 
 ```rust
 struct OverlayFs {
-    lower: PathBuf,                              // real directory (read-only source)
-    upper: InMemoryFs,                           // in-memory writes
-    whiteouts: Arc<RwLock<HashSet<PathBuf>>>,    // tracks deletions
+    lower: PathBuf,             // real directory (read-only source)
+    tree: RwLock<OverlayTree>,  // in-memory upper: content + whiteout nodes
 }
 ```
 
-**Resolution order**:
-1. Check if path is in `whiteouts` → return "not found"
-2. Check `upper` (in-memory) → return if found
-3. Check `lower` (real FS) → return if found
-4. Return "not found"
+The upper layer is an explicit tree (`src/vfs/overlay_tree.rs`) whose nodes are
+`File`/`Dir`/`Symlink`/`Whiteout` — content and deletions live in ONE
+structure, so the invariants are structural rather than maintained by
+call-site discipline (the design follows the just-bash fork's OverlayTree):
 
-**Write operations**: Always go to `upper`. The `lower` directory is never modified.
+1. A path is either content or a whiteout — coexistence is unrepresentable.
+2. Whiteouts are leaves and never nest (`rm -rf` collapses a subtree into one
+   node in O(1)); every whiteout is a top-most deletion by construction, so
+   `diff()` needs no top-most filtering.
+3. Recreating a whiteouted directory (`ensure_dirs`) re-hides the deleted
+   lower children with per-child whiteouts, one lower readdir per level —
+   deleted content never reappears.
+4. `put_whiteout` scaffolds sparse upper ancestors with the lower layer's
+   modes; scaffold dirs are invisible to `diff()`.
 
-**Delete operations**: Add path to `whiteouts`. If the file exists in `upper`, also remove it from there. `rm -rf` of a directory records a *single* top-most whiteout (descendants stay hidden through an ancestor walk); recreating a whiteouted directory lazily re-hides the lower children one level at a time (resurrection whiteouts), so deleted content never reappears.
+**Resolution order** (per path component): upper tree node (whiteout →
+ENOENT, no lower fall-through; content shadows lower entirely) → lower (real
+FS) → not found. Upper symlinks are followed through the prefix, including
+into the lower layer.
 
-**Subshell isolation** (`deep_clone`): Clones the upper layer and whiteout set. The lower directory reference is shared (it's read-only anyway). This applies to subshells `( ... )` and command substitutions `$( ... )`. **Exec-callback children** (`find -exec`, `xargs`) are the deliberate exception: in bash they are subprocesses, not subshells, so they share the parent's filesystem — their writes persist and appear in `diff()` (staged in the overlay for host review, like any other sandboxed write).
+**Write operations**: Always go to the upper tree. The `lower` directory is never modified.
+
+**Subshell isolation** (`deep_clone`): Clones the upper tree. The lower directory reference is shared (it's read-only anyway). This applies to subshells `( ... )` and command substitutions `$( ... )`. **Exec-callback children** (`find -exec`, `xargs`) are the deliberate exception: in bash they are subprocesses, not subshells, so they share the parent's filesystem — their writes persist and appear in `diff()` (staged in the overlay for host review, like any other sandboxed write).
 
 **Use case**: Let an agent read a real project's files while sandboxing all writes. Perfect for code analysis tools, linters, or build system simulations.
 

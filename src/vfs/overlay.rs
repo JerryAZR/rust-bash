@@ -1,12 +1,15 @@
 //! OverlayFs — copy-on-write filesystem backed by a real directory (lower)
 //! and an in-memory write layer (upper).
 //!
-//! Reads resolve through: whiteouts → upper → lower.
-//! Writes always go to the upper layer. The lower directory is never modified.
-//! Deletions insert a "whiteout" entry so the file appears removed even though
-//! it still exists on disk.
+//! The upper layer is an explicit tree ([`OverlayTree`]) holding content
+//! nodes and whiteout leaf nodes, so the load-bearing invariants are
+//! structural (a path is either content or whiteout; whiteouts never nest;
+//! resurrection re-hides deleted lower children inside `ensure_dirs`).
+//!
+//! Reads resolve through: upper tree → lower (whiteout nodes block
+//! fall-through). Writes always go to the upper tree. The lower directory
+//! is never modified.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -14,7 +17,8 @@ use crate::platform::SystemTime;
 
 use parking_lot::RwLock;
 
-use super::{DirEntry, InMemoryFs, Metadata, NodeType, VirtualFs};
+use super::overlay_tree::{Descend, OverlayTree, UpperNode};
+use super::{DirEntry, Metadata, NodeType, VirtualFs};
 use crate::error::VfsError;
 use crate::interpreter::pattern::glob_match;
 
@@ -23,8 +27,7 @@ const MAX_SYMLINK_DEPTH: u32 = 40;
 /// A copy-on-write filesystem: reads from a real directory, writes to memory.
 ///
 /// The lower layer (a real directory on disk) is treated as read-only.
-/// All mutations go to the upper `InMemoryFs` layer. Deletions are tracked
-/// via a whiteout set so deleted lower-layer entries appear as removed.
+/// All mutations go to the upper tree. Deletions are whiteout leaf nodes.
 ///
 /// # Example
 ///
@@ -44,8 +47,7 @@ const MAX_SYMLINK_DEPTH: u32 = 40;
 /// ```
 pub struct OverlayFs {
     lower: PathBuf,
-    upper: InMemoryFs,
-    whiteouts: Arc<RwLock<HashSet<PathBuf>>>,
+    tree: RwLock<OverlayTree>,
 }
 
 /// Where a path resolved to during layer lookup.
@@ -101,8 +103,7 @@ impl OverlayFs {
         let lower = lower.canonicalize()?;
         Ok(Self {
             lower,
-            upper: InMemoryFs::new(),
-            whiteouts: Arc::new(RwLock::new(HashSet::new())),
+            tree: RwLock::new(OverlayTree::new()),
         })
     }
 
@@ -110,93 +111,55 @@ impl OverlayFs {
     /// write captured in the upper layer and every deletion of a lower-layer
     /// path.
     ///
-    /// Deletions list only the top-most whiteout of a removed subtree (e.g.
-    /// `rm -rf src` yields `src`, not each child) and exclude paths that were
-    /// subsequently recreated. Writes to paths that only ever existed in the
-    /// upper layer are reported as writes; their removal does not appear in
-    /// `deletions` since there is nothing on disk to delete.
+    /// Deletions are the whiteout leaf set (top-most by construction —
+    /// whiteouts never nest) minus stale markers whose disk path is gone.
+    /// Writes to paths that only ever existed in the upper layer are
+    /// reported as writes; their removal does not appear in `deletions`
+    /// since there is nothing on disk to delete.
     pub fn diff(&self) -> OverlayDiff {
-        // snapshot and the per-entry reads/writes below cannot observe each
-        // other's effects mid-walk: hosts call diff() outside exec(), and the
-        // interpreter is single-threaded per exec(). The unwrap_or_default /
-        // map_or fallbacks therefore only fire on an internal invariant
-        // violation, where an empty entry is preferable to panicking in a
-        // host-facing API.
         let mut writes = Vec::new();
-        for (path, node_type) in self.upper.snapshot_entries() {
-            match node_type {
-                NodeType::File => {
-                    let content = self.upper.read_file(&path).unwrap_or_default();
-                    let mode = self.upper.lstat(&path).map_or(0o644, |m| m.mode);
-                    writes.push(OverlayWrite {
-                        path,
-                        node_type,
-                        content,
-                        mode,
-                    });
+        let mut deletions = Vec::new();
+        for (path, node) in self.tree.read().walk() {
+            match node {
+                UpperNode::File { content, mode, .. } => writes.push(OverlayWrite {
+                    path,
+                    node_type: NodeType::File,
+                    content: content.clone(),
+                    mode: *mode,
+                }),
+                UpperNode::Dir { children, mode, .. } => {
+                    // A directory is a write iff it is user-created content:
+                    // completely empty (mkdir result) or holding content
+                    // beneath it. A dir whose subtree is ALL whiteouts is
+                    // put_whiteout scaffolding — nothing to materialize.
+                    let scaffold = !children.is_empty() && !subtree_has_content(children);
+                    if !scaffold {
+                        writes.push(OverlayWrite {
+                            path,
+                            node_type: NodeType::Directory,
+                            content: Vec::new(),
+                            mode: *mode,
+                        });
+                    }
                 }
-                NodeType::Directory => {
-                    let mode = self.upper.lstat(&path).map_or(0o755, |m| m.mode);
-                    writes.push(OverlayWrite {
-                        path,
-                        node_type,
-                        content: Vec::new(),
-                        mode,
-                    });
-                }
-                NodeType::Symlink => {
-                    let content = self
-                        .upper
-                        .readlink(&path)
-                        .map(|t| t.to_string_lossy().into_owned().into_bytes())
-                        .unwrap_or_default();
-                    writes.push(OverlayWrite {
-                        path,
-                        node_type,
-                        content,
-                        mode: 0o777,
-                    });
+                UpperNode::Symlink { target, .. } => writes.push(OverlayWrite {
+                    path,
+                    node_type: NodeType::Symlink,
+                    content: target.to_string_lossy().into_owned().into_bytes(),
+                    mode: 0o777,
+                }),
+                // Top-most by construction; only lower paths are real
+                // deletions (a stale whiteout whose disk path vanished hides
+                // nothing).
+                UpperNode::Whiteout => {
+                    if self.lower_exists(&path) {
+                        deletions.push(path);
+                    }
                 }
             }
         }
-
-        let whiteouts = self.whiteouts.read().clone();
-        // Top-most filter first (pure path math): a whiteout is redundant
-        // iff one of its ancestors is itself a whiteout that survives the
-        // existence filters. The disk-touching filters run only on the
-        // top-most survivors.
-        let mut sorted: Vec<PathBuf> = whiteouts.iter().cloned().collect();
-        sorted.sort();
-        let mut kept: std::collections::HashSet<&Path> = std::collections::HashSet::new();
-        let mut deletions: Vec<PathBuf> = Vec::new();
-        for path in &sorted {
-            // Only lower-layer paths are real deletions; upper-only paths
-            // have nothing to delete on disk.
-            if !self.lower_exists(path) {
-                continue;
-            }
-            // A whiteout shadowed by a recreated upper entry is not a deletion.
-            if self.upper_has_entry(path) {
-                continue;
-            }
-            // Keep only top-most whiteouts; children of a removed directory
-            // are redundant. O(depth) ancestor probe against kept survivors.
-            let mut covered = false;
-            let mut ancestor = path.parent();
-            while let Some(a) = ancestor {
-                if kept.contains(a) {
-                    covered = true;
-                    break;
-                }
-                ancestor = a.parent();
-            }
-            if covered {
-                continue;
-            }
-            kept.insert(path);
-            deletions.push(path.clone());
-        }
-
+        writes.sort_by(|a, b| a.path.cmp(&b.path));
+        deletions.sort();
         OverlayDiff { writes, deletions }
     }
 
@@ -211,87 +174,69 @@ impl OverlayFs {
     /// conflicting ones stay visible — no per-path bookkeeping needed. Mode
     /// bits are not compared (they are advisory on Windows).
     pub fn sync(&self) {
-        // Pass 1: decide which upper entries match disk.
-        let entries = self.upper.snapshot_entries();
-        let matches: Vec<bool> = entries
-            .iter()
-            .map(|(path, node_type)| match node_type {
-                NodeType::File => self.file_matches_disk(path),
-                NodeType::Directory => self.dir_exists_on_disk(path),
-                NodeType::Symlink => self.symlink_matches_disk(path),
+        // Post-order walk (children before parents): detach every node that
+        // matches disk; directories detach only once all children detached.
+        let entries: Vec<(PathBuf, bool, bool)> = self
+            .tree
+            .read()
+            .walk_post()
+            .into_iter()
+            .map(|(p, n)| {
+                let is_dir = matches!(n, UpperNode::Dir { .. });
+                let matches_disk = match n {
+                    UpperNode::File { content, .. } => self.file_matches_disk(&p, content),
+                    UpperNode::Dir { .. } => self.dir_exists_on_disk(&p),
+                    UpperNode::Symlink { target, .. } => self.symlink_matches_disk(&p, target),
+                    // Whiteout: stale (deletion applied or path vanished
+                    // out-of-band) when the disk path is gone.
+                    UpperNode::Whiteout => !self.lower_exists(&p),
+                };
+                (p, is_dir, matches_disk)
             })
             .collect();
 
-        // Pass 2: remove matched entries bottom-up (snapshot order is
-        // parents-first). A matched directory is dropped only when every
-        // entry beneath it is also dropped — otherwise it stays as the
-        // container of still-pending children.
-        let mut dropped: HashSet<PathBuf> = HashSet::new();
-        for (entry, matches) in entries.iter().zip(matches.iter()).rev() {
-            if !matches {
+        let mut tree = self.tree.write();
+        for (path, is_dir, matches_disk) in entries {
+            if !matches_disk {
                 continue;
             }
-            let (path, node_type) = entry;
-            if *node_type == NodeType::Directory
-                && entries.iter().any(|(other, _)| {
-                    other != path && other.starts_with(path) && !dropped.contains(other)
-                })
-            {
-                continue;
+            if is_dir {
+                // A directory drops only when nothing at all remains beneath
+                // it (post-order: matching children were already detached;
+                // non-matching ones still appear in the live walk).
+                let has_pending_child = tree
+                    .walk()
+                    .iter()
+                    .any(|(other, _)| other != &path && other.starts_with(&path));
+                if has_pending_child {
+                    continue;
+                }
             }
-            let removed = if *node_type == NodeType::Directory {
-                self.upper.remove_dir(path).is_ok()
-            } else {
-                self.upper.remove_file(path).is_ok()
-            };
-            if removed {
-                dropped.insert(path.clone());
-            }
-        }
-
-        // Whiteouts whose disk paths are gone (deletion applied, or removed
-        // by a native run) no longer hide anything — clear them, along with
-        // any whiteouts beneath them.
-        let stale: Vec<PathBuf> = {
-            let whiteouts = self.whiteouts.read();
-            whiteouts
-                .iter()
-                .filter(|p| !self.lower_exists(p))
-                .cloned()
-                .collect()
-        };
-        if !stale.is_empty() {
-            let mut whiteouts = self.whiteouts.write();
-            for path in &stale {
-                whiteouts.retain(|w| w != path && !w.starts_with(path));
-            }
+            tree.detach(&path);
         }
     }
 
-    /// Discard all pending state: clear the upper layer and the whiteout set
-    /// so the overlay re-baselines on current disk state.
+    /// Discard all pending state: clear the upper tree so the overlay
+    /// re-baselines on current disk state.
     ///
-    /// Unlike [`Self::sync`], which keeps entries that genuinely differ from disk,
-    /// `reset` deliberately forgets them — e.g. after a native run whose disk
-    /// changes should win over the sandbox's pending opinions.
+    /// Unlike [`Self::sync`], which keeps entries that genuinely differ from
+    /// disk, `reset` deliberately forgets them — e.g. after a native run
+    /// whose disk changes should win over the sandbox's pending opinions.
     pub fn reset(&self) {
-        self.upper.clear();
-        self.whiteouts.write().clear();
+        self.tree.write().clear();
     }
 
-    /// True when the disk file at `path` has byte-identical content to the
-    /// upper-layer copy.
-    fn file_matches_disk(&self, path: &Path) -> bool {
+    /// True when the disk file at `path` is byte-identical to `content`.
+    fn file_matches_disk(&self, path: &Path, content: &[u8]) -> bool {
         match self.lstat_lower(path) {
             Ok(meta) if meta.node_type == NodeType::File => {}
             _ => return false,
         }
-        match (self.read_lower_file(path), self.upper.read_file(path)) {
-            (Ok(disk), Ok(upper)) => disk == upper,
-            // Read failure after a successful lstat: permission errors (e.g.
-            // an unreadable disk file — exercised by a cfg(unix) test) or an
+        match self.read_lower_file(path) {
+            Ok(disk) => disk == content,
+            // Read failure after a successful lstat: permission errors or an
             // OS race where the file disappears mid-check.
-            _ => false,
+            Err(_) => false,
         }
     }
 
@@ -301,107 +246,54 @@ impl OverlayFs {
             .is_ok_and(|m| m.node_type == NodeType::Directory)
     }
 
-    /// True when the disk symlink at `path` has the same target as the
-    /// upper-layer copy.
-    fn symlink_matches_disk(&self, path: &Path) -> bool {
-        // The Ok arm requires a symlink in the lower directory — covered by
-        // overlay::lower_symlink_stat_readdir_and_sync, which skips when the
-        // OS denies symlink creation (e.g. unprivileged Windows).
+    /// True when the disk symlink at `path` has the same target.
+    fn symlink_matches_disk(&self, path: &Path, target: &Path) -> bool {
         match self.lstat_lower(path) {
             Ok(meta) if meta.node_type == NodeType::Symlink => {}
             _ => return false,
         }
-        match (self.readlink_lower(path), self.upper.readlink(path)) {
-            (Ok(disk), Ok(upper)) => disk == upper,
-            // Unreachable by construction: lstat_lower above confirmed a disk
-            // symlink and the upper snapshot confirmed an upper symlink, so
-            // both readlinks succeed — barring an OS race (target unlinked
-            // mid-check), which this arm defensively treats as a mismatch.
-            _ => false,
+        match self.readlink_lower(path) {
+            Ok(disk) => disk == target,
+            Err(_) => false,
         }
     }
 
     // ------------------------------------------------------------------
-    // Whiteout helpers
+    // Layer checks (no symlink following)
     // ------------------------------------------------------------------
 
-    /// Check if `path` or any ancestor is whiteout-ed.
+    /// Content node exists in the upper tree at exactly `path`.
+    fn upper_has_entry(&self, path: &Path) -> bool {
+        self.tree.read().descend(path).content().is_some()
+    }
+
+    /// The path is hidden by a whiteout (at or above it).
     fn is_whiteout(&self, path: &Path) -> bool {
-        let whiteouts = self.whiteouts.read();
-        let mut current = path.to_path_buf();
-        loop {
-            if whiteouts.contains(&current) {
-                return true;
+        self.tree.read().descend(path).is_blocked_or_whiteout()
+    }
+
+    /// Determine which layer `path` lives in (after normalization).
+    fn resolve_layer(&self, path: &Path) -> LayerResult {
+        match self.tree.read().descend(path) {
+            Descend::Found(node) if node.is_content() => LayerResult::Upper,
+            Descend::Found(UpperNode::Whiteout) | Descend::Blocked => LayerResult::Whiteout,
+            // Unreachable: Found(_) is exhausted by the two arms above.
+            Descend::Found(_) => {
+                debug_assert!(false, "resolve_layer: Found fell through");
+                LayerResult::NotFound
             }
-            if !current.pop() {
-                return false;
-            }
-        }
-    }
-
-    /// Insert a whiteout for `path`.
-    fn add_whiteout(&self, path: &Path) {
-        self.whiteouts.write().insert(path.to_path_buf());
-    }
-
-    /// Remove a whiteout for exactly `path` (not ancestors).
-    fn remove_whiteout(&self, path: &Path) {
-        self.whiteouts.write().remove(path);
-    }
-
-    /// Re-hide the lower layer's children after a whiteouted directory at
-    /// `dir` is resurrected (its whiteout removed, the directory recreated
-    /// in the upper layer): without this, the deleted lower contents would
-    /// reappear inside the fresh directory. Populates lazily, one level
-    /// deep — deeper levels are populated when they are themselves
-    /// resurrected. Lower children already present in the upper layer are
-    /// left visible. No-op when `dir` has no lower directory.
-    fn populate_resurrection_whiteouts(&self, dir: &Path) {
-        if let Ok(entries) = self.readdir_lower(dir) {
-            for entry in entries {
-                let child = super::vfs_join(dir, &entry.name);
-                if !self.upper_has_entry(&child) {
-                    self.add_whiteout(&child);
+            _ => {
+                if self.lower_exists(path) {
+                    LayerResult::Lower
+                } else {
+                    LayerResult::NotFound
                 }
             }
         }
     }
 
     // ------------------------------------------------------------------
-    // Layer entry checks (no symlink following)
-    // ------------------------------------------------------------------
-
-    /// Check if a node exists in the upper layer at `path` without
-    /// following symlinks. This is critical because `InMemoryFs::exists`
-    /// follows symlinks — a symlink whose target is only in lower would
-    /// return false.
-    fn upper_has_entry(&self, path: &Path) -> bool {
-        self.upper.lstat(path).is_ok()
-    }
-
-    // ------------------------------------------------------------------
-    // Layer resolution
-    // ------------------------------------------------------------------
-
-    /// Determine which layer `path` lives in (after normalization).
-    fn resolve_layer(&self, path: &Path) -> LayerResult {
-        // Whiteout is unreachable for all current callers: they pass a path
-        // returned by resolve_path, which rejects whiteout-ed components
-        // (ancestors included) with NotFound before returning.
-        if self.is_whiteout(path) {
-            return LayerResult::Whiteout;
-        }
-        if self.upper_has_entry(path) {
-            return LayerResult::Upper;
-        }
-        if self.lower_exists(path) {
-            return LayerResult::Lower;
-        }
-        LayerResult::NotFound
-    }
-
-    // ------------------------------------------------------------------
-    // Lower-layer reading helpers (3j)
+    // Lower-layer reading helpers
     // ------------------------------------------------------------------
 
     /// Map a VFS absolute path to the corresponding real path under `lower`.
@@ -441,8 +333,6 @@ impl OverlayFs {
             let node_type = if ft.is_dir() {
                 NodeType::Directory
             } else if ft.is_symlink() {
-                // Requires a symlink in the lower directory — covered by the
-                // skip-gated lower_symlink test (see symlink_matches_disk).
                 NodeType::Symlink
             } else {
                 NodeType::File
@@ -468,15 +358,107 @@ impl OverlayFs {
     }
 
     // ------------------------------------------------------------------
-    // Copy-up helpers (3c)
+    // Tree mutation helpers
     // ------------------------------------------------------------------
 
-    /// Ensure a file is present in the upper layer. If it only exists in the
-    /// lower layer, copy its content and metadata up.
+    /// Closures for the tree's resurrection machinery.
+    fn lower_entries_of(&self, dir: &Path) -> Option<Vec<String>> {
+        self.readdir_lower(dir)
+            .ok()
+            .map(|es| es.into_iter().map(|e| e.name).collect())
+    }
+
+    fn lower_mode_of(&self, path: &Path) -> Option<u32> {
+        self.stat_lower(path).ok().map(|m| m.mode)
+    }
+
+    /// Ensure all components of `path` exist as directories in the upper
+    /// tree, resurrecting whiteouts (deleted lower children stay hidden).
+    ///
+    /// Upper symlinks in the existing prefix are followed first: with
+    /// `mkdir /real; ln -s /real /l`, writing `/l/f` must create `/real/f`
+    /// (POSIX). Whiteout components stop the following (they are left for
+    /// ensure_dirs to resurrect).
+    fn ensure_upper_dir_path(&self, path: &Path) -> Result<(), VfsError> {
+        let norm = normalize(path)?;
+        let norm = self.follow_upper_symlink_prefix(&norm)?;
+        self.tree
+            .write()
+            .ensure_dirs(&norm, &|d| self.lower_entries_of(d), &|p| {
+                self.lower_mode_of(p)
+            })
+    }
+
+    /// Follow upper-layer symlinks in the existing prefix of `path`.
+    /// Components that are missing or whiteouted are passed through
+    /// literally (nothing to follow).
+    fn follow_upper_symlink_prefix(&self, path: &Path) -> Result<PathBuf, VfsError> {
+        let parts: Vec<String> = path_components(path)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let mut resolved: Vec<String> = Vec::new();
+        let mut hops = 0u32;
+        let mut i = 0;
+        while i < parts.len() {
+            let candidate = format!(
+                "/{}",
+                resolved
+                    .iter()
+                    .chain(std::iter::once(&parts[i]))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("/")
+            );
+            let target = {
+                let tree = self.tree.read();
+                match tree.descend(Path::new(&candidate)) {
+                    Descend::Found(UpperNode::Symlink { target, .. }) => Some(target.clone()),
+                    _ => None,
+                }
+            };
+            match target {
+                Some(target) => {
+                    hops += 1;
+                    if hops > MAX_SYMLINK_DEPTH {
+                        return Err(VfsError::SymlinkLoop(path.to_path_buf()));
+                    }
+                    let target_segs: Vec<String> = path_components(&target)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect();
+                    if super::vfs_path_is_absolute(&target) {
+                        resolved = target_segs;
+                    } else {
+                        resolved.extend(target_segs);
+                    }
+                    i += 1;
+                }
+                None => {
+                    resolved.push(parts[i].clone());
+                    i += 1;
+                }
+            }
+        }
+        Ok(PathBuf::from(format!("/{}", resolved.join("/"))))
+    }
+
+    /// Create a file node at `path` (replacing file/symlink/whiteout).
+    /// Parents must already exist (call `ensure_upper_dir_path` first).
+    fn attach_file(&self, path: &Path, content: Vec<u8>, mode: u32) -> Result<(), VfsError> {
+        self.tree.write().attach(
+            path,
+            UpperNode::File {
+                content,
+                mode,
+                mtime: SystemTime::now(),
+            },
+        )
+    }
+
+    /// Ensure a file is present in the upper tree, copying content and
+    /// metadata up from the lower layer if needed.
     fn copy_up_if_needed(&self, path: &Path) -> Result<(), VfsError> {
-        // Unreachable early-return: every caller (append_file, chmod, utimes)
-        // only calls us when resolve_layer returned Lower, which requires the
-        // path to be absent from the upper layer.
         if self.upper_has_entry(path) {
             return Ok(());
         }
@@ -484,7 +466,6 @@ impl OverlayFs {
             !self.is_whiteout(path),
             "copy_up_if_needed called on whiteout-ed path"
         );
-        // Ensure the parent directory exists in upper
         if let Some(parent) = path.parent()
             && parent != Path::new("/")
         {
@@ -492,51 +473,32 @@ impl OverlayFs {
         }
         let content = self.read_lower_file(path)?;
         let meta = self.stat_lower(path)?;
-        self.upper.write_file(path, &content)?;
-        self.upper.chmod(path, meta.mode)?;
-        self.upper.utimes(path, meta.mtime)?;
-        Ok(())
-    }
-
-    /// Ensure all components of `path` exist as directories in the upper layer,
-    /// creating them if they only exist in the lower layer. Also clears any
-    /// whiteouts on each component so previously-deleted paths become visible
-    /// again.
-    fn ensure_upper_dir_path(&self, path: &Path) -> Result<(), VfsError> {
-        let norm = normalize(path)?;
-        let parts = path_components(&norm);
-        let mut built = PathBuf::from("/");
-        for name in parts {
-            built = super::vfs_join(&built, name);
-            let resurrected = self.whiteouts.write().remove(&built);
-            if self.upper_has_entry(&built) {
-                continue;
-            }
-            // Try to pick up metadata from lower; fallback to defaults
-            let mode = if let Ok(m) = self.stat_lower(&built) {
-                m.mode
-            } else {
-                0o755
-            };
-            self.upper.mkdir_p(&built)?;
-            self.upper.chmod(&built, mode)?;
-            if resurrected {
-                self.populate_resurrection_whiteouts(&built);
-            }
-        }
+        self.attach_file(path, content, meta.mode)?;
+        self.tree.write().set_mtime(path, meta.mtime)?;
         Ok(())
     }
 
     // ------------------------------------------------------------------
-    // Merged readdir helper (3e)
+    // Merged readdir helper
     // ------------------------------------------------------------------
 
-    /// Merge directory listings from upper and lower, excluding whiteouts.
+    /// Merge directory listings from upper and lower, hiding whiteouts.
+    /// The path is resolved first: a directory reached THROUGH an upper
+    /// symlink has its content at the target (glob walks hand us
+    /// unresolved child paths of symlinked dirs).
     fn readdir_merged(&self, path: &Path) -> Result<Vec<DirEntry>, VfsError> {
+        let resolved;
+        let path = match self.resolve_path(path, true) {
+            Ok(r) => {
+                resolved = r;
+                &resolved
+            }
+            Err(_) => path,
+        };
         let mut entries: std::collections::BTreeMap<String, DirEntry> =
             std::collections::BTreeMap::new();
 
-        // Lower entries first
+        // Lower entries first, minus children hidden by whiteout nodes.
         if self.lower_exists(path)
             && let Ok(lower_entries) = self.readdir_lower(path)
         {
@@ -548,11 +510,15 @@ impl OverlayFs {
             }
         }
 
-        // Upper entries override lower entries (dedup by name)
-        if self.upper_has_entry(path)
-            && let Ok(upper_entries) = self.upper.readdir(path)
-        {
+        // Upper content children override lower entries (dedup by name).
+        if let Some(upper_entries) = self.tree.read().dir_entries(path) {
             for e in upper_entries {
+                let child_path = super::vfs_join(path, &e.name);
+                if self.is_whiteout(&child_path) {
+                    // Whiteout child: shadows any lower entry of the name.
+                    entries.remove(&e.name);
+                    continue;
+                }
                 entries.insert(e.name.clone(), e);
             }
         }
@@ -561,7 +527,7 @@ impl OverlayFs {
     }
 
     // ------------------------------------------------------------------
-    // Canonicalize helper (3g)
+    // Canonicalize helper
     // ------------------------------------------------------------------
 
     /// Step-by-step path resolution through both layers with symlink following.
@@ -587,43 +553,41 @@ impl OverlayFs {
             let is_last = i == parts.len() - 1;
             let candidate = super::vfs_join(&resolved, name);
 
-            if self.is_whiteout(&candidate) {
-                return Err(VfsError::NotFound(path.to_path_buf()));
+            // Tree descent for this component: whiteout (at/above) hides;
+            // an upper component of ANY type shadows the lower entry
+            // entirely (no lower lstat when the upper has an entry — one
+            // disk syscall per component saved, and a shadowed lower symlink
+            // is never followed).
+            // Decide under a scoped read guard, act after it drops: no lock
+            // is held across recursion or disk I/O (parking_lot read locks
+            // are not recursion-safe with a queued writer).
+            enum Step {
+                Hidden,
+                NotDir,
+                FollowUpper(PathBuf),
+                Plain,
+                CheckLower,
             }
-
-            // Check if this component is a symlink. A component present in
-            // the upper layer — whatever its type — shadows the lower entry
-            // entirely, so the lower layer is only consulted when the upper
-            // has no entry at all. Skipping the lower lstat otherwise is
-            // both the fast path (one disk syscall per path component) and
-            // the correct overlay semantics: an upper non-symlink must not
-            // fall through to a shadowed lower symlink.
-            let upper_meta = self.upper.lstat(&candidate).ok();
-            let is_symlink_in_upper = upper_meta
-                .as_ref()
-                .is_some_and(|m| m.node_type == NodeType::Symlink);
-            let is_symlink_in_lower = upper_meta.is_none()
-                && self
-                    .lstat_lower(&candidate)
-                    .is_ok_and(|m| m.node_type == NodeType::Symlink);
-
-            if is_symlink_in_upper || is_symlink_in_lower {
-                // Unreachable: resolve_path is only ever invoked with
-                // follow_final = true (all call sites), so the final symlink
-                // is always followed.
-                if is_last && !follow_final {
-                    resolved = candidate;
-                } else {
-                    // Read the symlink target
-                    let target = if is_symlink_in_upper {
-                        self.upper.readlink(&candidate)?
-                    } else {
-                        // Requires a symlink in the lower directory — covered
-                        // by the skip-gated lower_symlink test (see
-                        // symlink_matches_disk).
-                        self.readlink_lower(&candidate)?
-                    };
-                    // Resolve target (absolute or relative to parent)
+            let step = {
+                let tree = self.tree.read();
+                match tree.descend(&candidate) {
+                    Descend::Found(UpperNode::Whiteout) | Descend::Blocked => Step::Hidden,
+                    Descend::NotDir => Step::NotDir,
+                    Descend::Found(UpperNode::Symlink { target, .. }) => {
+                        Step::FollowUpper(target.clone())
+                    }
+                    Descend::Found(_) => Step::Plain,
+                    Descend::Missing => Step::CheckLower,
+                }
+            };
+            match step {
+                Step::Hidden => return Err(VfsError::NotFound(path.to_path_buf())),
+                Step::NotDir => return Err(VfsError::NotADirectory(path.to_path_buf())),
+                Step::FollowUpper(target) => {
+                    if is_last && !follow_final {
+                        resolved = candidate;
+                        continue;
+                    }
                     let abs_target = if super::vfs_path_is_absolute(&target) {
                         target
                     } else {
@@ -631,15 +595,37 @@ impl OverlayFs {
                     };
                     resolved = self.resolve_path_depth(&abs_target, true, depth - 1)?;
                 }
-            } else {
-                resolved = candidate;
+                Step::Plain => {
+                    resolved = candidate;
+                }
+                Step::CheckLower => {
+                    // Lower fall-through: follow lower symlinks.
+                    let is_lower_symlink = self
+                        .lstat_lower(&candidate)
+                        .is_ok_and(|m| m.node_type == NodeType::Symlink);
+                    if is_lower_symlink {
+                        if is_last && !follow_final {
+                            resolved = candidate;
+                            continue;
+                        }
+                        let target = self.readlink_lower(&candidate)?;
+                        let abs_target = if super::vfs_path_is_absolute(&target) {
+                            target
+                        } else {
+                            super::vfs_append(&resolved, &target)
+                        };
+                        resolved = self.resolve_path_depth(&abs_target, true, depth - 1)?;
+                    } else {
+                        resolved = candidate;
+                    }
+                }
             }
         }
         Ok(resolved)
     }
 
     // ------------------------------------------------------------------
-    // Glob helpers (3h)
+    // Glob helpers
     // ------------------------------------------------------------------
 
     /// Walk directories in both layers for glob matching.
@@ -686,8 +672,6 @@ impl OverlayFs {
                     }
                 }
             }
-        // readdir_merged never fails: it tolerates errors from both layer
-        // reads and always returns Ok, so this branch always matches.
         } else if let Ok(entries) = self.readdir_merged(dir) {
             for entry in entries {
                 // Defensive backstop, see the max-cap comment above.
@@ -722,10 +706,19 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
-            // Unreachable: resolve_path rejects whiteout-ed paths (see
-            // resolve_layer).
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
-            LayerResult::Upper => self.upper.read_file(&resolved),
+            LayerResult::Upper => {
+                let tree = self.tree.read();
+                match tree.descend(&resolved) {
+                    Descend::Found(UpperNode::File { content, .. }) => Ok(content.clone()),
+                    Descend::Found(UpperNode::Dir { .. }) => {
+                        Err(VfsError::IsADirectory(path.to_path_buf()))
+                    }
+                    // Unreachable: resolve_layer(Upper) implies a content
+                    // node; symlinks were followed by resolve_path.
+                    _ => Err(VfsError::NotFound(path.to_path_buf())),
+                }
+            }
             LayerResult::Lower => self.read_lower_file(&resolved),
             LayerResult::NotFound => Err(VfsError::NotFound(path.to_path_buf())),
         }
@@ -734,59 +727,70 @@ impl VirtualFs for OverlayFs {
     fn write_file(&self, path: &Path, content: &[u8]) -> Result<(), VfsError> {
         let norm = normalize(path)?;
         // POSIX open(O_CREAT) semantics: a write through a DANGLING symlink
-        // creates the link's target (link preserved). See InMemoryFs.
+        // creates the link's target (link preserved).
         let norm = super::resolve_through_dangling(self, &norm)?;
-        // Ensure parent directories exist in upper
+        // Follow a live final symlink to its target (guard scoped: the
+        // follow re-acquires locks).
+        let norm = {
+            let is_link = matches!(
+                self.tree.read().descend(&norm),
+                Descend::Found(UpperNode::Symlink { .. })
+            );
+            if is_link {
+                self.resolve_path(&norm, true)?
+            } else {
+                norm
+            }
+        };
+        // Writing onto an existing directory is EISDIR (POSIX); only a
+        // whiteouted (deleted-from-view) path may be recreated as a file.
+        {
+            let tree = self.tree.read();
+            match tree.descend(&norm) {
+                Descend::Found(UpperNode::Dir { .. }) => {
+                    return Err(VfsError::IsADirectory(path.to_path_buf()));
+                }
+                Descend::Missing
+                    if self
+                        .lstat_lower(&norm)
+                        .is_ok_and(|m| m.node_type == NodeType::Directory) =>
+                {
+                    return Err(VfsError::IsADirectory(path.to_path_buf()));
+                }
+                _ => {}
+            }
+        }
         if let Some(parent) = norm.parent()
             && parent != Path::new("/")
         {
             self.ensure_upper_dir_path(parent)?;
         }
-        // Writing onto an existing directory is EISDIR (POSIX); only a
-        // whiteouted (deleted-from-view) path may be recreated as a file.
-        let own_whiteout = self.whiteouts.read().contains(&norm);
-        if !own_whiteout {
-            let upper_dir = self
-                .upper
-                .lstat(&norm)
-                .is_ok_and(|m| m.node_type == NodeType::Directory);
-            let lower_dir = !self.upper_has_entry(&norm)
-                && self
-                    .lstat_lower(&norm)
-                    .is_ok_and(|m| m.node_type == NodeType::Directory);
-            if upper_dir || lower_dir {
-                return Err(VfsError::IsADirectory(path.to_path_buf()));
-            }
-        }
-        // Remove whiteout if any (we're creating/overwriting the file); a
-        // resurrected lower directory's children stay hidden.
-        if self.whiteouts.write().remove(&norm) {
-            self.populate_resurrection_whiteouts(&norm);
-        }
-        self.upper.write_file(&norm, content)
+        // attach replaces a whiteout atomically; a resurrected lower
+        // directory's children stay hidden (the whiteout was a leaf, so its
+        // children are unreachable — NotDir on descent).
+        // Mode: POSIX O_TRUNC keeps an existing file's mode; new files get
+        // the default.
+        let mode = self
+            .tree
+            .read()
+            .meta(&norm)
+            .map(|m| m.mode)
+            .unwrap_or(0o644);
+        self.attach_file(&norm, content.to_vec(), mode)
     }
 
     fn append_file(&self, path: &Path, content: &[u8]) -> Result<(), VfsError> {
         let norm = normalize(path)?;
         // POSIX O_APPEND|O_CREAT over a deleted-from-view file: recreate it
-        // FRESH — the whiteouted lower content must not be copied up. The
-        // whiteout is removed only after the parent setup succeeds, so a
-        // failed append never erases a pending deletion.
-        if self.whiteouts.read().contains(&norm) {
+        // FRESH (the whiteouted lower content must not be copied up). The
+        // tree makes this atomic: attach replaces the whiteout leaf.
+        if self.is_whiteout(&norm) {
             if let Some(parent) = norm.parent()
                 && parent != Path::new("/")
             {
                 self.ensure_upper_dir_path(parent)?;
             }
-            // Write FIRST: the whiteout only affects layer resolution, not
-            // the upper write itself — removing it after the successful
-            // write means a failed append never erases a pending deletion.
-            self.upper.write_file(&norm, content)?;
-            self.whiteouts.write().remove(&norm);
-            // If the recreated path shadows a deleted lower directory, its
-            // children stay hidden (populate skips the new upper entry).
-            self.populate_resurrection_whiteouts(&norm);
-            return Ok(());
+            return self.attach_file(&norm, content.to_vec(), 0o644);
         }
         let resolved = match self.resolve_path(&norm, true) {
             Ok(resolved) => resolved,
@@ -796,10 +800,10 @@ impl VirtualFs for OverlayFs {
         };
         match self.resolve_layer(&resolved) {
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
-            LayerResult::Upper => self.upper.append_file(&resolved, content),
+            LayerResult::Upper => self.tree.write().append_file(&resolved, content),
             LayerResult::Lower => {
                 self.copy_up_if_needed(&resolved)?;
-                self.upper.append_file(&resolved, content)
+                self.tree.write().append_file(&resolved, content)
             }
             LayerResult::NotFound => {
                 if let Some(parent) = resolved.parent()
@@ -807,7 +811,7 @@ impl VirtualFs for OverlayFs {
                 {
                     self.ensure_upper_dir_path(parent)?;
                 }
-                self.upper.write_file(&resolved, content)
+                self.attach_file(&resolved, content.to_vec(), 0o644)
             }
         }
     }
@@ -817,64 +821,66 @@ impl VirtualFs for OverlayFs {
         if self.is_whiteout(&norm) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
-        let in_upper = self.upper_has_entry(&norm);
-        let in_lower = self.lower_exists(&norm);
-        if !in_upper && !in_lower {
-            return Err(VfsError::NotFound(path.to_path_buf()));
+        // Probe first (the read guard must drop before any write lock).
+        enum Probe {
+            Dir,
+            UpperContent,
+            NoUpper,
         }
-        // Verify it's not a directory
-        if in_upper {
-            if let Ok(m) = self.upper.lstat(&norm)
-                && m.node_type == NodeType::Directory
-            {
-                return Err(VfsError::IsADirectory(path.to_path_buf()));
+        let probe = {
+            let tree = self.tree.read();
+            match tree.descend(&norm) {
+                Descend::Found(UpperNode::Dir { .. }) => Probe::Dir,
+                Descend::Found(_) => Probe::UpperContent,
+                _ => Probe::NoUpper,
             }
-        } else if let Ok(m) = self.lstat_lower(&norm)
-            && m.node_type == NodeType::Directory
-        {
-            return Err(VfsError::IsADirectory(path.to_path_buf()));
+        };
+        match probe {
+            Probe::Dir => Err(VfsError::IsADirectory(path.to_path_buf())),
+            Probe::UpperContent => {
+                // Upper content: whiteout if the lower also has the path
+                // (something to hide), otherwise plain detach.
+                if self.lower_exists(&norm) {
+                    self.tree
+                        .write()
+                        .put_whiteout(&norm, &|p| self.lower_mode_of(p));
+                } else {
+                    self.tree.write().detach(&norm);
+                }
+                Ok(())
+            }
+            Probe::NoUpper => {
+                // No upper entry: check the lower layer.
+                match self.lstat_lower(&norm) {
+                    Ok(m) if m.node_type == NodeType::Directory => {
+                        Err(VfsError::IsADirectory(path.to_path_buf()))
+                    }
+                    Ok(_) => {
+                        self.tree
+                            .write()
+                            .put_whiteout(&norm, &|p| self.lower_mode_of(p));
+                        Ok(())
+                    }
+                    Err(_) => Err(VfsError::NotFound(path.to_path_buf())),
+                }
+            }
         }
-        if in_upper {
-            self.upper.remove_file(&norm)?;
-        }
-        self.add_whiteout(&norm);
-        Ok(())
     }
 
     fn mkdir(&self, path: &Path) -> Result<(), VfsError> {
         let norm = normalize(path)?;
-        let was_whiteout = self.is_whiteout(&norm);
-        // Remove exactly this path's whiteout (an ancestor's whiteout is
-        // resurrected by ensure_upper_dir_path below).
-        let mut resurrected = self.whiteouts.write().remove(&norm);
-        if !was_whiteout {
-            // Check if it already exists in either layer
+        // bash mkdir (no -p) fails if the entry exists in either layer —
+        // unless it is whiteouted (deleted-from-view), which resurrects.
+        if !self.is_whiteout(&norm) {
             let in_upper = self.upper_has_entry(&norm);
             let in_lower = self.lower_exists(&norm);
             if in_upper || in_lower {
                 return Err(VfsError::AlreadyExists(path.to_path_buf()));
             }
         }
-        // Ensure parents exist in upper
-        if let Some(parent) = norm.parent()
-            && parent != Path::new("/")
-        {
-            self.ensure_upper_dir_path(parent)?;
-        }
-        // Parent resurrection re-whiteouted this path (it was a deleted
-        // lower child): creating the directory resurrects it in turn.
-        // Without this the fresh whiteout and the new upper entry would
-        // coexist (a whiteout must never share a path with an upper entry).
-        resurrected |= self.whiteouts.write().remove(&norm);
-        // Check if it now exists in upper (ensure_upper_dir_path might have created it)
-        if self.upper_has_entry(&norm) {
-            return Err(VfsError::AlreadyExists(path.to_path_buf()));
-        }
-        self.upper.mkdir(&norm)?;
-        if resurrected {
-            self.populate_resurrection_whiteouts(&norm);
-        }
-        Ok(())
+        // ensure_dirs resurrects whiteouts per component, re-hiding deleted
+        // lower children; a mid-path file yields NotADirectory.
+        self.ensure_upper_dir_path(&norm)
     }
 
     fn mkdir_p(&self, path: &Path) -> Result<(), VfsError> {
@@ -888,25 +894,25 @@ impl VirtualFs for OverlayFs {
         for name in parts {
             built = super::vfs_join(&built, name);
 
-            // Skip if the whiteout was for this exact path but we want to recreate
             if self.is_whiteout(&built) {
-                self.remove_whiteout(&built);
-                // Need to create this component in upper
-                self.ensure_single_dir_in_upper(&built)?;
-                self.populate_resurrection_whiteouts(&built);
+                // Resurrect (re-hides deleted lower children).
+                self.tree
+                    .write()
+                    .ensure_dirs(&built, &|d| self.lower_entries_of(d), &|p| {
+                        self.lower_mode_of(p)
+                    })?;
                 continue;
             }
 
             // If it exists in upper, verify it's a directory
-            if self.upper_has_entry(&built) {
-                let m = self.upper.lstat(&built)?;
-                if m.node_type != NodeType::Directory {
+            if let Some(meta) = self.tree.read().meta(&built) {
+                if meta.node_type != NodeType::Directory {
                     return Err(VfsError::NotADirectory(path.to_path_buf()));
                 }
                 continue;
             }
 
-            // If it exists in lower, verify it's a directory — no need to copy up
+            // If it exists in lower, verify it's a directory — no copy-up needed
             if self.lower_exists(&built) {
                 let m = self.lstat_lower(&built)?;
                 if m.node_type != NodeType::Directory {
@@ -916,7 +922,11 @@ impl VirtualFs for OverlayFs {
             }
 
             // Doesn't exist anywhere — create in upper
-            self.ensure_single_dir_in_upper(&built)?;
+            self.tree
+                .write()
+                .ensure_dirs(&built, &|d| self.lower_entries_of(d), &|p| {
+                    self.lower_mode_of(p)
+                })?;
         }
         Ok(())
     }
@@ -930,14 +940,11 @@ impl VirtualFs for OverlayFs {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
 
-        let in_upper = self.upper_has_entry(&resolved);
-        let in_lower = self.lower_exists(&resolved);
-
-        if !in_upper && !in_lower {
+        if !self.upper_has_entry(&resolved) && !self.lower_exists(&resolved) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
 
-        // Validate directory through overlay (handles symlinks across layers)
+        // Validate directory through the merged view
         let m = self.stat(&resolved)?;
         if m.node_type != NodeType::Directory {
             return Err(VfsError::NotADirectory(path.to_path_buf()));
@@ -948,6 +955,11 @@ impl VirtualFs for OverlayFs {
 
     fn remove_dir(&self, path: &Path) -> Result<(), VfsError> {
         let norm = normalize(path)?;
+        if norm == Path::new("/") {
+            // POSIX rmdir("/") fails EBUSY; a whiteouted root is not
+            // representable in the tree (the root is not a node).
+            return Err(VfsError::InvalidPath("cannot remove root".into()));
+        }
         if self.is_whiteout(&norm) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
@@ -964,16 +976,21 @@ impl VirtualFs for OverlayFs {
             return Err(VfsError::DirectoryNotEmpty(path.to_path_buf()));
         }
 
-        // Remove from upper if present
-        if self.upper_has_entry(&norm) {
-            self.upper.remove_dir(&norm).ok();
+        if self.lower_exists(&norm) {
+            self.tree
+                .write()
+                .put_whiteout(&norm, &|p| self.lower_mode_of(p));
+        } else {
+            self.tree.write().detach(&norm);
         }
-        self.add_whiteout(&norm);
         Ok(())
     }
 
     fn remove_dir_all(&self, path: &Path) -> Result<(), VfsError> {
         let norm = normalize(path)?;
+        if norm == Path::new("/") {
+            return Err(VfsError::InvalidPath("cannot remove root".into()));
+        }
         if self.is_whiteout(&norm) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
@@ -984,18 +1001,11 @@ impl VirtualFs for OverlayFs {
             return Err(VfsError::NotADirectory(path.to_path_buf()));
         }
 
-        // Remove the directory subtree from upper if present
-        if self.upper_has_entry(&norm) {
-            self.upper.remove_dir_all(&norm).ok();
-        }
-
-        // A single top-most whiteout hides the whole lower subtree through
-        // the ancestor walk in is_whiteout — no per-descendant walk (which
-        // cost one lower readdir per directory). Resurrecting the directory
-        // re-hides the lower children lazily (populate_resurrection_whiteouts).
-        let mut whiteouts = self.whiteouts.write();
-        whiteouts.retain(|w| !w.starts_with(&norm));
-        whiteouts.insert(norm);
+        // One whiteout leaf hides the whole subtree (tree invariant:
+        // whiteouts never nest — put_whiteout replaces the subtree).
+        self.tree
+            .write()
+            .put_whiteout(&norm, &|p| self.lower_mode_of(p));
         Ok(())
     }
 
@@ -1013,33 +1023,19 @@ impl VirtualFs for OverlayFs {
         if self.is_whiteout(&norm) {
             return false;
         }
-        // Check if entry exists in either layer without following symlinks first
-        if !self.upper_has_entry(&norm) && !self.lower_exists(&norm) {
-            return false;
-        }
-        // If it's a symlink, verify the target exists through the overlay
-        let meta = match self.lstat_overlay(&norm, &norm) {
-            Ok(m) => m,
-            // Unreachable by construction (barring OS races on the lower
-            // directory): the checks above established the entry exists in
-            // upper (whose lstat cannot then fail) or in lower (whose
-            // symlink_metadata just succeeded).
-            Err(_) => return false,
-        };
-        if meta.node_type == NodeType::Symlink {
-            return self.stat(&norm).is_ok();
-        }
-        true
+        self.upper_has_entry(&norm) || self.lower_exists(&norm)
     }
 
     fn stat(&self, path: &Path) -> Result<Metadata, VfsError> {
         let norm = normalize(path)?;
-        // Try to resolve symlinks
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
-            // Unreachable: resolve_path rejects whiteout-ed paths.
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
-            LayerResult::Upper => self.upper.stat(&resolved),
+            LayerResult::Upper => self
+                .tree
+                .read()
+                .meta(&resolved)
+                .ok_or_else(|| VfsError::NotFound(path.to_path_buf())),
             LayerResult::Lower => self.stat_lower(&resolved),
             LayerResult::NotFound => Err(VfsError::NotFound(path.to_path_buf())),
         }
@@ -1054,24 +1050,21 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
-            // Unreachable: resolve_path rejects whiteout-ed paths.
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
-            LayerResult::Upper => self.upper.chmod(&resolved, mode),
+            LayerResult::Upper => self.tree.write().set_mode(&resolved, mode),
             LayerResult::Lower => {
-                // Need to copy up the file/dir to apply chmod
                 let meta = self.lstat_lower(&resolved)?;
                 match meta.node_type {
                     NodeType::File => {
                         self.copy_up_if_needed(&resolved)?;
-                        self.upper.chmod(&resolved, mode)
+                        self.tree.write().set_mode(&resolved, mode)
                     }
                     NodeType::Directory => {
                         self.ensure_upper_dir_path(&resolved)?;
-                        self.upper.chmod(&resolved, mode)
+                        self.tree.write().set_mode(&resolved, mode)
                     }
                     // Unreachable: resolve_path(follow_final = true) above
-                    // already followed every symlink, so `resolved` is never
-                    // a symlink in either layer.
+                    // already followed every symlink.
                     NodeType::Symlink => {
                         Err(VfsError::IoError("cannot chmod a symlink directly".into()))
                     }
@@ -1085,23 +1078,19 @@ impl VirtualFs for OverlayFs {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
         match self.resolve_layer(&resolved) {
-            // Unreachable: resolve_path rejects whiteout-ed paths.
             LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
-            LayerResult::Upper => self.upper.utimes(&resolved, mtime),
+            LayerResult::Upper => self.tree.write().set_mtime(&resolved, mtime),
             LayerResult::Lower => {
                 let meta = self.lstat_lower(&resolved)?;
                 match meta.node_type {
                     NodeType::File => {
                         self.copy_up_if_needed(&resolved)?;
-                        self.upper.utimes(&resolved, mtime)
+                        self.tree.write().set_mtime(&resolved, mtime)
                     }
                     NodeType::Directory => {
                         self.ensure_upper_dir_path(&resolved)?;
-                        self.upper.utimes(&resolved, mtime)
+                        self.tree.write().set_mtime(&resolved, mtime)
                     }
-                    // Unreachable: resolve_path(follow_final = true) above
-                    // already followed every symlink, so `resolved` is never
-                    // a symlink in either layer.
                     NodeType::Symlink => {
                         Err(VfsError::IoError("cannot utimes a symlink directly".into()))
                     }
@@ -1113,56 +1102,72 @@ impl VirtualFs for OverlayFs {
 
     fn symlink(&self, target: &Path, link: &Path) -> Result<(), VfsError> {
         let norm_link = normalize(link)?;
-        // Ensure parent in upper
+        // POSIX: the link must not exist in EITHER layer (a whiteouted
+        // entry may be recreated).
+        if !self.is_whiteout(&norm_link)
+            && (self.upper_has_entry(&norm_link) || self.lower_exists(&norm_link))
+        {
+            return Err(VfsError::AlreadyExists(link.to_path_buf()));
+        }
         if let Some(parent) = norm_link.parent()
             && parent != Path::new("/")
         {
             self.ensure_upper_dir_path(parent)?;
         }
-        // If there's a whiteout, remove it to allow re-creation
-        self.remove_whiteout(&norm_link);
-        self.upper.symlink(target, &norm_link)
+        self.tree.write().attach(
+            &norm_link,
+            UpperNode::Symlink {
+                target: target.to_path_buf(),
+                mtime: SystemTime::now(),
+            },
+        )
     }
 
     fn hardlink(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
         let norm_src = normalize(src)?;
         let norm_dst = normalize(dst)?;
-        // Read source from whichever layer has it
+        // POSIX: dst must not exist in either layer.
+        if !self.is_whiteout(&norm_dst)
+            && (self.upper_has_entry(&norm_dst) || self.lower_exists(&norm_dst))
+        {
+            return Err(VfsError::AlreadyExists(dst.to_path_buf()));
+        }
+        // Read source from whichever layer has it (content copy — see the
+        // hardlink divergence note in the guidebook registry).
         let content = self.read_file(&norm_src)?;
         let meta = self.stat(&norm_src)?;
-        // Ensure parent for dst in upper
         if let Some(parent) = norm_dst.parent()
             && parent != Path::new("/")
         {
             self.ensure_upper_dir_path(parent)?;
         }
-        self.remove_whiteout(&norm_dst);
-        self.upper.write_file(&norm_dst, &content)?;
-        self.upper.chmod(&norm_dst, meta.mode)?;
-        self.upper.utimes(&norm_dst, meta.mtime)?;
+        self.attach_file(&norm_dst, content, meta.mode)?;
+        self.tree.write().set_mtime(&norm_dst, meta.mtime)?;
         Ok(())
     }
 
     fn readlink(&self, path: &Path) -> Result<PathBuf, VfsError> {
         let norm = normalize(path)?;
-        if self.is_whiteout(&norm) {
-            return Err(VfsError::NotFound(path.to_path_buf()));
+        match self.tree.read().descend(&norm) {
+            Descend::Found(UpperNode::Symlink { target, .. }) => Ok(target.clone()),
+            Descend::Found(UpperNode::Whiteout) | Descend::Blocked => {
+                Err(VfsError::NotFound(path.to_path_buf()))
+            }
+            // Upper non-symlink: EINVAL-ish (no EINVAL variant; InvalidPath).
+            Descend::Found(_) => Err(VfsError::InvalidPath(path.to_string_lossy().into_owned())),
+            _ => {
+                if self.lower_exists(&norm) {
+                    self.readlink_lower(&norm)
+                } else {
+                    Err(VfsError::NotFound(path.to_path_buf()))
+                }
+            }
         }
-        if self.upper_has_entry(&norm) {
-            return self.upper.readlink(&norm);
-        }
-        if self.lower_exists(&norm) {
-            return self.readlink_lower(&norm);
-        }
-        Err(VfsError::NotFound(path.to_path_buf()))
     }
 
     fn canonicalize(&self, path: &Path) -> Result<PathBuf, VfsError> {
         let norm = normalize(path)?;
         let resolved = self.resolve_path(&norm, true)?;
-        // Make sure the resolved path actually exists
-        // Unreachable: resolve_path rejects whiteout-ed components (ancestors
-        // included) with NotFound before returning.
         if self.is_whiteout(&resolved) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
@@ -1175,10 +1180,8 @@ impl VirtualFs for OverlayFs {
     fn copy(&self, src: &Path, dst: &Path) -> Result<(), VfsError> {
         let norm_src = normalize(src)?;
         let norm_dst = normalize(dst)?;
-        // Read from resolved layer
         let content = self.read_file(&norm_src)?;
         let meta = self.stat(&norm_src)?;
-        // Write to upper
         self.write_file(&norm_dst, &content)?;
         self.chmod(&norm_dst, meta.mode)?;
         Ok(())
@@ -1188,33 +1191,31 @@ impl VirtualFs for OverlayFs {
         let norm_src = normalize(src)?;
         let norm_dst = normalize(dst)?;
 
+        if norm_src == norm_dst {
+            // POSIX rename(2) onto itself is a no-op success.
+            return Ok(());
+        }
         if self.is_whiteout(&norm_src) {
             return Err(VfsError::NotFound(src.to_path_buf()));
         }
 
-        // Copy-up src if only in lower
         let in_upper = self.upper_has_entry(&norm_src);
         let in_lower = self.lower_exists(&norm_src);
         if !in_upper && !in_lower {
             return Err(VfsError::NotFound(src.to_path_buf()));
         }
 
-        // Read content and metadata
         let meta = self.lstat_overlay(&norm_src, src)?;
         match meta.node_type {
             NodeType::File => {
                 let content = self.read_file(&norm_src)?;
-                // Ensure dst parent exists in upper
                 if let Some(parent) = norm_dst.parent()
                     && parent != Path::new("/")
                 {
                     self.ensure_upper_dir_path(parent)?;
                 }
-                if self.whiteouts.write().remove(&norm_dst) {
-                    self.populate_resurrection_whiteouts(&norm_dst);
-                }
-                self.upper.write_file(&norm_dst, &content)?;
-                self.upper.chmod(&norm_dst, meta.mode)?;
+                self.attach_file(&norm_dst, content, meta.mode)?;
+                self.tree.write().set_mtime(&norm_dst, meta.mtime)?;
             }
             NodeType::Symlink => {
                 let target = self.readlink(&norm_src)?;
@@ -1223,22 +1224,22 @@ impl VirtualFs for OverlayFs {
                 {
                     self.ensure_upper_dir_path(parent)?;
                 }
-                if self.whiteouts.write().remove(&norm_dst) {
-                    self.populate_resurrection_whiteouts(&norm_dst);
-                }
-                self.upper.symlink(&target, &norm_dst)?;
+                self.tree.write().attach(
+                    &norm_dst,
+                    UpperNode::Symlink {
+                        target,
+                        mtime: meta.mtime,
+                    },
+                )?;
             }
             NodeType::Directory => {
-                // For directory rename, copy all children recursively
-                if let Some(parent) = norm_dst.parent()
-                    && parent != Path::new("/")
-                {
-                    self.ensure_upper_dir_path(parent)?;
-                }
-                if self.whiteouts.write().remove(&norm_dst) {
-                    self.populate_resurrection_whiteouts(&norm_dst);
-                }
-                self.upper.mkdir_p(&norm_dst)?;
+                // ensure_dirs resurrects a whiteouted dst (re-hiding deleted
+                // lower children); recursive copies land inside it.
+                self.tree
+                    .write()
+                    .ensure_dirs(&norm_dst, &|d| self.lower_entries_of(d), &|p| {
+                        self.lower_mode_of(p)
+                    })?;
                 let entries = self.readdir_merged(&norm_src)?;
                 for entry in entries {
                     let child_src = super::vfs_join(&norm_src, &entry.name);
@@ -1248,23 +1249,12 @@ impl VirtualFs for OverlayFs {
             }
         }
 
-        // Remove from upper if it was there
-        if in_upper {
-            match meta.node_type {
-                NodeType::Directory => {
-                    self.upper.remove_dir_all(&norm_src).ok();
-                }
-                _ => {
-                    self.upper.remove_file(&norm_src).ok();
-                }
-            }
-        }
-        // Whiteout the source to hide it from lower — collapse to the
-        // single top-most whiteout (recursive directory renames whiteouted
-        // each descendant along the way).
-        let mut whiteouts = self.whiteouts.write();
-        whiteouts.retain(|w| !w.starts_with(&norm_src));
-        whiteouts.insert(norm_src.clone());
+        // Hide the source from lower: one whiteout leaf replaces the whole
+        // source subtree (recursive renames put per-descendant whiteouts or
+        // content under it — put_whiteout collapses).
+        self.tree
+            .write()
+            .put_whiteout(&norm_src, &|p| self.lower_mode_of(p));
         Ok(())
     }
 
@@ -1304,8 +1294,7 @@ impl VirtualFs for OverlayFs {
     fn deep_clone(&self) -> Arc<dyn VirtualFs> {
         Arc::new(OverlayFs {
             lower: self.lower.clone(),
-            upper: self.upper.deep_clone(),
-            whiteouts: Arc::new(RwLock::new(self.whiteouts.read().clone())),
+            tree: RwLock::new(self.tree.read().clone()),
         })
     }
 }
@@ -1317,41 +1306,55 @@ impl VirtualFs for OverlayFs {
 impl OverlayFs {
     /// lstat through the overlay (no symlink following on final component).
     fn lstat_overlay(&self, norm: &Path, orig: &Path) -> Result<Metadata, VfsError> {
-        if self.is_whiteout(norm) {
-            return Err(VfsError::NotFound(orig.to_path_buf()));
+        // Probe with a scoped read guard (no lock held across the return).
+        enum Probe {
+            Content,
+            Hidden,
+            Miss,
         }
-        if self.upper_has_entry(norm) {
-            return self.upper.lstat(norm);
+        let probe = {
+            let tree = self.tree.read();
+            match tree.descend(norm) {
+                Descend::Found(n) if n.is_content() => Probe::Content,
+                Descend::Found(UpperNode::Whiteout) | Descend::Blocked => Probe::Hidden,
+                _ => Probe::Miss,
+            }
+        };
+        match probe {
+            Probe::Content => self
+                .tree
+                .read()
+                .meta(norm)
+                .ok_or_else(|| VfsError::NotFound(orig.to_path_buf())),
+            Probe::Hidden => Err(VfsError::NotFound(orig.to_path_buf())),
+            Probe::Miss => {
+                if self.lower_exists(norm) {
+                    self.lstat_lower(norm)
+                } else {
+                    Err(VfsError::NotFound(orig.to_path_buf()))
+                }
+            }
         }
-        if self.lower_exists(norm) {
-            return self.lstat_lower(norm);
-        }
-        Err(VfsError::NotFound(orig.to_path_buf()))
-    }
-
-    /// Ensure a single directory exists in the upper layer at `path`.
-    fn ensure_single_dir_in_upper(&self, path: &Path) -> Result<(), VfsError> {
-        // Defensive early-return: call sites invoke this only for paths
-        // absent from the upper layer (a whiteout-ed path cannot also have
-        // an upper entry — every whiteout-adding operation purges the upper
-        // entry first).
-        if self.upper_has_entry(path) {
-            return Ok(());
-        }
-        // Ensure parent first
-        if let Some(parent) = path.parent()
-            && parent != Path::new("/")
-            && !self.upper_has_entry(parent)
-        {
-            self.ensure_single_dir_in_upper(parent)?;
-        }
-        self.upper.mkdir(path)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// True when any node in the subtree is a content node (not a whiteout).
+/// Iterative (no recursion-depth limit on deep trees).
+fn subtree_has_content(children: &std::collections::BTreeMap<String, UpperNode>) -> bool {
+    let mut stack: Vec<&UpperNode> = children.values().collect();
+    while let Some(n) = stack.pop() {
+        match n {
+            UpperNode::Whiteout => {}
+            UpperNode::Dir { children, .. } => stack.extend(children.values()),
+            _ => return true,
+        }
+    }
+    false
+}
 
 /// Normalize an absolute path: resolve `.` and `..`.
 fn normalize(path: &Path) -> Result<PathBuf, VfsError> {
@@ -1372,20 +1375,10 @@ fn map_io_error(err: std::io::Error, path: &Path) -> VfsError {
     let p = path.to_path_buf();
     match err.kind() {
         std::io::ErrorKind::NotFound => VfsError::NotFound(p),
-        // Unreachable: the overlay never creates anything in the lower
-        // directory, so no lower-layer syscall can report AlreadyExists.
         std::io::ErrorKind::AlreadyExists => VfsError::AlreadyExists(p),
-        // Reached when the OS denies a lower read — e.g. reading a lower
-        // directory on Windows (ERROR_ACCESS_DENIED) or an unreadable file
-        // on Unix.
         std::io::ErrorKind::PermissionDenied => VfsError::PermissionDenied(p),
-        // Unreachable: the overlay never deletes from the lower directory.
         std::io::ErrorKind::DirectoryNotEmpty => VfsError::DirectoryNotEmpty(p),
-        // Reached on Unix for paths beneath a lower file (ENOTDIR); Windows
-        // reports ERROR_PATH_NOT_FOUND for those, mapping to NotFound above.
         std::io::ErrorKind::NotADirectory => VfsError::NotADirectory(p),
-        // Reached on Unix when reading a lower directory (EISDIR); Windows
-        // reports ERROR_ACCESS_DENIED for those, mapping to PermissionDenied.
         std::io::ErrorKind::IsADirectory => VfsError::IsADirectory(p),
         _ => VfsError::IoError(err.to_string()),
     }
@@ -1394,8 +1387,6 @@ fn map_io_error(err: std::io::Error, path: &Path) -> VfsError {
 /// Map `std::fs::Metadata` to our `vfs::Metadata`.
 fn map_std_metadata(meta: &std::fs::Metadata) -> Metadata {
     let node_type = if meta.is_symlink() {
-        // Requires a symlink in the lower directory — covered by the
-        // skip-gated lower_symlink test (see symlink_matches_disk above).
         NodeType::Symlink
     } else if meta.is_dir() {
         NodeType::Directory

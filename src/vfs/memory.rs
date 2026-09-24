@@ -49,43 +49,6 @@ impl InMemoryFs {
         }
     }
 
-    /// Drop every entry, leaving an empty filesystem with the default root
-    /// directory. Used by `OverlayFs::reset()` to re-baseline on disk state.
-    #[cfg(feature = "native-fs")]
-    pub(crate) fn clear(&self) {
-        let mut root = self.root.write();
-        *root = FsNode::Directory {
-            children: BTreeMap::new(),
-            mode: 0o755,
-            mtime: SystemTime::now(),
-        };
-    }
-
-    /// List every non-root entry in the filesystem as `(path, node_type)`,
-    /// in sorted tree order. Used by `OverlayFs::diff()` to export the
-    /// upper-layer write set.
-    #[cfg(feature = "native-fs")]
-    pub(crate) fn snapshot_entries(&self) -> Vec<(PathBuf, NodeType)> {
-        fn walk(node: &FsNode, path: &Path, out: &mut Vec<(PathBuf, NodeType)>) {
-            if let FsNode::Directory { children, .. } = node {
-                for (name, child) in children {
-                    let child_path = super::vfs_join(path, name);
-                    let node_type = match child {
-                        FsNode::File { .. } => NodeType::File,
-                        FsNode::Directory { .. } => NodeType::Directory,
-                        FsNode::Symlink { .. } => NodeType::Symlink,
-                    };
-                    out.push((child_path.clone(), node_type));
-                    walk(child, &child_path, out);
-                }
-            }
-        }
-        let tree = self.root.read();
-        let mut out = Vec::new();
-        walk(&tree, Path::new("/"), &mut out);
-        out
-    }
-
     fn next_file_id(&self) -> u64 {
         fn visit(node: &FsNode, max_id: &mut u64) {
             match node {

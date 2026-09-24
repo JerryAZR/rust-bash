@@ -145,18 +145,22 @@ File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through t
 
 ## 7. VFS semantics (bash and Python share these)
 
+The OverlayFs upper layer is an explicit tree of content + whiteout nodes
+(`src/vfs/overlay_tree.rs`), so the whiteout invariants are structural:
+a path is either content or whiteout (coexistence unrepresentable),
+whiteouts never nest (`rm -rf` is one leaf), and resurrection re-hides
+deleted lower children inside `ensure_dirs`. `symlink`/`hardlink` EEXIST
+-check the merged view; root removal is rejected outright.
+
 | Behavior | Expected | Pinned in |
 |---|---|---|
 | `mkdir` through a file component succeeds | POSIX: ENOTDIR | `tests/python_bridge.rs::python_mkdir_through_file_succeeds_like_bash` |
 | `rename` file-onto-directory succeeds | POSIX: EISDIR | `tests/python_bridge.rs::python_rename_file_onto_directory_succeeds_like_bash` |
 | `InMemoryFs::rename` loses the source node when destination navigation fails (src extracted before dst validation) | atomic rename | `tests/vfs_cov.rs::memory_rename_dst_parent_errors` |
-| `OverlayFs::remove_dir("/")` succeeds on an empty merged root and whiteouts `/` | rmdir("/") → EBUSY | `tests/vfs_cov.rs::mkdir_root_after_rmdir_root_reports_already_exists` |
-| Overlay glob does not traverse an upper symlink pointing into the lower layer | merged view would | `tests/vfs_cov.rs::glob_through_upper_symlink_to_lower_dir_finds_nothing` |
 | MountableFs: cross-mount absolute symlinks are stored verbatim in the link's backend and can never resolve on read (`ln -s /real.txt /project/link` where `/real.txt` lives on another mount → reads fail NotFound) | merged view resolves the target | `tests/vfs_cov.rs::mountable_cross_mount_absolute_symlink_never_resolves` |
 | MountableFs: `mkdir` at a mount point returns InvalidPath (lookup strips the prefix to the backend root) | AlreadyExists (the mount point exists) | `tests/vfs_cov.rs::mountable_mkdir_at_mount_point_returns_invalid_path` |
 | `InMemoryFs::hardlink` / overlay hardlink copy content: later appends through one name are invisible through the other, while `file_id` stays shared | real hard links share content | `tests/vfs_cov.rs::memory_hardlink_copies_content_and_diverges_after_append`, `src/vfs/overlay_tests.rs::hardlink_from_lower` |
 | `InMemoryFs::mkdir_p` errors NotADirectory through an existing symlink component | bash follows the symlink | `tests/vfs_cov.rs::memory_mkdir_p_through_symlink_component_errors` |
-| `OverlayFs::symlink` doesn't EEXIST-check the merged view (`ln -s t /existing_lower_file` succeeds, shadowing the lower file) | EEXIST | `tests/vfs_cov.rs::overlay::symlink_onto_existing_lower_file_succeeds` |
 
 ## 8. Misc
 

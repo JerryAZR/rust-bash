@@ -884,17 +884,16 @@ mod overlay {
     }
 
     #[test]
-    fn symlink_onto_existing_lower_file_succeeds() {
-        // PINNED POSIX DIVERGENCE: symlink(2) on an existing path fails with
-        // EEXIST; OverlayFs::symlink only checks the upper layer (and clears
-        // whiteouts), so a symlink can be created over a lower-layer file,
-        // silently shadowing it.
+    fn symlink_onto_existing_lower_file_fails_eexist() {
+        // symlink(2) on an existing path fails with EEXIST — enforced
+        // against the merged view (both layers) since the tree rewrite.
         let tmp = lower_tree();
         let o = OverlayFs::new(tmp.path()).unwrap();
-        o.symlink(p("/elsewhere"), p("/top.txt")).unwrap();
-        assert_eq!(o.readlink(p("/top.txt")).unwrap(), p("/elsewhere"));
-        // Disk untouched — the shadowing lives in the upper layer only.
+        let r = o.symlink(p("/elsewhere"), p("/top.txt"));
+        assert!(matches!(r, Err(VfsError::AlreadyExists(_))), "got {r:?}");
+        // Disk untouched and no upper shadow was created.
         assert_eq!(std::fs::read(tmp.path().join("top.txt")).unwrap(), b"top");
+        assert_eq!(o.read_file(p("/top.txt")).unwrap(), b"top");
     }
 
     #[test]
@@ -917,18 +916,16 @@ mod overlay {
     }
 
     #[test]
-    fn mkdir_root_after_rmdir_root_reports_already_exists() {
+    fn rmdir_root_is_an_error() {
+        // POSIX rmdir("/") fails (EBUSY); a whiteouted root is not
+        // representable in the overlay tree (the root is not a node), so
+        // the overlay rejects root removal outright.
         let tmp = tempfile::tempdir().unwrap(); // empty lower
         let o = OverlayFs::new(tmp.path()).unwrap();
-
-        // SUSPECTED POSIX DIVERGENCE (pinned, not fixed): rmdir("/") on a
-        // real fs fails with EBUSY; here remove_dir("/") on an empty merged
-        // root succeeds and whiteouts the root.
-        o.remove_dir(p("/")).unwrap();
-        assert!(!o.exists(p("/")));
-
-        // The whiteout is cleared, but the upper layer always has a root
-        // directory, so mkdir("/") reports AlreadyExists.
+        let r = o.remove_dir(p("/"));
+        assert!(matches!(r, Err(VfsError::InvalidPath(_))), "got {r:?}");
+        assert!(o.exists(p("/")));
+        // mkdir("/") still reports AlreadyExists (the root always exists).
         let r = o.mkdir(p("/"));
         assert!(
             matches!(r, Err(VfsError::AlreadyExists(_))),
@@ -1212,15 +1209,17 @@ mod overlay {
     }
 
     #[test]
-    fn glob_through_upper_symlink_to_lower_dir_finds_nothing() {
+    fn glob_through_upper_symlink_to_lower_dir_works() {
+        // An upper symlink pointing at a LOWER-layer directory is traversed
+        // by glob (readdir_merged resolves the path first since the tree
+        // rewrite) — POSIX/overlayfs behavior.
         let tmp = lower_tree();
         let o = OverlayFs::new(tmp.path()).unwrap();
-        // SUSPECTED DIVERGENCE (pinned, not fixed): an upper symlink pointing
-        // at a LOWER-layer directory is not traversed by glob — the merged
-        // listing delegates to the upper layer alone, where the symlink
-        // target does not exist. POSIX/overlayfs would list the contents.
         o.symlink(p("/sub"), p("/ln")).unwrap();
-        assert!(o.glob("/ln/*.rs", p("/")).unwrap().is_empty());
+        assert_eq!(
+            o.glob("/ln/*.rs", p("/")).unwrap(),
+            vec![PathBuf::from("/ln/leaf.rs")]
+        );
     }
 
     #[test]
