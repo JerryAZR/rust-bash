@@ -843,15 +843,12 @@ fn diff_recreated_path_is_write_not_deletion() {
 
     let d = ov.diff();
     assert!(d.deletions.is_empty());
-    assert_eq!(
-        d.writes,
-        vec![crate::OverlayWrite {
-            path: PathBuf::from("/README.md"),
-            node_type: NodeType::File,
-            content: b"reborn".to_vec(),
-            mode: 0o644,
-        }]
-    );
+    // Mode is inherited from the lower file (POSIX O_TRUNC semantics), so
+    // it is platform-dependent — compare everything else.
+    assert_eq!(d.writes.len(), 1);
+    assert_eq!(d.writes[0].path, PathBuf::from("/README.md"));
+    assert_eq!(d.writes[0].node_type, NodeType::File);
+    assert_eq!(d.writes[0].content, b"reborn".to_vec());
 }
 
 #[test]
@@ -1404,4 +1401,170 @@ fn rename_onto_whiteouted_lower_dir_hides_its_children() {
         .collect();
     assert_eq!(names, vec!["x.txt"]);
     assert!(!ov.exists(Path::new("/data/config.toml")));
+}
+
+// ---------------------------------------------------------------------------
+// Review-fix pins: writes through mid-path upper symlinks (resolve_write_target)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_through_mid_path_upper_symlink_creates_at_target() {
+    // mkdir /real; ln -s /real /l; write /l/f — POSIX: creates /real/f.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir(Path::new("/real")).unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    ov.write_file(Path::new("/l/f.txt"), b"hi").unwrap();
+    assert_eq!(ov.read_file(Path::new("/real/f.txt")).unwrap(), b"hi");
+    // The upper tree holds the file at the RESOLVED path, not behind /l.
+    assert!(ov.tree_contains(Path::new("/real/f.txt")));
+    assert!(!ov.tree_contains(Path::new("/l/f.txt")));
+}
+
+#[test]
+fn append_and_hardlink_through_mid_path_upper_symlink() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir(Path::new("/real")).unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    ov.append_file(Path::new("/l/a.txt"), b"a").unwrap();
+    ov.append_file(Path::new("/l/a.txt"), b"b").unwrap();
+    assert_eq!(ov.read_file(Path::new("/real/a.txt")).unwrap(), b"ab");
+    ov.hardlink(Path::new("/real/a.txt"), Path::new("/l/h.txt"))
+        .unwrap();
+    assert!(ov.tree_contains(Path::new("/real/h.txt")));
+}
+
+#[test]
+fn write_through_chained_mid_path_symlinks() {
+    // ln -s /real /l2; ln -s /l2 /l1; write /l1/f — chains are followed.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir(Path::new("/real")).unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l2")).unwrap();
+    ov.symlink(Path::new("/l2"), Path::new("/l1")).unwrap();
+    ov.write_file(Path::new("/l1/f.txt"), b"hi").unwrap();
+    assert!(ov.tree_contains(Path::new("/real/f.txt")));
+}
+
+#[test]
+fn write_through_relative_symlink_with_dotdot_normalizes() {
+    // ln -s ../real /a/l: the spliced target must normalize — no literal
+    // ".." nodes may enter the tree.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir_p(Path::new("/real")).unwrap();
+    ov.mkdir_p(Path::new("/a")).unwrap();
+    ov.symlink(Path::new("../real"), Path::new("/a/l")).unwrap();
+    ov.write_file(Path::new("/a/l/f.txt"), b"hi").unwrap();
+    assert!(ov.tree_contains(Path::new("/real/f.txt")));
+    assert!(!ov.tree_contains(Path::new("/a/../real/f.txt")));
+    assert_eq!(ov.read_file(Path::new("/real/f.txt")).unwrap(), b"hi");
+}
+
+#[test]
+fn mkdir_p_through_mid_path_upper_symlink() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir(Path::new("/real")).unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    ov.mkdir_p(Path::new("/l/deep/nested")).unwrap();
+    assert!(ov.tree_contains(Path::new("/real/deep/nested")));
+    assert!(!ov.tree_contains(Path::new("/l/deep")));
+}
+
+#[test]
+fn rename_dst_through_mid_path_upper_symlink() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir(Path::new("/real")).unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    ov.write_file(Path::new("/src.txt"), b"s").unwrap();
+    ov.rename(Path::new("/src.txt"), Path::new("/l/dst.txt"))
+        .unwrap();
+    assert!(ov.tree_contains(Path::new("/real/dst.txt")));
+    assert!(!ov.exists(Path::new("/src.txt")));
+}
+
+#[test]
+fn write_over_lower_file_inherits_lower_mode() {
+    // POSIX O_TRUNC keeps the existing file's mode; an overwrite of a lower
+    // 0o755 script must not turn it 0o644 in the diff.
+    let tmp = setup_lower();
+    let script = tmp.path().join("tool.sh");
+    std::fs::write(&script, b"#!/bin/sh\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let ov = make_overlay(tmp.path());
+    ov.write_file(Path::new("/tool.sh"), b"#!/bin/sh\necho new\n")
+        .unwrap();
+    let write = ov
+        .diff()
+        .writes
+        .into_iter()
+        .find(|w| w.path == Path::new("/tool.sh"))
+        .unwrap();
+    #[cfg(unix)]
+    assert_eq!(write.mode, 0o755);
+    #[cfg(not(unix))]
+    let _ = write.mode;
+}
+
+#[test]
+fn remove_through_file_mid_path_is_enotdir() {
+    // Upper file at /a shadows lower /a/b/c: rm /a/b/c is ENOTDIR, not a
+    // silent Ok (put_whiteout used to no-op on the file ancestor).
+    let tmp = setup_lower();
+    std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
+    std::fs::write(tmp.path().join("a/b/c.txt"), b"c").unwrap();
+    let ov = make_overlay(tmp.path());
+    ov.remove_dir_all(Path::new("/a")).unwrap();
+    ov.write_file(Path::new("/a"), b"shadow").unwrap();
+    let err = ov.remove_file(Path::new("/a/b/c.txt")).unwrap_err();
+    assert!(
+        matches!(err, VfsError::NotADirectory(_)),
+        "expected ENOTDIR, got {err:?}"
+    );
+}
+
+#[test]
+fn stat_through_file_mid_path_is_hidden() {
+    let tmp = setup_lower();
+    std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
+    std::fs::write(tmp.path().join("a/b/c.txt"), b"c").unwrap();
+    let ov = make_overlay(tmp.path());
+    ov.remove_dir_all(Path::new("/a")).unwrap();
+    ov.write_file(Path::new("/a"), b"shadow").unwrap();
+    assert!(ov.stat(Path::new("/a/b/c.txt")).is_err());
+    assert!(!ov.exists(Path::new("/a/b/c.txt")));
+}
+
+#[test]
+fn remove_dir_all_of_upper_only_dir_leaves_no_whiteout() {
+    // rm -rf of an upper-created directory detaches; no phantom marker.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir_p(Path::new("/mine/sub")).unwrap();
+    ov.write_file(Path::new("/mine/f"), b"x").unwrap();
+    ov.remove_dir_all(Path::new("/mine")).unwrap();
+    assert!(!ov.tree_contains(Path::new("/mine")));
+    assert!(ov.diff().deletions.is_empty());
+}
+
+#[test]
+fn readdir_never_lists_whiteout_children() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.remove_file(Path::new("/data/config.toml")).unwrap();
+    let names: Vec<String> = ov
+        .readdir(Path::new("/data"))
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert!(!names.contains(&"config.toml".to_string()));
+    assert!(names.is_empty());
 }

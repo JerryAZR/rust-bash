@@ -18,6 +18,17 @@
 //!
 //! The tree knows nothing about the lower layer; callers inject lower-layer
 //! probes (`lower_exists`, `lower_readdir`) at the call sites that need them.
+//!
+//! Deliberately omitted from the fork's design: changedAt/seq stamps and
+//! mergeDiffs (no template/fork/merge model yet — clone is deep-copy),
+//! metacopy, and the byte quota (best-effort guardrails philosophy: the
+//! harness owns bounds; the old side-table had no cap either).
+//!
+//! Locking contract (enforced by the caller, OverlayFs): a single
+//! RwLock<OverlayTree>; probe under a scoped read guard, drop it, mutate
+//! under a write guard — never recurse or take a write lock while holding
+//! a read guard (parking_lot read locks are not recursion-safe with a
+//! queued writer).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,13 +59,14 @@ pub enum UpperNode {
 }
 
 impl UpperNode {
+    /// NodeType of a content node. Panics on Whiteout — a whiteout is not
+    /// a visible node and must never be exposed (dir_entries filters it).
     pub fn node_type(&self) -> NodeType {
         match self {
             UpperNode::File { .. } => NodeType::File,
             UpperNode::Dir { .. } => NodeType::Directory,
             UpperNode::Symlink { .. } => NodeType::Symlink,
-            // A whiteout is not a visible node; callers must not expose it.
-            UpperNode::Whiteout => NodeType::File,
+            UpperNode::Whiteout => panic!("whiteouts are not visible nodes"),
         }
     }
 
@@ -369,12 +381,15 @@ impl OverlayTree {
 
     /// All entries of a directory node at `path` (None if not a directory).
     /// Whiteout children are included — the caller filters.
+    /// Visible (content) children of a directory. Whiteouts are filtered —
+    /// they are never listable (use `whiteout_children` for the merge).
     pub fn dir_entries(&self, path: &Path) -> Option<Vec<DirEntry>> {
         if segments(path).is_empty() {
             // The root directory is the top-level children map.
             return Some(
                 self.children
                     .iter()
+                    .filter(|(_, node)| node.is_content())
                     .map(|(name, node)| DirEntry {
                         name: name.clone(),
                         node_type: node.node_type(),
@@ -386,6 +401,7 @@ impl OverlayTree {
             Descend::Found(UpperNode::Dir { children, .. }) => Some(
                 children
                     .iter()
+                    .filter(|(_, node)| node.is_content())
                     .map(|(name, node)| DirEntry {
                         name: name.clone(),
                         node_type: node.node_type(),
@@ -394,6 +410,24 @@ impl OverlayTree {
             ),
             _ => None,
         }
+    }
+
+    /// Names of whiteout children of a directory — the overlay's merged
+    /// readdir needs these to remove lower entries from the listing.
+    pub fn whiteout_children(&self, path: &Path) -> Vec<String> {
+        let children = if segments(path).is_empty() {
+            &self.children
+        } else {
+            match self.descend(path) {
+                Descend::Found(UpperNode::Dir { children, .. }) => children,
+                _ => return Vec::new(),
+            }
+        };
+        children
+            .iter()
+            .filter(|(_, node)| matches!(node, UpperNode::Whiteout))
+            .map(|(name, _)| name.clone())
+            .collect()
     }
 
     pub fn clear(&mut self) {
