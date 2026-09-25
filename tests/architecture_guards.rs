@@ -69,7 +69,7 @@ fn no_std_process_command_in_src() {
         let content = std::fs::read_to_string(src.join(&rel)).unwrap();
         // Substring bans catch every import form (`use std::process::
         // {Command}`, aliased `use ... as`, fully-qualified paths).
-        if content.contains("process::Command") || content.contains("process::Command::new") {
+        if content.contains("process::Command") {
             offenders.push(rel_str);
         }
     }

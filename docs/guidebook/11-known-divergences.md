@@ -154,11 +154,12 @@ deleted lower children inside `ensure_dirs`. `symlink`/`hardlink` EEXIST
 | Behavior | Expected | Pinned in |
 |---|---|---|
 | `mkdir` through a file component succeeds | POSIX: ENOTDIR | `tests/python_bridge.rs::python_mkdir_through_file_succeeds_like_bash` |
-| `rename` file-onto-directory succeeds | POSIX: EISDIR | `tests/python_bridge.rs::python_rename_file_onto_directory_succeeds_like_bash` |
 | `InMemoryFs::rename` loses the source node when destination navigation fails (src extracted before dst validation) | atomic rename | `tests/vfs_cov.rs::memory_rename_dst_parent_errors` |
 | MountableFs: cross-mount absolute symlinks are stored verbatim in the link's backend and can never resolve on read (`ln -s /real.txt /project/link` where `/real.txt` lives on another mount → reads fail NotFound) | merged view resolves the target | `tests/vfs_cov.rs::mountable_cross_mount_absolute_symlink_never_resolves` |
 | MountableFs: `mkdir` at a mount point returns InvalidPath (lookup strips the prefix to the backend root) | AlreadyExists (the mount point exists) | `tests/vfs_cov.rs::mountable_mkdir_at_mount_point_returns_invalid_path` |
 | `InMemoryFs::hardlink` / overlay hardlink copy content: later appends through one name are invisible through the other, while `file_id` stays shared | real hard links share content | `tests/vfs_cov.rs::memory_hardlink_copies_content_and_diverges_after_append`, `src/vfs/overlay_tests.rs::hardlink_from_lower` |
+| `write_file` through a mid-path LOWER symlink attaches at the literal path (upper dir shadows the link) instead of writing the target; `append_file` gets it right | POSIX: writes land at the link target | none (pre-existing; `src/vfs/overlay.rs::write_file` — needs a whiteout-tolerant lower-aware resolve) |
+| awk: frame-local array names leak into the global array map after the function returns (arrays created via unaliased params/locals are not cleaned up at frame pop) | gawk: local arrays die with the frame | none (pre-existing scoping gap; `call_user_function`)
 | `InMemoryFs::mkdir_p` errors NotADirectory through an existing symlink component | bash follows the symlink | `tests/vfs_cov.rs::memory_mkdir_p_through_symlink_component_errors` |
 
 ## 8. Misc

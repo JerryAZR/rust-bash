@@ -161,10 +161,15 @@ pub(crate) fn translate_windows_drive_path(path: &str) -> std::borrow::Cow<'_, s
     }
 }
 
+/// No-op on POSIX: `C:\foo` is an ordinary relative filename there.
+#[cfg(not(windows))]
+pub(crate) fn translate_windows_drive_path(path: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(path)
+}
+
 /// Resolve a possibly-relative VFS path string against a cwd string, using `/`
 /// separators only (never the host separator).
 pub(crate) fn vfs_resolve(cwd: &str, path: &str) -> PathBuf {
-    #[cfg(windows)]
     let path = &*translate_windows_drive_path(path);
     if path.starts_with('/') {
         PathBuf::from(path)

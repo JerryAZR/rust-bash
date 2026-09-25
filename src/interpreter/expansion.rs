@@ -3228,10 +3228,11 @@ fn resolve_parameter(parameter: &Parameter, state: &InterpreterState, indirect: 
 /// Given a string that is the value of `${!ref}`, resolve it as a variable reference.
 /// Handles: simple names, `arr[idx]`, positional params (`1`, `2`), and special (`@`, `*`).
 ///
-/// Immutable twin of [`resolve_indirect_value_mut`]: pure dynamic names
-/// (SECONDS) resolve; `RANDOM` cannot advance the PRNG without `&mut`
-/// state and reads as empty here. Only used by the immutable expand path
-/// (tests); the live interpreter always uses the mutable twin.
+/// Immutable twin of [`resolve_indirect_value_mut`]: dynamic names
+/// (RANDOM, SECONDS) read as empty here — RANDOM cannot advance the PRNG
+/// without `&mut` state and SECONDS is not env-backed. Only used by the
+/// immutable expand path (tests); the live interpreter always uses the
+/// mutable twin.
 fn resolve_indirect_value(target: &str, state: &InterpreterState) -> String {
     if target.is_empty() {
         return String::new();

@@ -890,8 +890,7 @@ fn builtin_cd(args: &[String], state: &mut InterpreterState) -> Result<ExecResul
 /// Resolve a potentially relative path against a base directory.
 pub(crate) fn resolve_path(cwd: &str, path: &str) -> String {
     // Windows drive-letter paths (`C:\foo`) become unix-like `/c/foo`
-    // (see vfs::translate_windows_drive_path).
-    #[cfg(windows)]
+    // (see vfs::translate_windows_drive_path; a no-op on POSIX).
     let path = &*crate::vfs::translate_windows_drive_path(path);
     if path.starts_with('/') {
         normalize_path(path)

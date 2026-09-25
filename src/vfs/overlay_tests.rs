@@ -1568,3 +1568,151 @@ fn readdir_never_lists_whiteout_children() {
     assert!(!names.contains(&"config.toml".to_string()));
     assert!(names.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Review-3 pins (F1-F10): the symlink seam's existence checks and
+// normalization boundaries
+// ---------------------------------------------------------------------------
+
+#[test]
+fn symlink_through_mid_path_link_refuses_to_clobber_existing() {
+    // mkdir /real; write /real/exists; ln -s /real /l; ln -s /evil /l/exists
+    // must fail EEXIST (POSIX) — not silently replace the file.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir(Path::new("/real")).unwrap();
+    ov.write_file(Path::new("/real/exists"), b"data").unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    let err = ov
+        .symlink(Path::new("/evil"), Path::new("/l/exists"))
+        .unwrap_err();
+    assert!(matches!(err, VfsError::AlreadyExists(_)), "got {err:?}");
+    assert_eq!(ov.read_file(Path::new("/real/exists")).unwrap(), b"data");
+}
+
+#[test]
+fn hardlink_through_mid_path_link_refuses_to_clobber_existing() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir(Path::new("/real")).unwrap();
+    ov.write_file(Path::new("/real/exists"), b"data").unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    let err = ov
+        .hardlink(Path::new("/README.md"), Path::new("/l/exists"))
+        .unwrap_err();
+    assert!(matches!(err, VfsError::AlreadyExists(_)), "got {err:?}");
+}
+
+#[test]
+fn dotdot_escaping_root_normalizes_to_root() {
+    // ln -s ../../etc /a/l: ".." past the root is the root (POSIX); no
+    // literal ".." node may enter the tree, and the write lands at /etc/f.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir_p(Path::new("/a")).unwrap();
+    ov.symlink(Path::new("../../etc"), Path::new("/a/l"))
+        .unwrap();
+    ov.write_file(Path::new("/a/l/f.txt"), b"hi").unwrap();
+    assert!(ov.tree_contains(Path::new("/etc/f.txt")));
+    assert!(!ov.tree_contains(Path::new("/../etc/f.txt")));
+    // Readable back through the same path (write/read symmetry).
+    assert_eq!(ov.read_file(Path::new("/a/l/f.txt")).unwrap(), b"hi");
+}
+
+#[test]
+fn mkdir_through_mid_path_link_eexist_at_resolved() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir_p(Path::new("/real/existing")).unwrap();
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    let err = ov.mkdir(Path::new("/l/existing")).unwrap_err();
+    assert!(matches!(err, VfsError::AlreadyExists(_)), "got {err:?}");
+    // A fresh name under the link works and lands at the target.
+    ov.mkdir(Path::new("/l/newdir")).unwrap();
+    assert!(ov.tree_contains(Path::new("/real/newdir")));
+}
+
+#[test]
+fn recreate_after_rm_uses_default_mode_not_deleted_mode() {
+    // POSIX: rm then create is O_CREAT (0o644 & umask), not O_TRUNC.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.remove_file(Path::new("/README.md")).unwrap();
+    ov.write_file(Path::new("/README.md"), b"reborn").unwrap();
+    let d = ov.diff();
+    let w = d
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/README.md"))
+        .unwrap();
+    assert_eq!(
+        w.mode, 0o644,
+        "recreated file must not inherit deleted mode"
+    );
+}
+
+#[test]
+fn remove_through_mid_path_symlink_whiteouts_the_target() {
+    // rm /l/f where /l -> /real: POSIX follows mid-path links; /real/f is
+    // whiteouted (and the symlink itself survives).
+    let tmp = setup_lower();
+    std::fs::create_dir_all(tmp.path().join("real")).unwrap();
+    std::fs::write(tmp.path().join("real/f.txt"), b"f").unwrap();
+    let ov = make_overlay(tmp.path());
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    ov.remove_file(Path::new("/l/f.txt")).unwrap();
+    assert!(!ov.exists(Path::new("/real/f.txt")));
+    assert!(ov.exists(Path::new("/l")));
+    assert!(ov.diff().deletions.contains(&PathBuf::from("/real/f.txt")));
+}
+
+#[test]
+fn append_through_symlink_to_deleted_target_recreates() {
+    // rm /f; ln -s /f /l; append /l — POSIX creates the target fresh.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.remove_file(Path::new("/README.md")).unwrap();
+    ov.symlink(Path::new("/README.md"), Path::new("/l"))
+        .unwrap();
+    ov.append_file(Path::new("/l"), b"new").unwrap();
+    assert_eq!(ov.read_file(Path::new("/README.md")).unwrap(), b"new");
+}
+
+#[test]
+fn rename_file_onto_lower_dir_is_eisdir() {
+    // POSIX rename(2): a file cannot replace a directory (the lower dir
+    // must not be silently shadowed by a file node).
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.write_file(Path::new("/f.txt"), b"f").unwrap();
+    let err = ov
+        .rename(Path::new("/f.txt"), Path::new("/data"))
+        .unwrap_err();
+    assert!(matches!(err, VfsError::IsADirectory(_)), "got {err:?}");
+    assert!(ov.stat(Path::new("/data")).unwrap().node_type == NodeType::Directory);
+}
+
+#[test]
+fn rename_of_upper_only_source_leaves_no_phantom_whiteout() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.write_file(Path::new("/mine.txt"), b"x").unwrap();
+    ov.rename(Path::new("/mine.txt"), Path::new("/moved.txt"))
+        .unwrap();
+    assert!(!ov.tree_contains(Path::new("/mine.txt")));
+    assert!(ov.diff().deletions.is_empty());
+}
+
+#[test]
+fn rename_src_through_mid_path_symlink() {
+    // mv /l/f /g where /l -> /real: moves /real/f.
+    let tmp = setup_lower();
+    std::fs::create_dir_all(tmp.path().join("real")).unwrap();
+    std::fs::write(tmp.path().join("real/f.txt"), b"f").unwrap();
+    let ov = make_overlay(tmp.path());
+    ov.symlink(Path::new("/real"), Path::new("/l")).unwrap();
+    ov.rename(Path::new("/l/f.txt"), Path::new("/g.txt"))
+        .unwrap();
+    assert_eq!(ov.read_file(Path::new("/g.txt")).unwrap(), b"f");
+    assert!(!ov.exists(Path::new("/real/f.txt")));
+}

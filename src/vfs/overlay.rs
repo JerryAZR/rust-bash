@@ -302,18 +302,23 @@ impl OverlayFs {
 
     /// Determine which layer `path` lives in (after normalization).
     fn resolve_layer(&self, path: &Path) -> LayerResult {
-        match self.tree.read().descend(path) {
-            Descend::Found(node) if node.is_content() => LayerResult::Upper,
-            Descend::Found(UpperNode::Whiteout) | Descend::Blocked => LayerResult::Whiteout,
-            // Unreachable: Found(_) is exhausted by the two arms above.
-            Descend::Found(_) => {
-                debug_assert!(false, "resolve_layer: Found fell through");
-                LayerResult::NotFound
+        let upper = {
+            let tree = self.tree.read();
+            match tree.descend(path) {
+                Descend::Found(node) if node.is_content() => Some(LayerResult::Upper),
+                Descend::Found(UpperNode::Whiteout) | Descend::Blocked => {
+                    Some(LayerResult::Whiteout)
+                }
+                // A file/symlink mid-path hides everything beneath it,
+                // whatever the lower holds at the literal path.
+                Descend::NotDir => Some(LayerResult::NotFound),
+                Descend::Found(_) => None, // unreachable: whiteout covered
+                Descend::Missing => None,
             }
-            // A file/symlink mid-path hides everything beneath it,
-            // whatever the lower holds at the literal path.
-            Descend::NotDir => LayerResult::NotFound,
-            _ => {
+        };
+        match upper {
+            Some(layer) => layer,
+            None => {
                 if self.lower_exists(path) {
                     LayerResult::Lower
                 } else {
@@ -773,21 +778,21 @@ impl VirtualFs for OverlayFs {
         let norm = super::resolve_through_dangling(self, &norm)?;
         // Writing onto an existing directory is EISDIR (POSIX); only a
         // whiteouted (deleted-from-view) path may be recreated as a file.
-        {
+        let is_upper_dir = {
             let tree = self.tree.read();
-            match tree.descend(&norm) {
-                Descend::Found(UpperNode::Dir { .. }) => {
-                    return Err(VfsError::IsADirectory(path.to_path_buf()));
-                }
-                Descend::Missing
-                    if self
-                        .lstat_lower(&norm)
-                        .is_ok_and(|m| m.node_type == NodeType::Directory) =>
-                {
-                    return Err(VfsError::IsADirectory(path.to_path_buf()));
-                }
-                _ => {}
-            }
+            matches!(tree.descend(&norm), Descend::Found(UpperNode::Dir { .. }))
+        };
+        if is_upper_dir {
+            return Err(VfsError::IsADirectory(path.to_path_buf()));
+        }
+        if !is_upper_dir
+            && !self.upper_has_entry(&norm)
+            && !self.is_whiteout(&norm)
+            && self
+                .lstat_lower(&norm)
+                .is_ok_and(|m| m.node_type == NodeType::Directory)
+        {
+            return Err(VfsError::IsADirectory(path.to_path_buf()));
         }
         if let Some(parent) = norm.parent()
             && parent != Path::new("/")
@@ -800,12 +805,28 @@ impl VirtualFs for OverlayFs {
         // Mode: POSIX O_TRUNC keeps an existing file's mode — check the
         // upper, then the lower (overwriting a lower 0o755 script must not
         // silently turn it 0o644 in the diff); new files get the default.
-        let mode = {
-            let upper = self.tree.read().meta(&norm);
-            match upper {
-                Some(m) => m.mode,
-                None => self.lstat_lower(&norm).map(|m| m.mode).unwrap_or(0o644),
+        enum ModeSrc {
+            Upper(u32),
+            Fresh,
+            Lower,
+        }
+        let mode_src = {
+            let tree = self.tree.read();
+            match tree.descend(&norm) {
+                // Overwriting a live upper file keeps its mode (O_TRUNC).
+                Descend::Found(UpperNode::File { mode, .. }) => ModeSrc::Upper(*mode),
+                // A whiteouted (deleted) path is a fresh create: default
+                // mode, NOT the deleted file's (POSIX O_CREAT).
+                Descend::Found(_) | Descend::Blocked => ModeSrc::Fresh,
+                // Lower-only: O_TRUNC keeps the lower file's mode.
+                Descend::Missing => ModeSrc::Lower,
+                Descend::NotDir => ModeSrc::Fresh, // unreachable: EISDIR above
             }
+        };
+        let mode = match mode_src {
+            ModeSrc::Upper(m) => m,
+            ModeSrc::Fresh => 0o644,
+            ModeSrc::Lower => self.lstat_lower(&norm).map(|m| m.mode).unwrap_or(0o644),
         };
         self.attach_file(&norm, content.to_vec(), mode)
     }
@@ -832,7 +853,17 @@ impl VirtualFs for OverlayFs {
             Err(e) => return Err(e),
         };
         match self.resolve_layer(&resolved) {
-            LayerResult::Whiteout => Err(VfsError::NotFound(path.to_path_buf())),
+            // The symlink resolved onto a whiteouted (deleted) path: POSIX
+            // O_APPEND|O_CREAT recreates it fresh, same as a direct append
+            // to a whiteouted path.
+            LayerResult::Whiteout => {
+                if let Some(parent) = resolved.parent()
+                    && parent != Path::new("/")
+                {
+                    self.ensure_upper_dir_path(parent)?;
+                }
+                self.attach_file(&resolved, content.to_vec(), 0o644)
+            }
             LayerResult::Upper => self.tree.write().append_file(&resolved, content),
             LayerResult::Lower => {
                 self.copy_up_if_needed(&resolved)?;
@@ -854,6 +885,14 @@ impl VirtualFs for OverlayFs {
         if self.is_whiteout(&norm) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
+        // POSIX: rm follows mid-path symlinks (upper or lower), never the
+        // final component. Whiteout components in the prefix error out
+        // here (a deleted ancestor means the path is gone).
+        let norm = match self.resolve_path(&norm, false) {
+            Ok(p) => p,
+            Err(VfsError::NotFound(_)) => return Err(VfsError::NotFound(path.to_path_buf())),
+            Err(e) => return Err(e),
+        };
         // Probe first (the read guard must drop before any write lock).
         enum Probe {
             Dir,
@@ -904,7 +943,9 @@ impl VirtualFs for OverlayFs {
     }
 
     fn mkdir(&self, path: &Path) -> Result<(), VfsError> {
-        let norm = normalize(path)?;
+        // Resolve mid-path upper symlinks first: EEXIST is judged at the
+        // real location (mkdir /l/existing through /l -> /real must fail).
+        let norm = self.resolve_write_target(path, false)?;
         // bash mkdir (no -p) fails if the entry exists in either layer —
         // unless it is whiteouted (deleted-from-view), which resurrects.
         if !self.is_whiteout(&norm) {
@@ -992,6 +1033,7 @@ impl VirtualFs for OverlayFs {
     }
 
     fn remove_dir(&self, path: &Path) -> Result<(), VfsError> {
+        // POSIX: rmdir follows mid-path symlinks, never the final.
         let norm = normalize(path)?;
         if norm == Path::new("/") {
             // POSIX rmdir("/") fails EBUSY; a whiteouted root is not
@@ -1001,6 +1043,11 @@ impl VirtualFs for OverlayFs {
         if self.is_whiteout(&norm) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
+        let norm = match self.resolve_path(&norm, false) {
+            Ok(p) => p,
+            Err(VfsError::NotFound(_)) => return Err(VfsError::NotFound(path.to_path_buf())),
+            Err(e) => return Err(e),
+        };
 
         // Check that it exists and is a directory
         let m = self.lstat_overlay(&norm, path)?;
@@ -1032,6 +1079,11 @@ impl VirtualFs for OverlayFs {
         if self.is_whiteout(&norm) {
             return Err(VfsError::NotFound(path.to_path_buf()));
         }
+        let norm = match self.resolve_path(&norm, false) {
+            Ok(p) => p,
+            Err(VfsError::NotFound(_)) => return Err(VfsError::NotFound(path.to_path_buf())),
+            Err(e) => return Err(e),
+        };
 
         // Check that it exists
         let m = self.lstat_overlay(&norm, path)?;
@@ -1157,6 +1209,13 @@ impl VirtualFs for OverlayFs {
             return Err(VfsError::AlreadyExists(link.to_path_buf()));
         }
         let norm_link = self.resolve_write_target(&norm_link, false)?;
+        // EEXIST must also hold at the RESOLVED path (POSIX ln -s refuses
+        // to clobber through a mid-path symlink).
+        if !self.is_whiteout(&norm_link)
+            && (self.upper_has_entry(&norm_link) || self.lower_exists(&norm_link))
+        {
+            return Err(VfsError::AlreadyExists(link.to_path_buf()));
+        }
         if let Some(parent) = norm_link.parent()
             && parent != Path::new("/")
         {
@@ -1185,6 +1244,12 @@ impl VirtualFs for OverlayFs {
         let content = self.read_file(&norm_src)?;
         let meta = self.stat(&norm_src)?;
         let norm_dst = self.resolve_write_target(&norm_dst, false)?;
+        // EEXIST at the resolved path too (see symlink()).
+        if !self.is_whiteout(&norm_dst)
+            && (self.upper_has_entry(&norm_dst) || self.lower_exists(&norm_dst))
+        {
+            return Err(VfsError::AlreadyExists(dst.to_path_buf()));
+        }
         if let Some(parent) = norm_dst.parent()
             && parent != Path::new("/")
         {
@@ -1247,6 +1312,13 @@ impl VirtualFs for OverlayFs {
         if self.is_whiteout(&norm_src) {
             return Err(VfsError::NotFound(src.to_path_buf()));
         }
+        // POSIX: rename follows mid-path symlinks of the SOURCE (never the
+        // final component — renaming a symlink moves the link itself).
+        let norm_src = match self.resolve_path(&norm_src, false) {
+            Ok(p) => p,
+            Err(VfsError::NotFound(_)) => return Err(VfsError::NotFound(src.to_path_buf())),
+            Err(e) => return Err(e),
+        };
 
         let in_upper = self.upper_has_entry(&norm_src);
         let in_lower = self.lower_exists(&norm_src);
@@ -1260,6 +1332,16 @@ impl VirtualFs for OverlayFs {
         let meta = self.lstat_overlay(&norm_src, src)?;
         match meta.node_type {
             NodeType::File => {
+                // POSIX rename(2): a file cannot replace a directory.
+                // (Upper dirs already EISDIR via attach; check the lower.)
+                if !self.is_whiteout(&norm_dst)
+                    && !self.upper_has_entry(&norm_dst)
+                    && self
+                        .lstat_lower(&norm_dst)
+                        .is_ok_and(|m| m.node_type == NodeType::Directory)
+                {
+                    return Err(VfsError::IsADirectory(dst.to_path_buf()));
+                }
                 let content = self.read_file(&norm_src)?;
                 if let Some(parent) = norm_dst.parent()
                     && parent != Path::new("/")
@@ -1270,6 +1352,15 @@ impl VirtualFs for OverlayFs {
                 self.tree.write().set_mtime(&norm_dst, meta.mtime)?;
             }
             NodeType::Symlink => {
+                // Same EISDIR rule for a symlink landing on a lower dir.
+                if !self.is_whiteout(&norm_dst)
+                    && !self.upper_has_entry(&norm_dst)
+                    && self
+                        .lstat_lower(&norm_dst)
+                        .is_ok_and(|m| m.node_type == NodeType::Directory)
+                {
+                    return Err(VfsError::IsADirectory(dst.to_path_buf()));
+                }
                 let target = self.readlink(&norm_src)?;
                 if let Some(parent) = norm_dst.parent()
                     && parent != Path::new("/")
@@ -1303,10 +1394,15 @@ impl VirtualFs for OverlayFs {
 
         // Hide the source from lower: one whiteout leaf replaces the whole
         // source subtree (recursive renames put per-descendant whiteouts or
-        // content under it — put_whiteout collapses).
-        self.tree
-            .write()
-            .put_whiteout(&norm_src, &|p| self.lower_mode_of(p));
+        // content under it — put_whiteout collapses). An upper-only source
+        // has nothing to hide: plain detach (no phantom marker).
+        if self.lower_exists(&norm_src) {
+            self.tree
+                .write()
+                .put_whiteout(&norm_src, &|p| self.lower_mode_of(p));
+        } else {
+            self.tree.write().detach(&norm_src);
+        }
         Ok(())
     }
 
@@ -1405,8 +1501,14 @@ fn normalize_segments(segs: &mut Vec<String>) {
     for seg in segs.drain(..) {
         match seg.as_str() {
             "." | "" => {}
-            ".." if out.last().is_some_and(|s| s != "..") => {
-                out.pop();
+            ".." => {
+                // Pop if possible; at the root, ".." is the root (POSIX,
+                // matching vfs_normalize_checked) — never keep a literal
+                // ".." segment (it would create unreachable tree nodes and
+                // escape-prone diff paths).
+                if out.last().is_some_and(|s| s != "..") {
+                    out.pop();
+                }
             }
             _ => out.push(seg),
         }

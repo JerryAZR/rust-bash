@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record BWK awk conformance expectations from a reference awk (gawk).
 # Dev-time only; re-run deliberately. Output: tests/fixtures/awk_conformance/bwk/expected.toml
-set -u
+set -eu
 export PYTHONIOENCODING=utf-8
 # Locale-sensitive behaviors (collation in string comparison, case ops)
 # must record under the C locale for reproducibility.
@@ -25,7 +25,7 @@ if ! command -v python >/dev/null 2>&1; then
 fi
 # Never leave a partial expected.toml behind on interruption.
 trap 'rm -f "$OUT.partial"' EXIT
-echo "# Recorded from: $($AWK_BIN --version | head -1) (LC_ALL=C) -- do not hand-edit" > "$OUT.partial"
+echo "# Recorded from: $("$AWK_BIN" --version | head -1) (LC_ALL=C) -- do not hand-edit" > "$OUT.partial"
 
 record() {
     local prog="$1"; shift
@@ -33,8 +33,7 @@ record() {
     stdout_file=$(mktemp); stderr_file=$(mktemp)
     # Run from the fixture dir with relative paths so FILENAME/ARGV in the
     # recorded output match what the in-process runner passes.
-    (cd "$FIXTURES" && timeout 10 "$AWK_BIN" -f "$prog" "$@") >"$stdout_file" 2>"$stderr_file"
-    rc=$?
+    (cd "$FIXTURES" && timeout 10 "$AWK_BIN" -f "$prog" "$@") >"$stdout_file" 2>"$stderr_file" && rc=0 || rc=$?
     python - "$prog" "$rc" "$stdout_file" "$stderr_file" >> "$OUT.partial" <<'PYEOF'
 import sys
 name, rc, out_f, err_f = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]

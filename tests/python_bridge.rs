@@ -812,16 +812,16 @@ fn python_mkdir_through_file_succeeds_like_bash() {
 }
 
 #[test]
-fn python_rename_file_onto_directory_succeeds_like_bash() {
-    // VFS-level POSIX divergence (shared with bash, pinned here): rename
-    // file-onto-directory SUCCEEDS where POSIX gives EISDIR. Candidate for
-    // a future VFS fidelity fix.
+fn python_rename_file_onto_directory_raises_eisdir() {
+    // POSIX rename(2): a file cannot replace a directory. Fixed in the
+    // review-3 pass (the VFS previously shadowed the lower dir with the
+    // file node); CPython raises IsADirectoryError, like on Linux.
     let f = fixture(&[("/f.txt", b"x"), ("/dir/keep.txt", b"k")]);
     let out = run_python(
         f.overlay,
         "import os\ntry:\n    os.rename('/f.txt', '/dir')\n    print('RENAME SUCCEEDED')\nexcept OSError as e:\n    print('rename raised', type(e).__name__)\n",
     );
-    assert_eq!(out.stdout, b"RENAME SUCCEEDED\n");
+    assert_eq!(out.stdout, b"rename raised IsADirectoryError\n");
 }
 
 #[test]

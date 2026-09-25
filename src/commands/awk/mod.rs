@@ -231,7 +231,10 @@ fn run_awk(args: &[String], ctx: &CommandContext) -> Result<CommandResult, Strin
             result
                 .stderr
                 .push_str(&format!("awk: cannot write to {path}: {e}\n"));
-            result.exit_code = 1;
+            // A failed flush must not mask a fatal error's exit 2.
+            if result.exit_code == 0 {
+                result.exit_code = 1;
+            }
         }
     }
 

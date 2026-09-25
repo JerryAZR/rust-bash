@@ -370,6 +370,12 @@ impl<'a> AwkRuntime<'a> {
                 }
 
                 let matched = self.pattern_matches(rule, rule_idx);
+                // A fatal raised while MATCHING the pattern (invalid regex)
+                // aborts the run now — no further rule actions execute.
+                if let Some(Signal::Exit(code)) = self.deferred_signal {
+                    self.exit_code = code;
+                    break 'record;
+                }
                 if !matched {
                     continue;
                 }
@@ -718,12 +724,14 @@ impl<'a> AwkRuntime<'a> {
 
     /// Does `name` (already alias-resolved) currently hold a scalar —
     /// as a global or as a frame local that is not an array placeholder?
+    /// Uninitialized locals are UNTYPED (gawk), not scalar: array use of an
+    /// unassigned param/local is legal and creates a local array.
     fn name_is_scalar(&self, name: &str) -> bool {
         if self.variables.contains_key(name) {
             return true;
         }
         self.frames.last().is_some_and(|f| {
-            f.locals.contains_key(name)
+            matches!(f.locals.get(name), Some(v) if !matches!(v, AwkValue::Uninitialized))
                 && !f
                     .array_aliases
                     .get(name)
@@ -963,6 +971,11 @@ impl<'a> AwkRuntime<'a> {
             }
             AwkStatement::ForIn { var, array, body } => {
                 let array = self.resolve_array_name(array);
+                // gawk-fatal: iterating a scalar.
+                if !self.arrays.contains_key(&array) && self.name_is_scalar(&array) {
+                    self.fatal_type_misuse(&array, "scalar", "array");
+                    return Signal::None;
+                }
                 let keys: Vec<String> = self
                     .arrays
                     .get(array.as_str())
@@ -1008,6 +1021,11 @@ impl<'a> AwkRuntime<'a> {
             }
             AwkStatement::Delete { array, indices } => {
                 let array = self.resolve_array_name(array);
+                // gawk-fatal: deleting from a scalar.
+                if !self.arrays.contains_key(&array) && self.name_is_scalar(&array) {
+                    self.fatal_type_misuse(&array, "scalar", "array");
+                    return Signal::None;
+                }
                 if let Some(indices) = indices {
                     let key = self.eval_array_key(indices);
                     if let Some(arr) = self.arrays.get_mut(array.as_str()) {
@@ -1213,6 +1231,11 @@ impl<'a> AwkRuntime<'a> {
             Expr::InArray { index, array } => {
                 let key = self.eval_expr(index).to_string_val();
                 let array = self.resolve_array_name(array);
+                // gawk-fatal: membership test against a scalar.
+                if !self.arrays.contains_key(&array) && self.name_is_scalar(&array) {
+                    self.fatal_type_misuse(&array, "scalar", "array");
+                    return AwkValue::Num(0.0);
+                }
                 let exists = self
                     .arrays
                     .get(array.as_str())
@@ -1536,9 +1559,14 @@ impl<'a> AwkRuntime<'a> {
                 }
                 let s = self.eval_expr(&args[0]).to_string_val();
                 let array_name = match &args[1] {
-                    Expr::Var(name) => name.clone(),
+                    Expr::Var(name) => self.resolve_array_name(name),
                     _ => return AwkValue::Num(0.0),
                 };
+                // gawk-fatal: split target is a live scalar.
+                if !self.arrays.contains_key(&array_name) && self.name_is_scalar(&array_name) {
+                    self.fatal_type_misuse(&array_name, "scalar", "array");
+                    return AwkValue::Num(0.0);
+                }
                 let fs = if args.len() >= 3 {
                     // A regex literal passes its pattern text (evaluating it
                     // would yield the $0-match boolean instead).

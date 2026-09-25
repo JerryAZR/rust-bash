@@ -1413,3 +1413,55 @@ fn environ_and_argv_are_strnums() {
     let r = run(r#"export N=10; awk 'BEGIN{print (ENVIRON["N"]==10), (ENVIRON["N"]=="10")}'"#);
     assert_eq!(r.stdout, "1 1\n");
 }
+
+// ---------------------------------------------------------------------------
+// Review-3 pins: pattern fatals, misuse matrix completion, local arrays
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fatal_in_pattern_aborts_record_immediately() {
+    // gawk: nothing executes after the fatal — the second rule's action
+    // must not run.
+    let r = run(r#"printf 'x\n' | awk '/[/{print "A"} {print "B"}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
+    assert!(r.stderr.contains("fatal"), "{:?}", r.stderr);
+}
+
+#[test]
+fn misuse_matrix_delete_in_forin_split() {
+    // All four forms fatal on a live scalar (gawk-verified).
+    for (prog, ctx) in [
+        (r#"awk 'BEGIN{x=5; delete x[1]; print "after"}'"#, "delete"),
+        (r#"awk 'BEGIN{x=5; print (1 in x); print "after"}'"#, "in"),
+        (
+            r#"awk 'BEGIN{x=5; for (i in x) print i; print "after"}'"#,
+            "for-in",
+        ),
+        (
+            r#"awk 'BEGIN{x=5; n=split("a b", x); print "after"}'"#,
+            "split",
+        ),
+    ] {
+        let r = run(prog);
+        assert_eq!(r.exit_code, 2, "{ctx}");
+        assert_eq!(r.stdout, "", "{ctx}");
+        assert!(
+            r.stderr.contains("attempt to use scalar"),
+            "{ctx}: {:?}",
+            r.stderr
+        );
+    }
+    // Unassigned names stay legal (untyped, not scalar).
+    let r = run(r#"awk 'BEGIN{n=split("a b", x); print x[2]}'"#);
+    assert_eq!(r.stdout, "b\n");
+}
+
+#[test]
+fn unassigned_params_are_untyped_not_scalar() {
+    // The canonical local-array idiom must not fatal (gawk).
+    let r = run(r#"awk 'function f(p){p[1]=1; print p[1]} BEGIN{f()}'"#);
+    assert_eq!(r.stdout, "1\n");
+    let r = run(r#"awk 'function f(a,   tmp){split("x y", tmp); print tmp[2]} BEGIN{f(5)}'"#);
+    assert_eq!(r.stdout, "y\n");
+}
