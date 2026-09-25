@@ -461,6 +461,7 @@ fn deep_clone_whiteout_isolation() {
 #[cfg(unix)]
 #[test]
 fn chmod_lower_preserves_original_permissions() {
+    use std::os::unix::fs::PermissionsExt;
     let tmp = setup_lower();
     // Set specific permissions on the lower file
     let lower_path = tmp.path().join("README.md");
@@ -1496,7 +1497,7 @@ fn write_over_lower_file_inherits_lower_mode() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let ov = make_overlay(tmp.path());
     ov.write_file(Path::new("/tool.sh"), b"#!/bin/sh\necho new\n")
