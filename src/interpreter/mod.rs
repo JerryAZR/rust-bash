@@ -20,7 +20,7 @@ use std::time::Duration;
 
 pub use builtins::builtin_names;
 pub use expansion::expand_word;
-pub use walker::execute_program;
+pub use walker::{execute_program, execute_program_with_stdin};
 
 // ── Core types ───────────────────────────────────────────────────────
 
@@ -539,6 +539,9 @@ pub struct InterpreterState {
     /// Binary data from the previous pipeline stage, set by `execute_pipeline()`
     /// and consumed by `dispatch_command()` to populate `CommandContext::stdin_bytes`.
     pub(crate) pipe_stdin_bytes: Option<Vec<u8>>,
+    /// One-shot stdin override set by `RustBash::set_stdin` — consumed by
+    /// the next `exec()` call.
+    pub(crate) stdin_override: Option<String>,
     /// Stderr accumulated from command substitutions during word expansion.
     /// Drained by the enclosing command execution into its `ExecResult.stderr`.
     pub(crate) pending_cmdsub_stderr: String,
@@ -1761,6 +1764,7 @@ mod tests {
             proc_sub_counter: 0,
             proc_sub_prealloc: HashMap::new(),
             pipe_stdin_bytes: None,
+            stdin_override: None,
             pending_cmdsub_stderr: String::new(),
             pending_test_stderr: String::new(),
             fatal_expansion_error: false,

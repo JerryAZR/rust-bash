@@ -1018,6 +1018,7 @@ mod tests {
             fs: Arc::new(InMemoryFs::new()),
             env: HashMap::new(),
             cwd: "/".to_string(),
+            stdin_override: None,
             functions: HashMap::new(),
             last_exit_code: 0,
             commands: HashMap::new(),

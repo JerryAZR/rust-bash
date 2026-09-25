@@ -246,11 +246,10 @@ fn execute_and_compare(case: &TestCase) -> Option<String> {
         }
     };
 
-    let result = if let Some(stdin_content) = &case.stdin {
-        sh.exec_with_overrides(&case.script, None, None, Some(stdin_content))
-    } else {
-        sh.exec(&case.script)
-    };
+    if let Some(stdin_content) = &case.stdin {
+        sh.set_stdin(Some(stdin_content.clone()));
+    }
+    let result = sh.exec(&case.script);
 
     match result {
         Ok(r) => {

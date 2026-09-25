@@ -72,7 +72,12 @@ impl RustBash {
                 });
             }
         };
-        let mut result = interpreter::execute_program(&program, &mut self.state)?;
+        // One-shot stdin set via set_stdin() feeds the first command(s);
+        // consumed by this call (a stale override must not leak into the
+        // next exec).
+        let stdin = self.state.stdin_override.take().unwrap_or_default();
+        let mut result =
+            interpreter::execute_program_with_stdin(&program, &mut self.state, &stdin)?;
 
         // Fire EXIT trap at end of exec()
         if let Some(exit_cmd) = self.state.traps.get("EXIT").cloned()
@@ -252,63 +257,16 @@ impl RustBash {
         self.state.commands.insert(cmd.name().to_string(), cmd);
     }
 
-    /// Execute a command with per-exec environment and cwd overrides.
+    /// Set the stdin bytes for the next [`exec`](Self::exec) call.
     ///
-    /// Overrides are applied before execution and restored afterward.
-    pub fn exec_with_overrides(
-        &mut self,
-        input: &str,
-        env: Option<&HashMap<String, String>>,
-        cwd: Option<&str>,
-        stdin: Option<&str>,
-    ) -> Result<ExecResult, RustBashError> {
-        let saved_cwd = self.state.cwd.clone();
-        let mut overwritten_env: Vec<(String, Option<Variable>)> = Vec::new();
-
-        if let Some(env) = env {
-            for (key, value) in env {
-                let old = self.state.env.get(key).cloned();
-                overwritten_env.push((key.clone(), old));
-                self.state.env.insert(
-                    key.clone(),
-                    Variable {
-                        value: VariableValue::Scalar(value.clone()),
-                        attrs: VariableAttrs::EXPORTED,
-                    },
-                );
-            }
-        }
-
-        if let Some(cwd) = cwd {
-            self.state.cwd = cwd.to_string();
-        }
-
-        let result = if let Some(stdin) = stdin {
-            let delimiter = if stdin.contains("__EXEC_STDIN__") {
-                "__EXEC_STDIN_BOUNDARY__"
-            } else {
-                "__EXEC_STDIN__"
-            };
-            let full_command = format!("{input} <<'{delimiter}'\n{stdin}\n{delimiter}");
-            self.exec(&full_command)
-        } else {
-            self.exec(input)
-        };
-
-        // Restore state
-        self.state.cwd = saved_cwd;
-        for (key, old_val) in overwritten_env {
-            match old_val {
-                Some(var) => {
-                    self.state.env.insert(key, var);
-                }
-                None => {
-                    self.state.env.remove(&key);
-                }
-            }
-        }
-
-        result
+    /// Feeds the first command(s) of the next executed script exactly —
+    /// no parsing, no added newline, no sentinel delimiters. The override
+    /// is consumed by the next `exec` (one-shot); pass `None` to clear a
+    /// pending override without executing. Agents normally express stdin
+    /// in bash syntax (heredocs, pipes); this channel exists for harnesses
+    /// that carry stdin out-of-band (e.g. a tool-call schema).
+    pub fn set_stdin(&mut self, data: Option<String>) {
+        self.state.stdin_override = data;
     }
 
     /// Check whether `input` looks like a complete shell statement.
@@ -594,6 +552,7 @@ impl RustBashBuilder {
             proc_sub_counter: 0,
             proc_sub_prealloc: HashMap::new(),
             pipe_stdin_bytes: None,
+            stdin_override: None,
             pending_cmdsub_stderr: String::new(),
             pending_test_stderr: String::new(),
             fatal_expansion_error: false,

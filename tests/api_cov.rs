@@ -6,7 +6,6 @@ use rust_bash::{
     CommandContext, CommandResult, NodeType, RustBash, RustBashBuilder, VirtualCommand,
     env_from_host,
 };
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -189,57 +188,67 @@ fn register_command_adds_executable_command() {
     assert_eq!(r.exit_code, 0);
 }
 
-// ── exec_with_overrides ───────────────────────────────────────────
+// ── set_stdin ───────────────────────────────────────────────────────
 
 #[test]
-fn exec_with_overrides_env_applies_and_restores() {
+fn set_stdin_feeds_first_command_exactly() {
     let mut sh = shell();
-    let before = sh.exec("echo $USER").unwrap();
-    assert_eq!(before.stdout, "user\n");
-
-    let mut overrides = HashMap::new();
-    overrides.insert("USER".to_string(), "alice".to_string()); // pre-existing var
-    overrides.insert("BRAND_NEW".to_string(), "fresh".to_string()); // absent var
-
-    let r = sh
-        .exec_with_overrides("echo $USER $BRAND_NEW", Some(&overrides), None, None)
-        .unwrap();
-    assert_eq!(r.stdout, "alice fresh\n");
-
-    // Both overrides are rolled back: USER returns to its old value and
-    // BRAND_NEW is removed entirely.
-    let after = sh.exec("echo $USER [$BRAND_NEW]").unwrap();
-    assert_eq!(after.stdout, "user []\n");
+    sh.set_stdin(Some("line one\nline two".to_string()));
+    let r = sh.exec("cat").unwrap();
+    assert_eq!(r.stdout, "line one\nline two");
 }
 
 #[test]
-fn exec_with_overrides_cwd_applies_and_restores() {
+fn set_stdin_is_byte_exact_no_added_newline() {
+    // The old heredoc-splice approach silently appended a newline; the
+    // stdin channel must deliver the payload unchanged.
     let mut sh = shell();
-    let r = sh
-        .exec_with_overrides("pwd", None, Some("/tmp"), None)
-        .unwrap();
-    assert_eq!(r.stdout, "/tmp\n");
-    assert_eq!(sh.cwd(), "/");
+    sh.set_stdin(Some("abc".to_string()));
+    let r = sh.exec("cat | wc -c").unwrap();
+    assert_eq!(r.stdout.trim(), "3");
 }
 
 #[test]
-fn exec_with_overrides_stdin_feeds_heredoc() {
+fn set_stdin_payloads_are_never_parsed() {
+    // Payloads containing the old sentinel strings (or anything else)
+    // pass through untouched — the channel does no text substitution.
     let mut sh = shell();
-    let r = sh
-        .exec_with_overrides("cat", None, None, Some("line one\nline two"))
-        .unwrap();
-    assert_eq!(r.stdout, "line one\nline two\n");
+    sh.set_stdin(Some(
+        "a\n__EXEC_STDIN__\nb\n__EXEC_STDIN_BOUNDARY__\nc".to_string(),
+    ));
+    let r = sh.exec("cat").unwrap();
+    assert_eq!(r.stdout, "a\n__EXEC_STDIN__\nb\n__EXEC_STDIN_BOUNDARY__\nc");
+    assert_eq!(r.exit_code, 0);
 }
 
 #[test]
-fn exec_with_overrides_stdin_containing_default_delimiter_uses_alternate() {
+fn set_stdin_with_comment_tailed_script() {
+    // The script text is never spliced, so a trailing comment cannot eat
+    // the stdin channel.
     let mut sh = shell();
-    // The stdin payload contains the default heredoc delimiter, forcing the
-    // implementation to fall back to its alternate delimiter.
-    let r = sh
-        .exec_with_overrides("cat", None, None, Some("has __EXEC_STDIN__ inside"))
-        .unwrap();
-    assert_eq!(r.stdout, "has __EXEC_STDIN__ inside\n");
+    sh.set_stdin(Some("payload".to_string()));
+    let r = sh.exec("cat # trailing note").unwrap();
+    assert_eq!(r.stdout, "payload");
+}
+
+#[test]
+fn set_stdin_is_one_shot() {
+    // Consumed by the next exec; a stale override must not leak forward.
+    let mut sh = shell();
+    sh.set_stdin(Some("first".to_string()));
+    let r = sh.exec("cat").unwrap();
+    assert_eq!(r.stdout, "first");
+    let r = sh.exec("cat; echo status=$?").unwrap();
+    assert!(r.stdout.contains("status=0"), "{:?}", r.stdout);
+}
+
+#[test]
+fn set_stdin_none_clears_pending() {
+    let mut sh = shell();
+    sh.set_stdin(Some("ignored".to_string()));
+    sh.set_stdin(None);
+    let r = sh.exec("cat; echo status=$?").unwrap();
+    assert!(r.stdout.contains("status=0"));
 }
 
 // ── is_input_complete ─────────────────────────────────────────────

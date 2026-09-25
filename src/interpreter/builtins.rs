@@ -6725,6 +6725,7 @@ fn run_in_subshell(
         fs: cloned_fs,
         env,
         cwd: state.cwd.clone(),
+        stdin_override: None,
         functions: if config.shell_process {
             HashMap::new()
         } else {
@@ -7032,6 +7033,7 @@ mod tests {
             proc_sub_counter: 0,
             proc_sub_prealloc: HashMap::new(),
             pipe_stdin_bytes: None,
+            stdin_override: None,
             pending_cmdsub_stderr: String::new(),
             pending_test_stderr: String::new(),
             fatal_expansion_error: false,

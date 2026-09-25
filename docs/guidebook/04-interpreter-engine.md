@@ -151,8 +151,10 @@ as a directory in the VFS — pointing `HOME` at a nonexistent path in an overla
 shadow dir in the upper layer (shows up in `diff()`).
 
 At runtime the harness composes env explicitly: `env()` at construction,
-`set_env()`/`unset_env()` on a live shell, per-exec temporary overrides via
-`exec_with_overrides()`. `env_from_host(&[names])` pulls named
+`set_env()`/`unset_env()` on a live shell. Out-of-band stdin goes through
+`set_stdin()` (one-shot, byte-exact, consumed by the next `exec()`);
+agents normally express env/stdin/redirection in bash syntax itself.
+`env_from_host(&[names])` pulls named
 vars from the host environment as an explicit, auditable grant and returns
 them alongside the names that were not set; blanket host-env pass-through
 is an anti-pattern

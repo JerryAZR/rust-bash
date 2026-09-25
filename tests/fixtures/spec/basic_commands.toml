@@ -30,7 +30,10 @@ exit_code = 0
 name = "cat_from_stdin"
 script = "cat"
 stdin = "hello from stdin"
-stdout = "hello from stdin\n"
+# Verified against real bash: cat emits the payload verbatim — NO trailing
+# newline is added (16 bytes). (The old heredoc-splice stdin path polluted
+# this expectation with an extra \n.)
+stdout = "hello from stdin"
 exit_code = 0
 
 [[cases]]
