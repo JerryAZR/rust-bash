@@ -107,7 +107,7 @@ These were pinned as suspected divergences during the coverage campaign but real
 
 The BWK conformance suite (`tests/awk_conformance.rs`, 225 programs recorded from gawk 5.0) passes 214/225; the 11 skips are implementation-defined (for-in iteration order, rand() default sequence), policy (pipe forms), or a byte-level `%c` corner — each reverse-asserted in the suite's skip list.
 
-File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through the sandbox fs, `getline` bare/var/`< file` forms with gawk cursor semantics, and `close()`. **Pipe forms (`print | "cmd"`, `"cmd" | getline`) are deliberately unimplemented** pending an explicit security decision (awk's backdoor to command execution); they fail *visibly* (stderr + exit 1), never silently. See `tests/fixtures/comparison/awk/io.toml`.
+File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through the sandbox fs, `getline` bare/var/field/array-element/`< file` forms with gawk cursor semantics, and `close()`. **Pipe forms (`print | "cmd"`, `"cmd" | getline`) are deliberately unimplemented** pending an explicit security decision (awk's backdoor to command execution); they fail *visibly* (stderr + exit 1), never silently. See `tests/fixtures/comparison/awk/io.toml`.
 
 | Behavior | Expected | Pinned in |
 |---|---|---|
@@ -123,7 +123,6 @@ File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through t
 | Non-finite floats print libc-style `inf`/`INF` | gawk prints `+inf` | `tests/awk_cov.rs::awk_non_finite_float_formats` |
 | Undefined function call `foo(1)` parses as concatenation of the variable `foo` with `(1)` (no spacing info in tokens to enforce gawk's no-space rule) | gawk: parse-time error for undefined functions | `tests/awk_cov.rs::undefined_function_name_parses_as_concatenation` |
 | User function named like a builtin (`function length(x)`) shadows the builtin | gawk: parse-time rejection | `tests/awk_cov.rs` |
-| awk fatal type-misuse (`attempt to use scalar as array`) prints the message + exit 2 but does NOT abort the run | gawk aborts immediately (END skipped) | `tests/awk_cov.rs` |
 | Space between a user-function name and its call paren accepted (`f (1)`) | gawk: rejected (concat ambiguity) | `tests/awk_cov.rs` |
 | Field assignments lose no strnum distinction: `$1 = "5"` reads back as a strnum (numeric comparison) since fields carry no per-field attribute | gawk: the assigned string constant is NOT a strnum (string comparison) | none (too deep to pin cheaply; fields are stored as plain strings) |
 | Deferred-write blind spot: `print > "/f"` then `getline < "/f"` in one run reads the stale pre-run content (writes are applied after the run finishes) | gawk sees the just-written record | `tests/awk_cov.rs::print_then_getline_same_file_reads_stale_content` |

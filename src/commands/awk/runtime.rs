@@ -186,6 +186,9 @@ pub struct AwkRuntime<'a> {
     /// flow through expression evaluation, so they are delivered to the
     /// enclosing statement loop).
     deferred_signal: Option<Signal>,
+    /// A gawk-fatal error occurred (invalid regex, scalar/array misuse,
+    /// return outside function): END rules must NOT run (gawk aborts).
+    fatal: bool,
     // Input stream state (shared cursor for the main loop and bare getline)
     pending_inputs: std::collections::VecDeque<(String, String)>,
     current_records: Vec<String>,
@@ -241,6 +244,7 @@ impl<'a> AwkRuntime<'a> {
             frames: Vec::new(),
             max_call_depth: usize::MAX,
             deferred_signal: None,
+            fatal: false,
             pending_inputs: std::collections::VecDeque::new(),
             current_records: Vec::new(),
             record_pos: 0,
@@ -297,7 +301,17 @@ impl<'a> AwkRuntime<'a> {
             .insert("ARGC".to_string(), AwkValue::Num(args.len() as f64));
         let argv = self.arrays.entry("ARGV".to_string()).or_default();
         for (i, arg) in args.iter().enumerate() {
-            argv.insert(i.to_string(), AwkValue::Str(arg.clone()));
+            // Command-line values are strnums (they "came from outside").
+            argv.insert(i.to_string(), AwkValue::StrNum(arg.clone()));
+        }
+    }
+
+    /// Populate ENVIRON from the process environment visible to the
+    /// interpreter. Values are strnums (gawk: external origin).
+    pub fn set_environ(&mut self, env: &[(String, String)]) {
+        let environ = self.arrays.entry("ENVIRON".to_string()).or_default();
+        for (k, v) in env {
+            environ.insert(k.clone(), AwkValue::StrNum(v.clone()));
         }
     }
 
@@ -382,9 +396,13 @@ impl<'a> AwkRuntime<'a> {
             }
         }
 
-        // Execute END rules
+        // Execute END rules — but NOT after a fatal error (gawk aborts:
+        // the fatal message is the last word; END never runs).
         if let Some(code) = begin_exit {
             self.exit_code = code;
+        }
+        if self.fatal {
+            return (self.exit_code, self.stdout.clone(), self.stderr.clone());
         }
         for rule in &program.rules {
             if matches!(rule.pattern, Some(AwkPattern::End))
@@ -462,18 +480,35 @@ impl<'a> AwkRuntime<'a> {
     /// - `getline [var] < file` — next record from that file ($0/NF or var;
     ///   NR/FNR untouched); 1 ok, 0 at EOF, -1 on open error
     /// - `cmd | getline` — pipes are an explicit, visible error
+    ///
+    /// Assign a getline record through an lvalue (gawk).
+    fn assign_getline_target(&mut self, target: &Expr, record: &str) {
+        match target {
+            Expr::Var(name) => self.set_variable(name, AwkValue::StrNum(record.to_string())),
+            Expr::FieldRef(idx) => {
+                let i = self.eval_expr(idx).to_num() as usize;
+                self.set_field(i, record);
+            }
+            Expr::ArrayRef { name, indices } => {
+                let key = self.eval_array_key(indices);
+                self.set_array_val(name, &key, AwkValue::StrNum(record.to_string()));
+            }
+            // Unreachable: the parser only builds these three lvalue forms.
+            _ => {}
+        }
+    }
+
     fn eval_getline(
         &mut self,
-        var: Option<&str>,
+        target: Option<&Expr>,
         source: Option<(GetlineSource, &Expr)>,
     ) -> AwkValue {
         match source {
-            None => match var {
+            None => match target {
                 None => AwkValue::Num(if self.next_input_record() { 1.0 } else { 0.0 }),
-                Some(name) => match self.next_raw_record() {
+                Some(t) => match self.next_raw_record() {
                     Some(record) => {
-                        self.variables
-                            .insert(name.to_string(), AwkValue::StrNum(record));
+                        self.assign_getline_target(t, &record);
                         AwkValue::Num(1.0)
                     }
                     None => AwkValue::Num(0.0),
@@ -513,15 +548,14 @@ impl<'a> AwkRuntime<'a> {
                 }
                 let record = records[*pos].clone();
                 *pos += 1;
-                match var {
+                match target {
                     None => {
                         // Sets $0/NF but NOT NR/FNR.
                         self.set_record(&record);
                         self.sync_builtin_vars();
                     }
-                    Some(name) => {
-                        self.variables
-                            .insert(name.to_string(), AwkValue::StrNum(record));
+                    Some(t) => {
+                        self.assign_getline_target(t, &record);
                     }
                 }
                 AwkValue::Num(1.0)
@@ -647,7 +681,29 @@ impl<'a> AwkRuntime<'a> {
 
     // ── Variable access ──────────────────────────────────────────────
 
-    fn get_var(&self, name: &str) -> AwkValue {
+    /// Raw scalar lookup with no misuse checking (array arguments bind
+    /// through this — using them as scalars fatals later via get_var).
+    fn get_var_raw(&self, name: &str) -> AwkValue {
+        if let Some(frame) = self.frames.last()
+            && let Some(v) = frame.locals.get(name)
+        {
+            return v.clone();
+        }
+        self.variables
+            .get(name)
+            .cloned()
+            .unwrap_or(AwkValue::Uninitialized)
+    }
+
+    fn get_var(&mut self, name: &str) -> AwkValue {
+        // gawk-fatal: an array used in a scalar context. An array-alias
+        // binding (array parameter) fatals through its root; a bare global
+        // array fatals directly.
+        let root = self.resolve_array_name(name);
+        if self.arrays.contains_key(&root) && !self.variables.contains_key(&root) {
+            self.fatal_type_misuse(&root, "array", "scalar context");
+            return AwkValue::Uninitialized;
+        }
         // Function-local scalar params/locals shadow globals (top frame only).
         if let Some(frame) = self.frames.last()
             && let Some(v) = frame.locals.get(name)
@@ -658,6 +714,21 @@ impl<'a> AwkRuntime<'a> {
             .get(name)
             .cloned()
             .unwrap_or(AwkValue::Uninitialized)
+    }
+
+    /// Does `name` (already alias-resolved) currently hold a scalar —
+    /// as a global or as a frame local that is not an array placeholder?
+    fn name_is_scalar(&self, name: &str) -> bool {
+        if self.variables.contains_key(name) {
+            return true;
+        }
+        self.frames.last().is_some_and(|f| {
+            f.locals.contains_key(name)
+                && !f
+                    .array_aliases
+                    .get(name)
+                    .is_some_and(|root| self.arrays.contains_key(root))
+        })
     }
 
     /// Resolve an array name through the top frame's alias table (array
@@ -671,6 +742,13 @@ impl<'a> AwkRuntime<'a> {
     }
 
     fn set_variable(&mut self, name: &str, value: AwkValue) {
+        // gawk-fatal: scalar assignment to an array (a scalar write to an
+        // array parameter kills the binding at the write, per gawk).
+        let root = self.resolve_array_name(name);
+        if self.arrays.contains_key(&root) && !self.variables.contains_key(&root) {
+            self.fatal_type_misuse(&root, "array", "scalar context");
+            return;
+        }
         // Writes to a function-local param/local stay in the frame.
         if let Some(frame) = self.frames.last_mut()
             && frame.locals.contains_key(name)
@@ -701,8 +779,8 @@ impl<'a> AwkRuntime<'a> {
 
     fn get_array_val(&mut self, name: &str, key: &str) -> AwkValue {
         let name = self.resolve_array_name(name);
-        if !self.arrays.contains_key(&name) && self.variables.contains_key(&name) {
-            self.fatal_type_misuse(&name, "array", "scalar");
+        if !self.arrays.contains_key(&name) && self.name_is_scalar(&name) {
+            self.fatal_type_misuse(&name, "scalar", "array");
             return AwkValue::Uninitialized;
         }
         self.arrays
@@ -714,7 +792,7 @@ impl<'a> AwkRuntime<'a> {
 
     fn set_array_val(&mut self, name: &str, key: &str, value: AwkValue) {
         let name = self.resolve_array_name(name);
-        if !self.arrays.contains_key(&name) && self.variables.contains_key(&name) {
+        if !self.arrays.contains_key(&name) && self.name_is_scalar(&name) {
             self.fatal_type_misuse(&name, "scalar", "array");
             return;
         }
@@ -731,15 +809,27 @@ impl<'a> AwkRuntime<'a> {
             "awk: fatal: invalid regular expression '{pattern}': {err}\n"
         ));
         self.exit_code = 2;
+        self.fatal = true;
         self.deferred_signal = Some(Signal::Exit(2));
     }
 
     /// gawk-fatal: use of a scalar where an array is required or vice versa.
     fn fatal_type_misuse(&mut self, name: &str, actual: &str, attempted: &str) {
-        self.stderr.push_str(&format!(
-            "awk: fatal: attempt to use {actual} `{name}' as an {attempted}\n"
-        ));
+        // gawk's two message shapes:
+        //   "attempt to use scalar `x' as an array"
+        //   "attempt to use array `a' in a scalar context"
+        if attempted == "scalar context" {
+            self.stderr.push_str(&format!(
+                "awk: fatal: attempt to use {actual} `{name}' in a scalar context\n"
+            ));
+        } else {
+            self.stderr.push_str(&format!(
+                "awk: fatal: attempt to use {actual} `{name}' as an {attempted}\n"
+            ));
+        }
         self.exit_code = 2;
+        self.fatal = true;
+        self.deferred_signal = Some(Signal::Exit(2));
     }
 
     /// gawk-fatal: `return` at the top level (outside any function).
@@ -747,6 +837,8 @@ impl<'a> AwkRuntime<'a> {
         self.stderr
             .push_str("awk: fatal: `return' outside function\n");
         self.exit_code = 2;
+        self.fatal = true;
+        self.deferred_signal = Some(Signal::Exit(2));
     }
 
     // ── Block / statement execution ──────────────────────────────────
@@ -1161,9 +1253,9 @@ impl<'a> AwkRuntime<'a> {
                 self.assign_to(e, AwkValue::Num(val - 1.0));
                 AwkValue::Num(val)
             }
-            Expr::Getline { var, source } => {
+            Expr::Getline { target, source } => {
                 let source = source.as_ref().map(|(k, e)| (*k, e.as_ref()));
-                self.eval_getline(var.as_deref(), source)
+                self.eval_getline(target.as_deref(), source)
             }
         }
     }
@@ -1312,7 +1404,9 @@ impl<'a> AwkRuntime<'a> {
         for (i, param) in params.iter().enumerate() {
             match args.get(i) {
                 Some(Expr::Var(varname)) => {
-                    frame.locals.insert(param.clone(), self.get_var(varname));
+                    frame
+                        .locals
+                        .insert(param.clone(), self.get_var_raw(varname));
                     let root = self.resolve_array_name(varname);
                     frame.array_aliases.insert(param.clone(), root);
                 }
@@ -1330,9 +1424,13 @@ impl<'a> AwkRuntime<'a> {
         self.frames.pop();
         match sig {
             Signal::Return(v) => v,
-            // exit/next propagate through the expression boundary.
+            // exit/next propagate through the expression boundary. A
+            // pending fatal (deferred Exit(2)) outranks the body's signal —
+            // a `next` executed after a fatal must not resurrect the run.
             Signal::Exit(_) | Signal::Next => {
-                self.deferred_signal = Some(sig);
+                if self.deferred_signal.is_none() {
+                    self.deferred_signal = Some(sig);
+                }
                 AwkValue::Uninitialized
             }
             // No return → uninitialized (awk). Break/Continue escaping a
@@ -1369,13 +1467,15 @@ impl<'a> AwkRuntime<'a> {
                     let s = self.get_field(0);
                     AwkValue::Num(s.chars().count() as f64)
                 } else {
-                    let val = self.eval_expr(&args[0]);
+                    // Array check BEFORE evaluating: eval of a Var that
+                    // names an array is a scalar-context fatal.
                     if let Expr::Var(vname) = &args[0] {
                         let vname = self.resolve_array_name(vname);
                         if let Some(arr) = self.arrays.get(vname.as_str()) {
                             return AwkValue::Num(arr.len() as f64);
                         }
                     }
+                    let val = self.eval_expr(&args[0]);
                     AwkValue::Num(val.to_string_val().chars().count() as f64)
                 }
             }

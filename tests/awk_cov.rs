@@ -1288,12 +1288,11 @@ fn user_function_arrays_by_reference() {
     // Using an unassigned var as an array argument creates it in the caller.
     let r = run("awk 'function fill(a){a[\"n\"]=42} BEGIN{fill(out); print out[\"n\"]}'");
     assert_eq!(r.stdout, "42\n");
-    // Scalar passed where the callee uses an array: gawk-fatal (exit 2).
-    // Divergence: we print the message and set exit 2 but do not abort the
-    // run immediately (gawk aborts).
+    // Scalar passed where the callee uses an array: gawk-fatal (exit 2,
+    // the run aborts — `after` is never printed, END would not run).
     let r = run("awk 'function f(a){a[1]=2} BEGIN{x=5; f(x); print \"after\"}'");
     assert_eq!(r.exit_code, 2);
-    assert_eq!(r.stdout, "after\n");
+    assert_eq!(r.stdout, "");
     assert_eq!(
         r.stderr,
         "awk: fatal: attempt to use scalar `x' as an array\n"
@@ -1331,4 +1330,86 @@ fn user_function_recursion_depth_limited() {
         .exec("awk 'function f(n){return f(n+1)} BEGIN{f(0)}'")
         .unwrap_err();
     assert!(err.to_string().contains("max_call_depth"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Batch A review fixes: suppress_gt guard, fatal semantics, getline lvalues,
+// ENVIRON/ARGV strnum
+// ---------------------------------------------------------------------------
+
+#[test]
+fn print_paren_arg_then_redirect_is_not_a_comparison() {
+    // suppress_gt backtrack leak: the failed `(1)` group probe left the flag
+    // cleared, so `2 > "/f"` parsed as a COMPARISON and print went to stdout.
+    // gawk: the whole line redirects; stdout stays empty.
+    let r = run(r#"awk 'BEGIN { print (1), 2 > "/f" }'; cat /f"#);
+    assert_eq!(r.stdout, "1 2\n");
+    let r = run(r#"awk 'BEGIN { print 1, (2) > "/f" }'; cat /f"#);
+    assert_eq!(r.stdout, "1 2\n");
+    // Comparisons inside parens still work everywhere.
+    let r = run(r#"awk 'BEGIN { print (1 > 2); if ((1) > 0) print "yes" }'"#);
+    assert_eq!(r.stdout, "0\nyes\n");
+}
+
+#[test]
+fn awk_fatal_skips_end_rules() {
+    // gawk: a fatal error aborts the run; END never executes.
+    let r = run(r#"awk 'BEGIN{a[1]=1; b=a} END{print "END RAN"}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
+    assert_eq!(
+        r.stderr,
+        "awk: fatal: attempt to use array `a' in a scalar context\n"
+    );
+    let r = run(r#"awk 'BEGIN{x=1; x[1]=2} END{print "END RAN"}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
+    // A fatal raised mid-input stops record processing too (a `next` in the
+    // same statement must not resurrect the run).
+    let r = run(r#"printf 'one\ntwo\n' | awk '{ x[1]=1; y=x; next } END{print "END RAN"}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn awk_misuse_message_shapes_match_gawk() {
+    // scalar -> array: "attempt to use scalar `x' as an array"
+    let r = run(r#"awk 'BEGIN{x=1; print x[1]}'"#);
+    assert_eq!(
+        r.stderr,
+        "awk: fatal: attempt to use scalar `x' as an array\n"
+    );
+    // array -> scalar: "attempt to use array `a' in a scalar context"
+    let r = run(r#"awk 'BEGIN{a[1]=1; print a}'"#);
+    assert_eq!(
+        r.stderr,
+        "awk: fatal: attempt to use array `a' in a scalar context\n"
+    );
+    // scalar write to an array parameter fatals at the write (gawk)
+    let r = run(r#"awk 'function f(p){p=5; print "wrote"} BEGIN{a[1]=1; f(a)}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn getline_lvalue_forms() {
+    // getline $n: assigns the field and rebuilds $0 (gawk byte-for-byte).
+    let r = run(r#"printf 'a 10 b\n' > /in; awk 'BEGIN{getline $2 < "/in"; print $0}' /dev/null"#);
+    assert_eq!(r.stdout, " a 10 b\n");
+    // getline arr[i]: assigns the element.
+    let r = run(
+        r#"printf 'hello\n' > /in; awk 'BEGIN{arr["k"]="old"; getline arr["k"] < "/in"; print arr["k"]}' /dev/null"#,
+    );
+    assert_eq!(r.stdout, "hello\n");
+    // getline var from a file: strnum semantics preserved.
+    let r = run(r#"printf 'x y\n' > /in; awk 'BEGIN{getline v < "/in"; print (v == "x y")}'"#);
+    assert_eq!(r.stdout, "1\n");
+}
+
+#[test]
+fn environ_and_argv_are_strnums() {
+    let r = run(r#"export FOO=bar; awk 'BEGIN{print ENVIRON["FOO"]}'"#);
+    assert_eq!(r.stdout, "bar\n");
+    let r = run(r#"export N=10; awk 'BEGIN{print (ENVIRON["N"]==10), (ENVIRON["N"]=="10")}'"#);
+    assert_eq!(r.stdout, "1 1\n");
 }

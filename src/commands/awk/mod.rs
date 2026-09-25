@@ -185,6 +185,14 @@ fn run_awk(args: &[String], ctx: &CommandContext) -> Result<CommandResult, Strin
     argv_args.extend(opts.files.clone());
     runtime.set_argc_argv(&argv_args);
 
+    // ENVIRON from the interpreter's environment
+    let environ: Vec<(String, String)> = ctx
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    runtime.set_environ(&environ);
+
     // Collect inputs
     let inputs = collect_inputs(&opts.files, ctx)?;
 

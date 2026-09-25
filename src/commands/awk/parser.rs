@@ -156,7 +156,9 @@ pub enum Expr {
     PostIncrement(Box<Expr>),
     PostDecrement(Box<Expr>),
     Getline {
-        var: Option<String>,
+        /// Assignment target: a Var, FieldRef, or ArrayRef lvalue
+        /// (`getline x`, `getline $2`, `getline arr[i]`); None sets $0.
+        target: Option<Box<Expr>>,
         source: Option<(GetlineSource, Box<Expr>)>,
     },
 }
@@ -453,6 +455,24 @@ impl Parser {
         }
     }
 
+    /// Run `f` with `suppress_gt` forced to `value`, restoring the previous
+    /// value afterwards — even on error or internal backtracking. Every
+    /// scoped reset of the flag goes through here so a backtrack path can
+    /// never leak it (the class of bug where a failed paren probe left
+    /// `suppress_gt = false` and a following print argument misparsed
+    /// `> "/f"` as a comparison).
+    fn with_suppress_gt<T>(
+        &mut self,
+        value: bool,
+        f: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let saved = self.suppress_gt;
+        self.suppress_gt = value;
+        let result = f(self);
+        self.suppress_gt = saved;
+        result
+    }
+
     /// Parse one print/printf argument. gawk/BWK extension: a
     /// parenthesized comma group flattens into separate arguments
     /// (`print (a, b)` == `print a, b`); assignments are full expressions
@@ -460,22 +480,25 @@ impl Parser {
     fn parse_print_arg(&mut self) -> Result<Vec<Expr>, String> {
         if matches!(self.peek(), Token::LParen) {
             let save = self.pos;
-            self.advance();
             // Inside explicit parens, `>` is a comparison (awk grammar).
-            self.suppress_gt = false;
-            let first = self.parse_expr()?;
-            if matches!(self.peek(), Token::Comma) {
-                let mut group = vec![first];
-                while matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                    self.skip_newlines();
-                    group.push(self.parse_expr()?);
+            let group = self.with_suppress_gt(false, |p| {
+                p.advance();
+                let first = p.parse_expr()?;
+                if !matches!(p.peek(), Token::Comma) {
+                    return Ok(None);
                 }
-                self.suppress_gt = true;
-                self.expect(&Token::RParen)?;
+                let mut group = vec![first];
+                while matches!(p.peek(), Token::Comma) {
+                    p.advance();
+                    p.skip_newlines();
+                    group.push(p.parse_expr()?);
+                }
+                p.expect(&Token::RParen)?;
+                Ok(Some(group))
+            })?;
+            if let Some(group) = group {
                 return Ok(group);
             }
-            self.suppress_gt = true;
             self.pos = save; // not a group — reparse as a normal argument
         }
         Ok(vec![self.parse_expr()?])
@@ -483,37 +506,39 @@ impl Parser {
 
     fn parse_print(&mut self) -> Result<AwkStatement, String> {
         self.advance(); // consume 'print'
-        let mut exprs = Vec::new();
-        self.suppress_gt = true;
-        if self.is_print_expr_start() {
-            loop {
-                exprs.extend(self.parse_print_arg()?);
-                if !matches!(self.peek(), Token::Comma) {
-                    break;
+        let exprs = self.with_suppress_gt(true, |p| {
+            let mut exprs = Vec::new();
+            if p.is_print_expr_start() {
+                loop {
+                    exprs.extend(p.parse_print_arg()?);
+                    if !matches!(p.peek(), Token::Comma) {
+                        break;
+                    }
+                    p.advance();
+                    p.skip_newlines();
                 }
-                self.advance();
-                self.skip_newlines();
             }
-        }
-        self.suppress_gt = false;
+            Ok(exprs)
+        })?;
         let redirect = self.parse_redirect()?;
         Ok(AwkStatement::Print { exprs, redirect })
     }
 
     fn parse_printf(&mut self) -> Result<AwkStatement, String> {
         self.advance(); // consume 'printf'
-        self.suppress_gt = true;
         // `printf(fmt, args)` — the whole argument list may be parenthesized
         // (function-call form). parse_print_arg flattens paren groups.
-        let mut all = self.parse_print_arg()?;
-        let format = all.remove(0);
-        let mut exprs: Vec<Expr> = all;
-        while matches!(self.peek(), Token::Comma) {
-            self.advance();
-            self.skip_newlines();
-            exprs.extend(self.parse_print_arg()?);
-        }
-        self.suppress_gt = false;
+        let (format, exprs) = self.with_suppress_gt(true, |p| {
+            let mut all = p.parse_print_arg()?;
+            let format = all.remove(0);
+            let mut exprs: Vec<Expr> = all;
+            while matches!(p.peek(), Token::Comma) {
+                p.advance();
+                p.skip_newlines();
+                exprs.extend(p.parse_print_arg()?);
+            }
+            Ok((format, exprs))
+        })?;
         let redirect = self.parse_redirect()?;
         Ok(AwkStatement::Printf {
             format,
@@ -762,12 +787,31 @@ impl Parser {
     /// Parse the optional `var` and `< file` after a `getline` token; when
     /// the getline came from `cmd | getline`, `pipe_source` is that command.
     fn parse_getline_tail(&mut self, pipe_source: Option<Expr>) -> Result<Expr, String> {
-        let var = if let Token::Ident(name) = self.peek() {
-            let name = name.clone();
-            self.advance();
-            Some(name)
-        } else {
-            None
+        // gawk lvalues: `getline var`, `getline $n`, `getline arr[i]`.
+        let target = match self.peek() {
+            Token::Ident(name) => {
+                let name = name.clone();
+                self.advance();
+                if matches!(self.peek(), Token::LBracket) {
+                    self.advance();
+                    let mut indices = vec![self.parse_expr()?];
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance();
+                        indices.push(self.parse_expr()?);
+                    }
+                    self.expect(&Token::RBracket)?;
+                    Some(Box::new(Expr::ArrayRef { name, indices }))
+                } else {
+                    Some(Box::new(Expr::Var(name)))
+                }
+            }
+            Token::Dollar => {
+                self.advance();
+                // Field index is a unary-level expression ($2, $i, $(i+1)).
+                let idx = self.parse_unary()?;
+                Some(Box::new(Expr::FieldRef(Box::new(idx))))
+            }
+            _ => None,
         };
         let source = if matches!(self.peek(), Token::Lt) {
             self.advance();
@@ -775,7 +819,7 @@ impl Parser {
         } else {
             pipe_source.map(|e| (GetlineSource::Pipe, Box::new(e)))
         };
-        Ok(Expr::Getline { var, source })
+        Ok(Expr::Getline { target, source })
     }
 
     fn peek2(&self) -> Token {
@@ -840,19 +884,22 @@ impl Parser {
         // parenthesized comma list (only meaningful before `in`).
         if matches!(self.peek(), Token::LParen) && self.peek2() != Token::RParen {
             let save = self.pos;
-            let saved_gt = self.suppress_gt;
-            self.advance();
-            self.suppress_gt = false;
-            let first = self.parse_expr()?;
-            if matches!(self.peek(), Token::Comma) {
-                let mut group = vec![first];
-                while matches!(self.peek(), Token::Comma) {
-                    self.advance();
-                    self.skip_newlines();
-                    group.push(self.parse_expr()?);
+            let group = self.with_suppress_gt(false, |p| {
+                p.advance();
+                let first = p.parse_expr()?;
+                if !matches!(p.peek(), Token::Comma) {
+                    return Ok(None);
                 }
-                self.expect(&Token::RParen)?;
-                self.suppress_gt = saved_gt;
+                let mut group = vec![first];
+                while matches!(p.peek(), Token::Comma) {
+                    p.advance();
+                    p.skip_newlines();
+                    group.push(p.parse_expr()?);
+                }
+                p.expect(&Token::RParen)?;
+                Ok(Some(group))
+            })?;
+            if let Some(group) = group {
                 if matches!(self.peek(), Token::In) {
                     self.advance();
                     return match self.advance() {
@@ -1123,10 +1170,7 @@ impl Parser {
                 // Check for (expr) in array — parenthesized in-expression.
                 // Parentheses reset the print-argument `>` suppression: awk
                 // requires parens for a real comparison in print position.
-                let saved = self.suppress_gt;
-                self.suppress_gt = false;
-                let expr = self.parse_expr()?;
-                self.suppress_gt = saved;
+                let expr = self.with_suppress_gt(false, |p| p.parse_expr())?;
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
@@ -1140,17 +1184,17 @@ impl Parser {
                     // reset the print-argument `>` suppression so
                     // `print substr($0, 1, NF > 1)` parses (awk grammar).
                     self.advance();
-                    let saved = self.suppress_gt;
-                    self.suppress_gt = false;
-                    let mut args = Vec::new();
-                    if !matches!(self.peek(), Token::RParen) {
-                        args.push(self.parse_expr()?);
-                        while matches!(self.peek(), Token::Comma) {
-                            self.advance();
-                            args.push(self.parse_expr()?);
+                    let args = self.with_suppress_gt(false, |p| {
+                        let mut args = Vec::new();
+                        if !matches!(p.peek(), Token::RParen) {
+                            args.push(p.parse_expr()?);
+                            while matches!(p.peek(), Token::Comma) {
+                                p.advance();
+                                args.push(p.parse_expr()?);
+                            }
                         }
-                    }
-                    self.suppress_gt = saved;
+                        Ok(args)
+                    })?;
                     self.expect(&Token::RParen)?;
                     Ok(Expr::FuncCall { name, args })
                 } else if matches!(self.peek(), Token::LBracket) {
