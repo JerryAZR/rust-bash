@@ -1792,11 +1792,10 @@ fn write_through_live_lower_symlink_writes_target() {
         .find(|w| w.path == Path::new("/target.txt"))
         .expect("diff reports the write at the target")
         .clone();
-    assert_eq!(
-        w.mode & 0o777,
-        0o644 & (w.mode),
-        "mode from target, not link"
-    );
+    // Mode comes from the TARGET (not the symlink's 0o777) and matches
+    // what the overlay reports for the target (unix modes carry type bits).
+    assert_ne!(w.mode & 0o777, 0o777);
+    assert_eq!(w.mode, ov.stat(Path::new("/target.txt")).unwrap().mode);
 }
 
 #[test]
