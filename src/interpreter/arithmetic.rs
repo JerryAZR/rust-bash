@@ -891,8 +891,12 @@ fn write_indexed_element(
 // ── Variable resolution helpers ─────────────────────────────────────
 
 fn read_var(state: &mut InterpreterState, name: &str) -> Result<i64, RustBashError> {
+    // Resolve namerefs FIRST: a nameref to a dynamic variable (`declare -n
+    // r=RANDOM; $((r))`) must draw a fresh value, and the always-set
+    // exemption from `set -u` must apply through the alias (bash).
+    let resolved = crate::interpreter::resolve_nameref_or_self(name, state);
     // Handle special parameters
-    match name {
+    match resolved.as_str() {
         "#" => return Ok(state.positional_params.len() as i64),
         "?" => return Ok(state.last_exit_code as i64),
         "LINENO" => return Ok(state.current_lineno as i64),
@@ -935,6 +939,13 @@ fn resolve_var_recursive(
         return Ok(scalar.parse::<i64>().unwrap_or(0));
     }
     let resolved = crate::interpreter::resolve_nameref_or_self(name, state);
+    // Dynamic variables reached by recursion (a value naming RANDOM etc. —
+    // bash evaluates a variable's string value as an expression).
+    match resolved.as_str() {
+        "SECONDS" => return Ok(state.shell_start_time.elapsed().as_secs() as i64),
+        "RANDOM" => return Ok(crate::interpreter::next_random(state) as i64),
+        _ => {}
+    }
     let val_str = state
         .env
         .get(&resolved)

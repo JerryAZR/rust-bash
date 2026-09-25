@@ -237,7 +237,7 @@ Sub-interpreters for domain-specific languages:
 
 | Command | Implementation Approach |
 |---------|----------------------|
-| `awk` | Custom interpreter — field splitting, patterns, actions, built-in functions |
+| `awk` | Custom interpreter — field splitting, patterns, actions, built-ins, user functions, strnum, file I/O; BWK-suite-verified against gawk |
 | `sed` | Custom interpreter — address matching, s///, hold space |
 | `jq` | Via `jaq-core` crate — battle-tested jq implementation in Rust |
 

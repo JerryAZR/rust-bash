@@ -153,3 +153,24 @@ fn random_arithmetic_respects_reseed_in_subshell() {
     );
     assert!(sub.parse::<u16>().is_ok());
 }
+
+#[test]
+fn random_through_nameref_and_indirection() {
+    // bash: a nameref to RANDOM draws fresh values through arithmetic.
+    let (out, _, code) = run("declare -n r=RANDOM; a=$((r)); b=$((r)); echo $((a != b))");
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "1", "nameref reads must advance the PRNG");
+
+    // ${!n} indirection resolves the dynamic value (mutable path).
+    let (out, _, _) = run("n=RANDOM; echo $(( ${!n} + 0 ))");
+    assert!(out.trim().parse::<u16>().is_ok(), "got {out:?}");
+
+    // A plain value that NAMES RANDOM recurses into the dynamic read
+    // (bash evaluates a variable's string value as an expression).
+    let (out, _, _) = run("n=RANDOM; a=$((n)); b=$((n)); echo $((a != b))");
+    assert_eq!(out.trim(), "1");
+
+    // set -u: RANDOM is always-set, including through a nameref.
+    let (_, err, code) = run("set -u; declare -n r=RANDOM; echo $((r))");
+    assert_eq!(code, 0, "{err}");
+}

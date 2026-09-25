@@ -119,6 +119,19 @@ helper scripts that referenced cases need at runtime.
 
 **Runner**: `tests/oils_spec.rs` uses `datatest-stable` to discover all `.test.sh` files and generate one `#[test]` per file. Within each file, all cases run sequentially with per-file summaries.
 
+### BWK awk conformance
+
+`tests/awk_conformance.rs` runs the vendored BWK awk test suite
+(`tests/fixtures/awk_conformance/bwk/`, p.* + t.* programs, permissive
+license) against expectations recorded from gawk 5.0 by
+`scripts/record_bwk_conformance.sh` (dev-time only; requires gawk, records
+under `LC_ALL=C`). Execution is fully in-process with VFS-staged inputs, so
+results are platform-independent. Comparison is stdout + exit code, plus a
+stderr policy: where gawk was silent we must be silent (no spurious
+warnings); error-message wording is free (tracked in the divergence
+registry when relevant). The skip list is reverse-asserted — a skip that
+starts passing fails the suite, forcing promotion.
+
 **Format**: Oils tests use a plain-text format different from the TOML format used by comparison and spec tests:
 
 ```bash
@@ -227,6 +240,8 @@ rust-bash/
     │   │   ├── sed/
     │   │   ├── awk/
     │   │   └── jq/
+    │   ├── awk_conformance/   # BWK awk test suite (permissive license),
+    │   │   └── bwk/           #   expectations recorded from gawk 5.0
     │   └── oils/              # Upstream Oils bash conformance tests (Apache 2.0)
     │       ├── LICENSE
     │       ├── pass-list.txt

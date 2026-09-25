@@ -1810,7 +1810,7 @@ fn resolve_parameter_maybe_mut(
                     .unwrap_or_default());
             }
         }
-        Ok(resolve_indirect_value(&val, state))
+        Ok(resolve_indirect_value_mut(&val, state))
     } else {
         Ok(val)
     }
@@ -3227,6 +3227,11 @@ fn resolve_parameter(parameter: &Parameter, state: &InterpreterState, indirect: 
 
 /// Given a string that is the value of `${!ref}`, resolve it as a variable reference.
 /// Handles: simple names, `arr[idx]`, positional params (`1`, `2`), and special (`@`, `*`).
+///
+/// Immutable twin of [`resolve_indirect_value_mut`]: pure dynamic names
+/// (SECONDS) resolve; `RANDOM` cannot advance the PRNG without `&mut`
+/// state and reads as empty here. Only used by the immutable expand path
+/// (tests); the live interpreter always uses the mutable twin.
 fn resolve_indirect_value(target: &str, state: &InterpreterState) -> String {
     if target.is_empty() {
         return String::new();
@@ -3285,6 +3290,17 @@ fn resolve_indirect_value(target: &str, state: &InterpreterState) -> String {
             }
             get_var(state, target).unwrap_or_default()
         }
+    }
+}
+
+/// Mutable indirection resolution: the live path. Adds the dynamic
+/// variables that immutable resolution cannot produce ($RANDOM advances
+/// the PRNG — bash gives a fresh value through indirection).
+fn resolve_indirect_value_mut(target: &str, state: &mut InterpreterState) -> String {
+    match target {
+        "RANDOM" => crate::interpreter::next_random(state).to_string(),
+        "SECONDS" => state.shell_start_time.elapsed().as_secs().to_string(),
+        _ => resolve_indirect_value(target, state),
     }
 }
 

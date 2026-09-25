@@ -114,7 +114,18 @@ Core commands: `s///`, `d`, `p`, `q`, `a`, `i`, `c`. Address types: line number,
 
 ### M2.3 — awk ✅
 
-Field splitting, patterns, actions, BEGIN/END, built-in variables (NR, NF, FS), control flow, built-in functions, associative arrays. Start with 80/20 subset.
+Field splitting, patterns, actions, BEGIN/END, built-in variables (NR, NF,
+FS), control flow, built-in functions, associative arrays. Well past the
+80/20 subset: user-defined functions (by-value scalars, by-reference arrays,
+`return`, recursion depth cap), POSIX strnum tracking (fields/getline/ARGV/
+ENVIRON carry the numeric-string attribute), file I/O (`print >`/`>>` with
+truncate-once semantics, all `getline` forms including `$n`/`arr[i]`
+lvalues, `close()`), gawk-compatible fatal errors (exit 2, END skipped).
+Conformance-verified against gawk 5.0 via the vendored BWK test suite
+(214/225 passing; skips are pipes-by-policy and implementation-defined
+behaviors). Pipe forms deliberately unimplemented (policy decision).
+Deferred: assignment operands (`x=1` file args), lazy file opening (files
+are opened after BEGIN in real awk; we pre-collect inputs).
 
 ### M2.4 — jq ✅
 

@@ -190,7 +190,8 @@ impl RustBash {
 
     /// Write a file to the virtual filesystem, creating parent directories.
     pub fn write_file(&self, path: &str, content: &[u8]) -> Result<(), crate::VfsError> {
-        let p = Path::new(path);
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        let p = Path::new(translated.as_ref());
         if let Some(parent) = p.parent()
             && parent != Path::new("/")
         {
@@ -201,12 +202,14 @@ impl RustBash {
 
     /// Read a file from the virtual filesystem.
     pub fn read_file(&self, path: &str) -> Result<Vec<u8>, crate::VfsError> {
-        self.state.fs.read_file(Path::new(path))
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        self.state.fs.read_file(Path::new(translated.as_ref()))
     }
 
     /// Create a directory in the virtual filesystem.
     pub fn mkdir(&self, path: &str, recursive: bool) -> Result<(), crate::VfsError> {
-        let p = Path::new(path);
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        let p = Path::new(translated.as_ref());
         if recursive {
             self.state.fs.mkdir_p(p)
         } else {
@@ -216,27 +219,32 @@ impl RustBash {
 
     /// Check if a path exists in the virtual filesystem.
     pub fn exists(&self, path: &str) -> bool {
-        self.state.fs.exists(Path::new(path))
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        self.state.fs.exists(Path::new(translated.as_ref()))
     }
 
     /// List entries in a directory.
     pub fn readdir(&self, path: &str) -> Result<Vec<crate::vfs::DirEntry>, crate::VfsError> {
-        self.state.fs.readdir(Path::new(path))
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        self.state.fs.readdir(Path::new(translated.as_ref()))
     }
 
     /// Get metadata for a path.
     pub fn stat(&self, path: &str) -> Result<crate::vfs::Metadata, crate::VfsError> {
-        self.state.fs.stat(Path::new(path))
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        self.state.fs.stat(Path::new(translated.as_ref()))
     }
 
     /// Remove a file from the virtual filesystem.
     pub fn remove_file(&self, path: &str) -> Result<(), crate::VfsError> {
-        self.state.fs.remove_file(Path::new(path))
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        self.state.fs.remove_file(Path::new(translated.as_ref()))
     }
 
     /// Remove a directory (and contents if recursive) from the virtual filesystem.
     pub fn remove_dir_all(&self, path: &str) -> Result<(), crate::VfsError> {
-        self.state.fs.remove_dir_all(Path::new(path))
+        let translated = crate::vfs::translate_windows_drive_path(path);
+        self.state.fs.remove_dir_all(Path::new(translated.as_ref()))
     }
 
     /// Register a custom command.

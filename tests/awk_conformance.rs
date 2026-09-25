@@ -116,11 +116,16 @@ fn bwk_conformance() {
             }
         };
 
-        let (actual_out, actual_rc, exec_err) = match &result {
-            Ok(r) => (r.stdout.clone(), r.exit_code, None),
-            Err(e) => (String::new(), -1, Some(e.to_string())), // limit trips / errors
+        let (actual_out, actual_err, actual_rc, exec_err) = match &result {
+            Ok(r) => (r.stdout.clone(), r.stderr.clone(), r.exit_code, None),
+            Err(e) => (String::new(), String::new(), -1, Some(e.to_string())), // limit trips / errors
         };
-        let matches = actual_out == case.stdout && actual_rc == case.exit_code;
+        // Stderr policy: where the reference run was silent, we must be
+        // silent too (catches spurious warnings); where gawk emitted an
+        // error message, exact wording is a tracked-divergence concern,
+        // not a conformance failure.
+        let stderr_ok = !case.stderr.is_empty() || actual_err.is_empty();
+        let matches = actual_out == case.stdout && actual_rc == case.exit_code && stderr_ok;
 
         if let Some(reason) = skip.get(case.name.as_str()) {
             if matches {
