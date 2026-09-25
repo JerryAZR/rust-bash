@@ -122,11 +122,17 @@ File I/O is implemented: `print`/`printf` `>` (truncate-once) and `>>` through t
 | `%g` keeps trailing zeros in scientific (`1.23450e-05`) *(suspected)* | C/gawk strip to `1.2345e-05` | `tests/awk_cov.rs` |
 | Non-finite floats print libc-style `inf`/`INF` | gawk prints `+inf` | `tests/awk_cov.rs::awk_non_finite_float_formats` |
 | Undefined function call `foo(1)` parses as concatenation of the variable `foo` with `(1)` (no spacing info in tokens to enforce gawk's no-space rule) | gawk: parse-time error for undefined functions | `tests/awk_cov.rs::undefined_function_name_parses_as_concatenation` |
-| User function named like a builtin (`function length(x)`) shadows the builtin | gawk: parse-time rejection | `tests/awk_cov.rs` |
-| Space between a user-function name and its call paren accepted (`f (1)`) | gawk: rejected (concat ambiguity) | `tests/awk_cov.rs` |
+| User function named like a builtin (`function length(x)`) shadows the builtin | gawk: parse-time rejection | `tests/awk_cov.rs::builtin_shadow_and_space_before_paren_pins` |
+| Space between a user-function name and its call paren accepted (`f (1)`) | gawk: rejected (concat ambiguity) | `tests/awk_cov.rs::builtin_shadow_and_space_before_paren_pins` |
 | Field assignments lose no strnum distinction: `$1 = "5"` reads back as a strnum (numeric comparison) since fields carry no per-field attribute | gawk: the assigned string constant is NOT a strnum (string comparison) | none (too deep to pin cheaply; fields are stored as plain strings) |
 | Deferred-write blind spot: `print > "/f"` then `getline < "/f"` in one run reads the stale pre-run content (writes are applied after the run finishes) | gawk sees the just-written record | `tests/awk_cov.rs::print_then_getline_same_file_reads_stale_content` |
 | Assignment operands (`awk '{print x}' x=1 /f`) misdiagnosed as missing files (exit 2) | gawk applies the assignment when reached in ARGV order | `tests/awk_cov.rs::assignment_operand_misdiagnosed_as_missing_file` |
+| Input files are pre-collected before BEGIN: a missing file aborts before any processing, and ARGV/ARGC mutation in BEGIN does not drive the file list | gawk opens files lazily in ARGV order (BEGIN runs first; earlier files print before the error) | `tests/awk_cov.rs::assignment_operand_misdiagnosed_as_missing_file` (same family) |
+| awk parse/semantic errors exit 2 uniformly | gawk exits 1 for parse-time errors | `tests/awk_cov.rs::parse_errors_match_gawk_failures` |
+| RS change mid-stream has no effect (records are pre-split per file) | gawk re-splits remaining input | none |
+| `CONVFMT`/`OFMT` are silently unused (number formatting always %.6g-ish); BWK t.ofmt passes vacuously (integer data) | gawk formats via OFMT (print) / CONVFMT (string coercion) | none |
+| `fflush()` is a silent no-op success; redirect writes stay buffered to end-of-run | gawk flushes immediately | `tests/awk_cov.rs` (deferred-write row above) |
+| Duplicate `-` stdin operands each read the full stdin | gawk: second `-` is at EOF | none |
 
 ## 6. sed / diff / compression
 
@@ -158,8 +164,9 @@ deleted lower children inside `ensure_dirs`. `symlink`/`hardlink` EEXIST
 | MountableFs: cross-mount absolute symlinks are stored verbatim in the link's backend and can never resolve on read (`ln -s /real.txt /project/link` where `/real.txt` lives on another mount → reads fail NotFound) | merged view resolves the target | `tests/vfs_cov.rs::mountable_cross_mount_absolute_symlink_never_resolves` |
 | MountableFs: `mkdir` at a mount point returns InvalidPath (lookup strips the prefix to the backend root) | AlreadyExists (the mount point exists) | `tests/vfs_cov.rs::mountable_mkdir_at_mount_point_returns_invalid_path` |
 | `InMemoryFs::hardlink` / overlay hardlink copy content: later appends through one name are invisible through the other, while `file_id` stays shared | real hard links share content | `tests/vfs_cov.rs::memory_hardlink_copies_content_and_diverges_after_append`, `src/vfs/overlay_tests.rs::hardlink_from_lower` |
-| `write_file` through a mid-path LOWER symlink attaches at the literal path (upper dir shadows the link) instead of writing the target; `append_file` gets it right | POSIX: writes land at the link target | none (pre-existing; `src/vfs/overlay.rs::write_file` — needs a whiteout-tolerant lower-aware resolve) |
 | awk: frame-local array names leak into the global array map after the function returns (arrays created via unaliased params/locals are not cleaned up at frame pop) | gawk: local arrays die with the frame | none (pre-existing scoping gap; `call_user_function`)
+| `..` is resolved lexically before symlink resolution (`/a/l/../f` with l -> /b gives /a/f) | the kernel resolves after the link (gives /f) | none (whole-VFS lexical-normalization design choice) |
+| `diff()` writes carry no mtime, and `sync()` compares content only: mtime-only (touch/utimes) and mode-only (chmod) changes are invisible to the diff consumer and silently dropped by sync | a full-fidelity diff would report metadata changes | none (mode is advisory on Windows; contract documented in ch.5) |
 | `InMemoryFs::mkdir_p` errors NotADirectory through an existing symlink component | bash follows the symlink | `tests/vfs_cov.rs::memory_mkdir_p_through_symlink_component_errors` |
 
 ## 8. Misc

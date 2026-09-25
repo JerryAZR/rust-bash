@@ -1465,3 +1465,103 @@ fn unassigned_params_are_untyped_not_scalar() {
     let r = run(r#"awk 'function f(a,   tmp){split("x y", tmp); print tmp[2]} BEGIN{f(5)}'"#);
     assert_eq!(r.stdout, "y\n");
 }
+
+// ---------------------------------------------------------------------------
+// Review-4 pins: for-step signals, parse errors, strnum truthiness, END fatals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exit_and_next_in_for_step_clause_act() {
+    // gawk: exit in the step clause exits immediately with its code.
+    let r = run(r#"awk 'BEGIN{for(i=0;i<3;exit 5); print i}'; echo "code=$?""#);
+    assert_eq!(r.stdout, "code=5\n");
+    // next in the step clause skips the record (gawk).
+    let r = run(r#"printf 'a\nb\n' | awk '{for(i=0;i<1;next); print "never"}'"#);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn parse_errors_match_gawk_failures() {
+    // gawk rejects all four at parse time (exit 1 there; we use our
+    // uniform parse-error exit 2 — registered divergence).
+    // Duplicate function definition.
+    let r = run(r#"awk 'function f(){return 1} function f(){return 2} BEGIN{print f()}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert!(r.stderr.contains("previously defined"), "{:?}", r.stderr);
+    // BEGIN/END without an action.
+    let r = run(r#"awk 'BEGIN'"#);
+    assert_eq!(r.exit_code, 2);
+    assert!(r.stderr.contains("action"), "{:?}", r.stderr);
+    // Function name used as a variable or an array.
+    let r = run(r#"awk 'function f(){return 1} BEGIN{f=5; print f}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert!(r.stderr.contains("used as a variable"), "{:?}", r.stderr);
+    let r = run(r#"awk 'function f(){return 1} BEGIN{f[1]=5}'"#);
+    assert_eq!(r.exit_code, 2);
+    assert!(r.stderr.contains("used as an array"), "{:?}", r.stderr);
+}
+
+#[test]
+fn extra_call_args_warn_and_evaluate() {
+    // gawk: warning (exit stays 0); the extra args ARE evaluated.
+    let r = run(r#"awk 'function f(a){return a} BEGIN{print f(1,2)}'"#);
+    assert_eq!(r.stdout, "1\n");
+    assert_eq!(r.exit_code, 0);
+    assert!(r.stderr.contains("more arguments"), "{:?}", r.stderr);
+    // Side effects of extra args happen.
+    let r = run(r#"awk 'function f(a){return a} BEGIN{f(1, x=7); print x}'"#);
+    assert_eq!(r.stdout, "7\n");
+}
+
+#[test]
+fn system_fails_visibly() {
+    // system() is awk's execution backdoor — same policy as pipes:
+    // visible error + exit 1, never silent.
+    let r = run(r#"awk 'BEGIN{rc=system("echo hi"); print "rc="rc}'"#);
+    assert_eq!(r.exit_code, 1);
+    assert!(
+        r.stderr.contains("system() is not supported"),
+        "{:?}",
+        r.stderr
+    );
+}
+
+#[test]
+fn numeric_strnum_truthiness() {
+    // A field containing "0" is FALSE (numeric strnum rule); "0.0" too;
+    // a plain string constant "0" is TRUE (no strnum attribute).
+    let r = run(r#"printf '0\n1\n0.0\n' | awk '{if ($1) print "T"; else print "F"}'"#);
+    assert_eq!(r.stdout, "F\nT\nF\n");
+    let r = run(r#"awk 'BEGIN{if ("0") print "T"; else print "F"}'"#);
+    assert_eq!(r.stdout, "T\n");
+}
+
+#[test]
+fn fatal_in_end_aborts_remaining_end_rules() {
+    let r = run(r#"awk 'BEGIN{a[1]=1} END{y=a} END{print "NO"}' </dev/null"#);
+    assert_eq!(r.exit_code, 2);
+    assert_eq!(r.stdout, "");
+}
+
+#[test]
+fn environ_strnum_discriminating() {
+    // The discriminating shape: 10 >= 2 is numerically true but lexically
+    // false ("1" < "2") — a plain-Str ENVIRON would print 0.
+    let r = run(r#"export N=10; awk 'BEGIN{print (ENVIRON["N"] >= 2)}'"#);
+    assert_eq!(r.stdout, "1\n");
+    // ARGV elements are strnum too, but a numeric-looking CLI arg is always
+    // opened as a FILE after BEGIN (gawk: same lazy-open error), so ARGV
+    // strnum discrimination is not observable through the CLI shape.
+}
+
+#[test]
+fn builtin_shadow_and_space_before_paren_pins() {
+    // Registered divergence: a user function named like a builtin shadows it
+    // (gawk: parse-time rejection). Pin the current behavior honestly.
+    let r = run(r#"awk 'function length(x){return 99} BEGIN{print length("abc")}'"#);
+    assert_eq!(r.stdout, "99\n");
+    // Registered divergence: space between a user-function name and its call
+    // paren is accepted (gawk rejects it for the concat ambiguity).
+    let r = run(r#"awk 'function f(x){return x+1} BEGIN{print f (1)}'"#);
+    assert_eq!(r.stdout, "2\n");
+}

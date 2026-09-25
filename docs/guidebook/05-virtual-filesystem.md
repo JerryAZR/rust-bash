@@ -126,6 +126,10 @@ into the lower layer.
 
 **Write operations**: Always go to the upper tree. The `lower` directory is never modified.
 
+**diff/sync fidelity**: `OverlayWrite` carries content + mode but no mtime;
+`sync()` compares content only. Metadata-only changes (`touch`, `chmod`)
+are invisible to the diff consumer — registered divergence (ch. 11).
+
 **Subshell isolation** (`deep_clone`): Clones the upper tree. The lower directory reference is shared (it's read-only anyway). This applies to subshells `( ... )` and command substitutions `$( ... )`. **Exec-callback children** (`find -exec`, `xargs`) are the deliberate exception: in bash they are subprocesses, not subshells, so they share the parent's filesystem — their writes persist and appear in `diff()` (staged in the overlay for host review, like any other sandboxed write).
 
 **Use case**: Let an agent read a real project's files while sandboxing all writes. Perfect for code analysis tools, linters, or build system simulations.

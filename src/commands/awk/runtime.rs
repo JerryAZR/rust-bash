@@ -964,7 +964,13 @@ impl<'a> AwkRuntime<'a> {
                         Signal::None => {}
                     }
                     if let Some(step) = step {
-                        self.execute_statement(step);
+                        // gawk: `exit`/`next` in the step clause act
+                        // immediately (exit 5 exits 5; next skips the
+                        // record) — the signal must not be swallowed.
+                        match self.execute_statement(step) {
+                            Signal::None => {}
+                            other => return other,
+                        }
                     }
                 }
                 Signal::None
@@ -1424,6 +1430,16 @@ impl<'a> AwkRuntime<'a> {
             return AwkValue::Uninitialized;
         }
         let mut frame = Frame::default();
+        // gawk: extra arguments are a WARNING (not fatal) — they are still
+        // evaluated for side effects, then ignored.
+        if args.len() > params.len() {
+            self.stderr.push_str(&format!(
+                "awk: function `{name}' called with more arguments than declared\n"
+            ));
+            for extra in &args[params.len()..] {
+                self.eval_expr(extra);
+            }
+        }
         for (i, param) in params.iter().enumerate() {
             match args.get(i) {
                 Some(Expr::Var(varname)) => {
@@ -1730,6 +1746,19 @@ impl<'a> AwkRuntime<'a> {
                 };
                 AwkValue::Num(old_seed as f64)
             }
+            // Deliberately unimplemented, policy-consistent with pipe forms:
+            // system() is awk's backdoor to command execution — fail
+            // VISIBLY (stderr + exit 1), never silently succeed.
+            "system" => {
+                self.stderr
+                    .push_str("awk: system() is not supported (no subprocess execution)\n");
+                self.exit_code = 1;
+                AwkValue::Num(1.0)
+            }
+            // fflush: our redirect writes are buffered to end-of-run (the
+            // registered deferred-write divergence), so there is nothing to
+            // flush mid-run; report success like gawk.
+            "fflush" => AwkValue::Num(0.0),
             _ => {
                 self.stderr
                     .push_str(&format!("awk: unknown function '{name}'\n"));

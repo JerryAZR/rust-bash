@@ -1716,3 +1716,105 @@ fn rename_src_through_mid_path_symlink() {
     assert_eq!(ov.read_file(Path::new("/g.txt")).unwrap(), b"f");
     assert!(!ov.exists(Path::new("/real/f.txt")));
 }
+
+// ---------------------------------------------------------------------------
+// Review-4 pins: rename guards, lower-symlink write seam, rm -rf symlink
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rename_dir_into_own_descendant_is_rejected() {
+    // POSIX rename(2): EINVAL ("cannot move to a subdirectory of itself").
+    // Without the guard the recursive copy never terminates (stack
+    // overflow) — mv /a /a/b must error, not crash.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir_p(Path::new("/a/b")).unwrap();
+    ov.write_file(Path::new("/a/f.txt"), b"f").unwrap();
+    let err = ov.rename(Path::new("/a"), Path::new("/a/b/a")).unwrap_err();
+    assert!(matches!(err, VfsError::InvalidPath(_)), "got {err:?}");
+    // Source untouched.
+    assert_eq!(ov.read_file(Path::new("/a/f.txt")).unwrap(), b"f");
+}
+
+#[test]
+fn rename_dir_onto_nonempty_dir_is_enotempty() {
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.mkdir_p(Path::new("/src")).unwrap();
+    ov.write_file(Path::new("/src/new.txt"), b"n").unwrap();
+    // /data exists in the lower with config.toml inside.
+    let err = ov
+        .rename(Path::new("/src"), Path::new("/data"))
+        .unwrap_err();
+    assert!(matches!(err, VfsError::DirectoryNotEmpty(_)), "got {err:?}");
+}
+
+#[test]
+fn rm_rf_of_symlink_unlinks_the_link() {
+    // GNU rm -rf of a symlink (even to a directory) removes the LINK.
+    let tmp = setup_lower();
+    let ov = make_overlay(tmp.path());
+    ov.symlink(Path::new("/data"), Path::new("/lk")).unwrap();
+    ov.remove_dir_all(Path::new("/lk")).unwrap();
+    assert!(!ov.exists(Path::new("/lk")));
+    assert!(ov.exists(Path::new("/data/config.toml")));
+}
+
+#[test]
+fn write_through_live_lower_symlink_writes_target() {
+    // POSIX open() follows a live lower symlink: the write lands on the
+    // target (copied up), the link stays a link, and the mode is the
+    // target's (not the symlink's 0o777).
+    let tmp = setup_lower();
+    std::fs::write(tmp.path().join("target.txt"), b"old").unwrap();
+    let link = tmp.path().join("lk");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("target.txt", &link).unwrap();
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file("target.txt", &link).is_err() {
+            eprintln!("skipping: OS denied symlink creation");
+            return;
+        }
+    }
+    let ov = make_overlay(tmp.path());
+    ov.write_file(Path::new("/lk"), b"new").unwrap();
+    assert_eq!(ov.read_file(Path::new("/target.txt")).unwrap(), b"new");
+    assert_eq!(
+        ov.readlink(Path::new("/lk")).unwrap(),
+        Path::new("target.txt")
+    );
+    let w = ov
+        .diff()
+        .writes
+        .iter()
+        .find(|w| w.path == Path::new("/target.txt"))
+        .expect("diff reports the write at the target")
+        .clone();
+    assert_eq!(
+        w.mode & 0o777,
+        0o644 & (w.mode),
+        "mode from target, not link"
+    );
+}
+
+#[test]
+fn mkdir_p_through_lower_symlinked_dir() {
+    // POSIX mkdir -p follows mid-path lower symlinks.
+    let tmp = setup_lower();
+    std::fs::create_dir_all(tmp.path().join("real")).unwrap();
+    let link = tmp.path().join("ldir");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("real", &link).unwrap();
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir("real", &link).is_err() {
+            eprintln!("skipping: OS denied symlink creation");
+            return;
+        }
+    }
+    let ov = make_overlay(tmp.path());
+    ov.mkdir_p(Path::new("/ldir/x/y")).unwrap();
+    assert!(ov.tree_contains(Path::new("/real/x/y")));
+    assert!(!ov.tree_contains(Path::new("/ldir/x")));
+}

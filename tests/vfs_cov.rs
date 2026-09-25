@@ -1338,23 +1338,28 @@ mod overlay {
         let lk = entries.iter().find(|e| e.name == "lk").unwrap();
         assert_eq!(lk.node_type, NodeType::Symlink);
 
-        // sync(): an upper shadow identical to the disk symlink is dropped,
-        // a differing one stays pending.
-        o.symlink(p("top.txt"), p("/lk")).unwrap();
+        // sync(): an upper symlink shadow that the disk has since gained
+        // IDENTICALLY (host applied the diff, or created it out-of-band) is
+        // dropped; a differing one stays pending. (An upper symlink can no
+        // longer be created over an existing lower entry — symlink()
+        // EEXIST-checks the merged view since the tree rewrite — so the
+        // identical-shadow state is constructed via out-of-band disk change.)
+        o.symlink(p("top.txt"), p("/lk2")).unwrap();
+        assert!(try_disk_symlink(p("top.txt"), &tmp.path().join("lk2")));
         o.sync();
         let d = o.diff();
         assert!(
-            !d.writes.iter().any(|w| w.path == p("/lk")),
+            !d.writes.iter().any(|w| w.path == p("/lk2")),
             "identical symlink shadow should be dropped: {:?}",
             d.writes
         );
-        // (the identical shadow was dropped by sync, so the link can be
-        // recreated) — a differing target stays pending.
-        o.symlink(p("/sub/leaf.rs"), p("/lk")).unwrap();
+        // A differing target stays pending.
+        o.symlink(p("/sub/leaf.rs"), p("/lk3")).unwrap();
+        assert!(try_disk_symlink(p("top.txt"), &tmp.path().join("lk3")));
         o.sync();
         let d = o.diff();
         assert!(
-            d.writes.iter().any(|w| w.path == p("/lk")),
+            d.writes.iter().any(|w| w.path == p("/lk3")),
             "differing symlink shadow should stay pending: {:?}",
             d.writes
         );

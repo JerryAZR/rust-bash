@@ -424,13 +424,14 @@ impl OverlayFs {
             })
     }
 
-    /// Resolve a write target through upper-layer symlinks, POSIX style:
-    /// symlinks in every existing component are followed (including the
-    /// final component when `follow_final`), chained links are re-scanned,
-    /// and `..` in relative targets is resolved lexically so the result is
-    /// always a normalized absolute path. Whiteouted or missing components
-    /// pass through literally (nothing to follow). Callers MUST attach at
-    /// the returned path, not the original.
+    /// Resolve a write target through symlinks, POSIX style: symlinks in
+    /// every existing component are followed — upper-tree links and links
+    /// living on the lower layer alike (including the final component when
+    /// `follow_final`), chained links are re-scanned, and `..` in relative
+    /// targets is resolved lexically so the result is always a normalized
+    /// absolute path. Whiteouted components pass through literally (they
+    /// are left for resurrection), as do missing non-symlink components.
+    /// Callers MUST attach at the returned path, not the original.
     fn resolve_write_target(&self, path: &Path, follow_final: bool) -> Result<PathBuf, VfsError> {
         let norm = normalize(path)?;
         let mut segs: Vec<String> = path_components(&norm)
@@ -450,11 +451,35 @@ impl OverlayFs {
                     .collect::<Vec<_>>()
                     .join("/")
             );
-            let target = {
+            // Upper symlink? Otherwise, if the upper has NO node here, the
+            // lower may have a symlink (writes must land at the real target
+            // — a shadow dir over a lower symlink would split the view).
+            // Whiteouts and content pass through literally.
+            enum Comp {
+                Link(PathBuf),
+                Plain,
+                LowerLink,
+            }
+            let comp = {
                 let tree = self.tree.read();
                 match tree.descend(Path::new(&candidate)) {
-                    Descend::Found(UpperNode::Symlink { target, .. }) => Some(target.clone()),
-                    _ => None,
+                    Descend::Found(UpperNode::Symlink { target, .. }) => Comp::Link(target.clone()),
+                    Descend::Missing => Comp::LowerLink,
+                    _ => Comp::Plain,
+                }
+            };
+            let target = match comp {
+                Comp::Link(t) => Some(t),
+                Comp::Plain => None,
+                Comp::LowerLink => {
+                    let is_lower_link = self
+                        .lstat_lower(Path::new(&candidate))
+                        .is_ok_and(|m| m.node_type == NodeType::Symlink);
+                    if is_lower_link {
+                        self.readlink_lower(Path::new(&candidate)).ok()
+                    } else {
+                        None
+                    }
                 }
             };
             match target {
@@ -1087,6 +1112,18 @@ impl VirtualFs for OverlayFs {
 
         // Check that it exists
         let m = self.lstat_overlay(&norm, path)?;
+        if m.node_type == NodeType::Symlink {
+            // GNU rm -rf of a symlink (even to a directory) unlinks the
+            // LINK — it does not recurse into the target.
+            if self.lower_exists(&norm) {
+                self.tree
+                    .write()
+                    .put_whiteout(&norm, &|p| self.lower_mode_of(p));
+            } else {
+                self.tree.write().detach(&norm);
+            }
+            return Ok(());
+        }
         if m.node_type != NodeType::Directory {
             return Err(VfsError::NotADirectory(path.to_path_buf()));
         }
@@ -1326,9 +1363,21 @@ impl VirtualFs for OverlayFs {
             return Err(VfsError::NotFound(src.to_path_buf()));
         }
 
-        // Resolve the destination's parent through upper symlinks (the
+        // Resolve the destination's parent through symlinks (the
         // final name is NOT followed: rename replaces a dst symlink).
         let norm_dst = self.resolve_write_target(&norm_dst, false)?;
+        // POSIX rename(2) EINVAL: cannot move a directory into its own
+        // subtree (the recursive copy below would never terminate).
+        if norm_dst.starts_with(&norm_src)
+            && self
+                .lstat_overlay(&norm_src, src)
+                .is_ok_and(|m| m.node_type == NodeType::Directory)
+        {
+            return Err(VfsError::InvalidPath(format!(
+                "cannot move a directory into itself: {}",
+                src.display()
+            )));
+        }
         let meta = self.lstat_overlay(&norm_src, src)?;
         match meta.node_type {
             NodeType::File => {
@@ -1376,6 +1425,24 @@ impl VirtualFs for OverlayFs {
                 )?;
             }
             NodeType::Directory => {
+                // POSIX rename(2): replacing an existing directory requires
+                // it to be EMPTY (ENOTEMPTY otherwise). An all-whiteout or
+                // merged-empty dst counts as empty.
+                if !self.is_whiteout(&norm_dst)
+                    && (self.upper_has_entry(&norm_dst) || self.lower_exists(&norm_dst))
+                {
+                    let dst_entries = self.readdir_merged(&norm_dst)?;
+                    if !dst_entries.is_empty() {
+                        return Err(VfsError::DirectoryNotEmpty(dst.to_path_buf()));
+                    }
+                    // Whiteout the dst first so its lower children cannot
+                    // resurface through the incoming content.
+                    if self.lower_exists(&norm_dst) {
+                        self.tree
+                            .write()
+                            .put_whiteout(&norm_dst, &|p| self.lower_mode_of(p));
+                    }
+                }
                 // ensure_dirs resurrects a whiteouted dst (re-hiding deleted
                 // lower children); recursive copies land inside it.
                 self.tree

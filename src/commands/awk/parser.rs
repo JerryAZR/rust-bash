@@ -239,7 +239,10 @@ impl Parser {
         // recognized regardless of definition order.
         for w in self.tokens.windows(2) {
             if let (Token::Function, Token::Ident(name)) = (&w[0], &w[1]) {
-                self.known_functions.insert(name.clone());
+                // gawk: redefinition is a parse-time error (exit 1).
+                if !self.known_functions.insert(name.clone()) {
+                    return Err(format!("function name `{name}' previously defined"));
+                }
             }
         }
         let mut rules = Vec::new();
@@ -262,6 +265,7 @@ impl Parser {
             Token::Ident(n) => n,
             t => return Err(format!("expected function name, got {t}")),
         };
+
         self.expect(&Token::LParen)?;
         let mut params = Vec::new();
         if !matches!(self.peek(), Token::RParen) {
@@ -334,6 +338,10 @@ impl Parser {
         // at_eof check prevents parse_rule from being called at all).
         if pattern.is_none() && action.is_none() {
             return Err(format!("expected pattern or action, got {}", self.peek()));
+        }
+        // gawk: BEGIN/END must have an action (exit 1).
+        if matches!(pattern, Some(AwkPattern::Begin | AwkPattern::End)) && action.is_none() {
+            return Err("BEGIN/END blocks must have an action part".to_string());
         }
         Ok(AwkRule { pattern, action })
     }
@@ -1198,6 +1206,11 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                     Ok(Expr::FuncCall { name, args })
                 } else if matches!(self.peek(), Token::LBracket) {
+                    // gawk: using a function name as an array is a
+                    // parse-time error (exit 1).
+                    if self.known_functions.contains(&name) {
+                        return Err(format!("function `{name}' used as an array"));
+                    }
                     self.advance();
                     let mut indices = vec![self.parse_expr()?];
                     while matches!(self.peek(), Token::Comma) {
@@ -1214,6 +1227,11 @@ impl Parser {
                         args: Vec::new(),
                     })
                 } else {
+                    // gawk: using a function name as a variable is a
+                    // parse-time error (exit 1).
+                    if self.known_functions.contains(&name) {
+                        return Err(format!("function `{name}' used as a variable"));
+                    }
                     Ok(Expr::Var(name))
                 }
             }

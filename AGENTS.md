@@ -31,3 +31,10 @@ Agents MUST follow these steps for every task:
 - When choosing between design approaches, present pros/cons and ask the user.
 - Whenever adding any dependency crate, make sure we are using the latest version of it.
 - NEVER commit any changes unless explcitly asked for by the user.
+
+## Process rules (learned from review-round postmortems)
+
+1. **Cross-compile gate**: any change touching `#[cfg(...)]` code must also pass `cargo check --target x86_64-unknown-linux-gnu` (or the host is Linux: the Windows target). A cfg-gated symbol must have a same-signature twin for the other side, or every call site gated — verified by compiling, not by reading.
+2. **Seam matrix rule**: a new path/mutation seam gets its behavior matrix enumerated in the design BEFORE implementation (e.g. {upper, lower, whiteout, missing, symlink} × {final, mid-path} × {every op that crosses the seam}), and the tests ARE the matrix. Happy-path-only seam tests are a known regression source.
+3. **Pin-conflict rule**: when a behavior change breaks an existing pin, probe the reference (bash/gawk/POSIX) and make an explicit keep/change decision recorded in the commit message. NEVER weaken or delete an assertion just to make the suite green — a conflicting pin is a question, not an obstacle.
+4. **Negative-space probing**: every "X now errors/fatals" change ships with reference-tool probes of the "X must stay legal" neighbors (e.g. unassigned awk params are untyped — array use must NOT fatal). Test the boundaries of the new error, not just its presence.
