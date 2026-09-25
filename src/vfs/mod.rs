@@ -221,7 +221,11 @@ pub(crate) fn unix_mode_from_metadata(meta: &std::fs::Metadata) -> u32 {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode()
+        // Permission bits (+setuid/setgid/sticky) only: the VFS mode
+        // contract is chmod-shaped. Raw st_mode carries file-TYPE bits
+        // (0o170000) which would leak into overlay writes, chmod results,
+        // and diff consumers; NodeType carries the kind separately.
+        meta.permissions().mode() & 0o7777
     }
     #[cfg(windows)]
     {
